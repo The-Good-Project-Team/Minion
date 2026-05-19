@@ -5,11 +5,13 @@ import hashlib
 import json
 import secrets
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import sqlite3
 
 from store import (
+    ambient_events_since,
     get_chunk,
     identity_claim_get,
     identity_claim_insert,
@@ -244,6 +246,23 @@ def build_identity_summary(
             if cl["run_at"] != seen_run:
                 break
             lines.append(f"- **{cl['label']}**: {cl['summary']}")
+
+    since_24h = time.time() - 86400.0
+    ambient = ambient_events_since(conn, since_ts=since_24h, limit=120)
+    if ambient:
+        lines.append("### Recent attention (24h)")
+        apps = Counter(
+            str((e.get("payload") or {}).get("app_name") or "?") for e in ambient
+        )
+        if apps:
+            top = ", ".join(f"{a} ({c})" for a, c in apps.most_common(6))
+            lines.append(f"- Apps: {top}")
+        for e in ambient[:5]:
+            p = e.get("payload") or {}
+            title = p.get("window_title") or p.get("app_name") or "?"
+            ts = e.get("captured_at")
+            eid = e.get("event_id", "")
+            lines.append(f"- [{ts}] {title} _(event `{eid}`)_")
 
     ht = int(max(0, min(history_tail, 500)))
     if ht > 0:

@@ -53,11 +53,6 @@ desktop/blob-report/
 telemetry-collector/node_modules/
 telemetry-collector/.wrangler/
 
-# Megaminion desktop shell (Tauri)
-megaminion-desktop/node_modules/
-megaminion-netlify/node_modules/
-megaminion-desktop/src-tauri/target/
-
 # Cursor hooks (session-local queue + verification log)
 .cursor/hooks/.verify-queue
 .cursor/hooks/verify-last.log

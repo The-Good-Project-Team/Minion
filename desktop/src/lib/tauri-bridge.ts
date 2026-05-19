@@ -48,7 +48,7 @@ export async function invoke(cmd: string, args?: Record<string, unknown>): Promi
         return {
           platform: "e2e",
           watcher_supported: false,
-          stream_path: "/tmp/minion-e2e-data/screen_context/stream.jsonl",
+          stream_path: "/tmp/minion-e2e-data/ambient/stream.jsonl",
           last_event: null,
         };
       default:

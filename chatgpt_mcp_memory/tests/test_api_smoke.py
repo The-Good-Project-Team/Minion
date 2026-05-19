@@ -46,6 +46,92 @@ def test_status_ready(sidecar) -> None:
     assert body["watcher"]["mode"] == "disabled"
 
 
+def test_maintenance_storage_report(sidecar) -> None:
+    r = sidecar.post("/maintenance/storage-report", {})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert isinstance(body["chunk_storage_tiers"], dict)
+    assert body["chunk_storage_tiers"].get("hot", 0) >= 0
+    assert body["ambient_event_count"] == 0
+    sq = body.get("sqlite")
+    assert sq is not None and isinstance(sq, dict)
+    assert "page_count" in sq and int(sq["page_count"]) >= 1
+    assert "freelist_ratio" in sq
+    assert "Compaction" in body["note"] or "metadata" in body["note"].lower()
+
+
+def test_today_and_wiki_crud(sidecar) -> None:
+    r = sidecar.get("/today")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "working_context" in body
+    assert "work_items" in body
+
+    r2 = sidecar.post(
+        "/wiki/pages",
+        {
+            "page_type": "topic",
+            "title": "Test topic",
+            "body_md": "Body",
+            "status": "active",
+        },
+    )
+    assert r2.status_code == 200, r2.text
+    pid = r2.json()["page_id"]
+
+    r3 = sidecar.post(
+        "/tasks/infer",
+        {"title": "Inferred task", "body_md": "ctx", "origin": "agent"},
+    )
+    assert r3.status_code == 200, r3.text
+    tid = r3.json()["task_id"]
+
+    r4 = sidecar.patch(f"/tasks/{tid}", {"status": "archived"})
+    assert r4.status_code == 200, r4.text
+
+    r5 = sidecar.get("/health")
+    assert r5.status_code == 200
+    assert "sync_sources" in r5.json()
+
+
+def test_maintenance_storage_tier_promote_stale_dry_run(sidecar) -> None:
+    r = sidecar.post(
+        "/maintenance/storage-tier-promote-stale",
+        {"dry_run": True, "min_source_age_days": 30},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["dry_run"] is True
+    assert body["candidates"] == 0
+    assert body["promoted"] == 0
+    assert body["from_tier"] == "hot"
+    assert body["to_tier"] == "warm"
+
+
+def test_maintenance_storage_tier_promote_rejects_invalid_pair(sidecar) -> None:
+    r = sidecar.post(
+        "/maintenance/storage-tier-promote-stale",
+        {"dry_run": True, "from_tier": "warm", "to_tier": "hot"},
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_maintenance_storage_tier_promote_warm_to_cold_dry_run(sidecar) -> None:
+    r = sidecar.post(
+        "/maintenance/storage-tier-promote-stale",
+        {
+            "dry_run": True,
+            "min_source_age_days": 30,
+            "from_tier": "warm",
+            "to_tier": "cold",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["from_tier"] == "warm"
+    assert body["to_tier"] == "cold"
+
+
 def test_reconcile_picks_up_inbox_files(sidecar, staged_note: Path) -> None:
     """POST /reconcile should ingest files already on disk when the watcher is off."""
     dest = sidecar.inbox / "already-here.md"

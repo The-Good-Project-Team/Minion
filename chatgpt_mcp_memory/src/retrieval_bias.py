@@ -1,7 +1,8 @@
 """Bounded re-ranking from identity signals (latest cluster run + active claims).
 
-Sort key = cosine score + small capped boosts; Hit.score stays the real cosine
-so telemetry and UI stay comparable to AGENTS.md invariants.
+Sort key = cosine score + optional storage-tier freshness epsilon + small capped
+identity boosts; Hit.score stays the real cosine so telemetry and UI stay
+comparable to AGENTS.md invariants.
 """
 from __future__ import annotations
 
@@ -37,6 +38,16 @@ def rrf_fuse(
         kept.setdefault(cid, h)
     fused = sorted(kept.values(), key=lambda h: scores[h.chunk_id], reverse=True)  # type: ignore[attr-defined]
     return fused
+
+
+def _storage_tier_sort_epsilon(storage_tier: str) -> float:
+    """Ordering bias only: warm/cold sink slightly vs hot when cosine ties; Hit.score unchanged."""
+    t = (storage_tier or "hot").strip().lower()
+    if t == "warm":
+        return -0.015
+    if t == "cold":
+        return -0.035
+    return 0.0
 
 
 _STOP = frozenset(
@@ -93,12 +104,13 @@ def apply_identity_rerank(
     claim_cap: float = 0.04,
     total_cap: float = 0.07,
 ) -> Tuple[List[Hit], Dict[str, Any]]:
-    """Re-order hits with small additive boosts; each Hit.score unchanged."""
+    """Re-order hits: storage-tier epsilon + small capped identity boosts; Hit.score unchanged."""
     meta: Dict[str, Any] = {
         "bias_clusters": 0,
         "bias_claims": 0,
         "bias_run_at": None,
         "adjustments_applied": 0,
+        "tier_bias_non_hot": 0,
     }
     if not hits:
         return hits, meta
@@ -109,14 +121,15 @@ def apply_identity_rerank(
     meta["bias_claims"] = n_claims
     meta["bias_run_at"] = run_at
 
-    if not members and not claim_toks:
-        return hits, meta
-
     adjusted_n = 0
+    tier_bias_n = 0
     keyed: List[Tuple[float, int, Hit]] = []
     for i, h in enumerate(hits):
+        tier_eps = _storage_tier_sort_epsilon(getattr(h, "storage_tier", "hot"))
+        if tier_eps != 0.0:
+            tier_bias_n += 1
         boost = 0.0
-        if h.chunk_id in members:
+        if members and h.chunk_id in members:
             boost += cluster_boost
         if claim_toks:
             htoks = _tokens(h.text)
@@ -128,8 +141,9 @@ def apply_identity_rerank(
         boost = min(boost, total_cap)
         if boost > 0:
             adjusted_n += 1
-        keyed.append((h.score + boost, -i, h))
+        keyed.append((h.score + tier_eps + boost, -i, h))
 
     meta["adjustments_applied"] = adjusted_n
+    meta["tier_bias_non_hot"] = tier_bias_n
     keyed.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return [t[2] for t in keyed], meta

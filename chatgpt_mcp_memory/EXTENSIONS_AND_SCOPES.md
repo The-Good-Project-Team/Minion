@@ -27,4 +27,4 @@ Default schema merges shallowly into shipped defaults — edit keys under `reade
 
 ## Ambient companion ingest
 
-`POST /ambient/sync` tails `<MINION_DATA_DIR>/screen_context/stream.jsonl` into `ambient_events` with dedupe keys — vault-local telemetry shaped for summaries without exposing OCR blobs via MCP unless you relax deny lists deliberately.
+The desktop app appends to `<MINION_DATA_DIR>/ambient/stream.jsonl`; the ambient scheduler ingests into `ambient_events` with dedupe keys. OCR blobs stay vault-local unless you relax MCP deny lists deliberately.

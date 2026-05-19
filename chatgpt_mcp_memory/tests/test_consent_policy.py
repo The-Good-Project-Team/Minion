@@ -44,8 +44,25 @@ def test_hit_blocked_for_screen_memory_path(tmp_path: Path) -> None:
     assert hit_allowed_for_mcp(h, pol) is False
 
 
+def test_hit_blocked_for_ambient_ax_kind(tmp_path: Path) -> None:
+    pol = load_policy(tmp_path)
+    h = Hit(
+        chunk_id="c1",
+        score=1.0,
+        text="x",
+        role=None,
+        source_id="s1",
+        path="ambient/ax/2026-05-18/foo.md",
+        kind="ambient-ax",
+        mtime=0.0,
+        meta={},
+        source_meta={},
+    )
+    assert hit_allowed_for_mcp(h, pol) is False
+
+
 def test_save_and_reload_roundtrip(tmp_path: Path) -> None:
     save_policy(tmp_path, DEFAULT_POLICY)
     assert policy_path(tmp_path).is_file()
     pol = load_policy(tmp_path)
-    assert pol["readers"]["mcp"]["deny_chunk_source_kinds"] == ["ambient"]
+    assert pol["readers"]["mcp"]["deny_chunk_source_kinds"] == ["ambient", "ambient-ax"]

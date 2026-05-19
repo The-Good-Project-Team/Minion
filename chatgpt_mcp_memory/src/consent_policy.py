@@ -21,9 +21,9 @@ DEFAULT_POLICY: Dict[str, Any] = {
     "readers": {
         "mcp": {
             # Indexed chunks whose source kind matches are withheld from MCP retrieval.
-            "deny_chunk_source_kinds": ["ambient"],
+            "deny_chunk_source_kinds": ["ambient", "ambient-ax"],
             # Additional path-based withholding (substring match on normalized paths).
-            "deny_path_substrings": ["/screen-memory/"],
+            "deny_path_substrings": ["/screen-memory/", "/ambient/"],
             # Screen-context MCP tools read jsonl separately — allow disabling explicitly.
             "allow_screen_context_tools": True,
         }

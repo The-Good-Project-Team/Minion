@@ -1,6 +1,6 @@
-"""Local screen-context timeline written by the Minion desktop app (macOS).
+"""Ambient capture timeline from the Minion desktop app (macOS).
 
-`<MINION_DATA_DIR>/screen_context/stream.jsonl` — one JSON object per line.
+Canonical: `<MINION_DATA_DIR>/ambient/stream.jsonl` (legacy fallback: `screen_context/stream.jsonl`).
 """
 from __future__ import annotations
 
@@ -8,13 +8,15 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-STREAM_SUBDIR = "screen_context"
-STREAM_NAME = "stream.jsonl"
 _TAIL_READ_BYTES = 4_000_000
 
 
 def stream_path(data_dir: Path) -> Path:
-    return data_dir / STREAM_SUBDIR / STREAM_NAME
+    base = Path(data_dir).expanduser().resolve()
+    ambient = base / "ambient" / "stream.jsonl"
+    if ambient.is_file():
+        return ambient
+    return base / "screen_context" / "stream.jsonl"
 
 
 def _tail_lines(path: Path) -> List[str]:
