@@ -145,8 +145,12 @@ Signed updates use **`tauri-plugin-updater`**. The app reads
    Attach **`latest.json`** to the release as `latest.json` so the
    `releases/latest/download/latest.json` URL resolves.
 
-Release builds prompt in **Settings → Support → Check for updates**; a
-background check also runs ~18s after the app connects (production only).
+Client behaviour (production builds):
+
+- **Prompt installs** — default: shortly after the websocket connects, then about **every 45 minutes** while the app stays open, Minion compares its semver with `latest.json`. Automatic checks honour a **15 minute** minimum spacing so bursts stay calm; **Settings → Support → Check for updates** bypasses that delay.
+- **Fleet auto-install** — set **`MINION_AUTO_INSTALL_UPDATES=1`** (or `true` / `yes`) in the environment for the Minion process; signed updates download and install **without** the confirmation dialog (macOS may still prompt for elevation). GUI launches from Finder do not inherit shell exports unless you inject env via MDM, a LaunchAgent, or a wrapper script.
+
+After tagging **`v1.0.2`** on GitHub, attach both `.tar.gz` bundles plus **`latest.json`** so existing installs pull the new build.
 
 ## Connect any MCP client
 

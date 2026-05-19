@@ -10,12 +10,12 @@ Endpoints:
   GET  /status                      -> counts, inbox path, db path, watcher
   GET  /sources                     -> list sources (kind / path_glob / since / limit)
   GET  /sources/{source_id}         -> source metadata
-  DELETE /sources                   -> body: {"path": "..."} OR {"source_id": "..."}
+  DELETE /sources                   -> body: {"path": "..."} OR {"source_id": "..."} OR bulk {"kind": "text", "confirm_bulk": true}
   POST /search                      -> body: {"query", "top_k", "kind"?, "path_glob"?, "role"?}
   GET  /search/stream               -> SSE: events `meta`, `hit` (JSON per line), `done`, optional `error`
   GET  /identity/claims             -> list identity claims (optional ?status=&kind=)
   POST /identity/claims/propose     -> same shape as MCP propose_identity_update
-  PATCH /identity/claims/{claim_id} -> {"status": "active"|"rejected"|...}
+  PATCH /identity/claims/{claim_id} -> {"status"? , "text"? , "meta"? , "superseded_by"? }
   GET  /identity/claims/{claim_id}/edges
   GET  /identity/summary            -> { "markdown": "..." }
   GET  /identity/clusters
@@ -61,11 +61,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from fastembed_cache import fastembed_cache_dir, register_fastembed_data_dir
 from ingest import ingest_file, ingest_webhook_payload, _looks_like_chatgpt_export
 from parser_extensions import manifest_path
 from parsers import ALL_KINDS, load_user_extensions, supported_extensions, user_extension_mappings
@@ -73,7 +74,16 @@ from settings import apply_settings, load_settings, save_settings
 import analytics_remote
 import diagnostics
 import telemetry
+import consent_policy
 import identity
+from ambient_pipeline import ingest_screen_context_jsonl
+from ambient_index import index_ax_from_stream
+from ambient_scheduler import start_ambient_scheduler
+from second_brain import build_today_bundle, build_working_context
+from activity_feed import build_activity_feed
+from council_api import handle_council_approve
+import graph_clarify
+import keys_api
 from version import __version__
 from export_bundle import write_identity_export_zip
 from preference_cluster import run_preference_clustering
@@ -85,15 +95,41 @@ from store import (
     count_sources,
     delete_source,
     delete_source_by_path,
+    delete_sources_by_kind,
     fts_available,
     get_chunk,
     get_source,
     identity_claim_get,
+    identity_claim_mirror_history,
+    identity_audit_log_append,
     identity_edges_for_claim,
+    graph_scaffold_list,
+    ambient_events_recent,
+    chunk_storage_tier_counts,
+    sqlite_storage_fingerprint,
+    count_chunks_stale_source_tier_promotion_candidates,
+    promote_chunks_for_stale_sources,
+    validate_stale_tier_promotion,
     keyword_search as store_keyword_search,
     list_sources,
     preference_clusters_list,
     search as store_search,
+    wiki_page_list,
+    wiki_page_get,
+    wiki_page_upsert,
+    wiki_page_delete,
+    wiki_link_add,
+    wiki_links_for_page,
+    task_list,
+    task_get,
+    task_infer_insert,
+    task_patch,
+    output_create,
+    output_get,
+    output_patch,
+    sync_sources_list,
+    system_issues_open,
+    system_issue_resolve,
 )
 import numpy as np
 
@@ -147,6 +183,7 @@ def _resolve_paths() -> None:
         else:
             State.data_dir = Path.home() / ".minion" / "data"
     State.data_dir.mkdir(parents=True, exist_ok=True)
+    register_fastembed_data_dir(State.data_dir)
 
     inbox_env = os.environ.get("MINION_INBOX")
     State.inbox = (
@@ -398,6 +435,8 @@ async def _lifespan(app: FastAPI):
     # whenever the MCP-relevant sources have changed since last launch. No-op
     # if Claude's config file doesn't exist (user hasn't opted in yet).
     _refresh_mcp_on_launch()
+    if not os.environ.get("MINION_DISABLE_AMBIENT_SCHEDULER", "").strip():
+        start_ambient_scheduler(State.data_dir, State.conn)
     try:
         analytics_remote.emit_session_if_ready()
     except Exception:
@@ -500,6 +539,25 @@ def _iter_files_in_tree(root: Path) -> List[Path]:
 class DeleteBody(BaseModel):
     path: Optional[str] = None
     source_id: Optional[str] = None
+    """Bulk: remove every source with this ``kind`` (e.g. ``text``). Requires ``confirm_bulk``."""
+
+    kind: Optional[str] = None
+    confirm_bulk: bool = False
+
+    @model_validator(mode="after")
+    def _delete_exactly_one_target(self) -> "DeleteBody":
+        modes = sum(
+            1
+            for x in (self.path, self.source_id, self.kind)
+            if x is not None and str(x).strip() != ""
+        )
+        if modes != 1:
+            raise ValueError(
+                "provide exactly one of: path, source_id, kind (bulk forget-all of that kind)"
+            )
+        if self.kind is not None and not self.confirm_bulk:
+            raise ValueError("bulk delete by kind requires confirm_bulk: true")
+        return self
 
 
 class ConnectBody(BaseModel):
@@ -510,6 +568,11 @@ class ConnectBody(BaseModel):
 class SettingsBody(BaseModel):
     disabled_kinds: Optional[List[str]] = None
     telemetry_opt_out: Optional[bool] = None
+    ambient_sensing_enabled: Optional[bool] = None
+    full_listening_enabled: Optional[bool] = None
+    capture_on_empty_ax: Optional[bool] = None
+    ambient_deny: Optional[Dict[str, Any]] = None
+    ambient_collectors: Optional[Dict[str, bool]] = None
 
 
 class ReconcileBody(BaseModel):
@@ -527,8 +590,25 @@ class IdentityProposeBody(BaseModel):
 
 
 class IdentityPatchBody(BaseModel):
-    status: str
+    status: Optional[str] = None
     superseded_by: Optional[str] = None
+    text: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
+    revision_source: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _patch_one_field(self) -> "IdentityPatchBody":
+        if (
+            self.status is None
+            and self.superseded_by is None
+            and self.text is None
+            and self.meta is None
+            and self.revision_source is None
+        ):
+            raise ValueError(
+                "provide at least one of: status, superseded_by, text, meta, revision_source"
+            )
+        return self
 
 
 class ClusterRebuildBody(BaseModel):
@@ -543,6 +623,16 @@ class IdentityExportBody(BaseModel):
     out_path: Optional[str] = None
     include_chunk_index: bool = True
     include_voice_files: bool = True
+
+
+class StorageTierPromoteStaleBody(BaseModel):
+    """Advance chunk ``storage_tier`` (e.g. hot→warm→cold) when parent source is stale."""
+
+    min_source_age_days: float = Field(default=120.0, ge=1.0, le=3650.0)
+    source_kinds: Optional[List[str]] = None
+    dry_run: bool = True
+    from_tier: str = Field(default="hot", max_length=16)
+    to_tier: str = Field(default="warm", max_length=16)
 
 
 @app.post("/nuke")
@@ -647,9 +737,46 @@ def update_settings(body: SettingsBody) -> Dict[str, Any]:
         current["disabled_kinds"] = body.disabled_kinds
     if body.telemetry_opt_out is not None:
         current["telemetry_opt_out"] = bool(body.telemetry_opt_out)
+    if body.ambient_sensing_enabled is not None:
+        current["ambient_sensing_enabled"] = bool(body.ambient_sensing_enabled)
+    if body.full_listening_enabled is not None:
+        fl = bool(body.full_listening_enabled)
+        current["full_listening_enabled"] = fl
+        merged_ac = dict(current.get("ambient_collectors") or {})
+        merged_ac["full_listening"] = fl
+        current["ambient_collectors"] = merged_ac
+    if body.ambient_collectors is not None:
+        merged = dict(current.get("ambient_collectors") or {})
+        merged.update({k: bool(v) for k, v in body.ambient_collectors.items()})
+        if "full_listening" in body.ambient_collectors:
+            current["full_listening_enabled"] = bool(body.ambient_collectors["full_listening"])
+        current["ambient_collectors"] = merged
+    if body.capture_on_empty_ax is not None:
+        current["capture_on_empty_ax"] = bool(body.capture_on_empty_ax)
+    if body.ambient_deny is not None:
+        current["ambient_deny"] = body.ambient_deny
     saved = save_settings(State.data_dir, current)
     apply_settings(saved)
     return {"settings": saved, "all_kinds": list(ALL_KINDS)}
+
+
+@app.get("/settings/consent")
+def get_consent_settings() -> Dict[str, Any]:
+    """Effective MCP/data-sharing consent policy persisted under consent_policy.json."""
+    return consent_policy.load_policy(State.data_dir)
+
+
+@app.put("/settings/consent")
+def put_consent_settings(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    consent_policy.save_policy(State.data_dir, body)
+    conn = State.conn()
+    identity_audit_log_append(
+        conn,
+        action="consent_policy_put",
+        detail={"schema_version": body.get("schema_version")},
+    )
+    conn.commit()
+    return {"ok": True, "policy": consent_policy.load_policy(State.data_dir)}
 
 
 @app.post("/reconcile")
@@ -722,6 +849,13 @@ def capabilities() -> Dict[str, Any]:
         "retrieval": {
             "identity_bias": True,
             "rrf_fusion": True,
+            "mcp_consent": {
+                "policy_file": "consent_policy.json",
+                "note": (
+                    "Desktop HTTP search stays full vault; MCP ask_minion drops chunks matching "
+                    "readers.mcp.deny_chunk_source_kinds / deny_path_substrings."
+                ),
+            },
         },
         "analytics": {
             "url_configured": bool(analytics_remote.effective_analytics_url().strip()),
@@ -736,15 +870,24 @@ def capabilities() -> Dict[str, Any]:
             "search": "POST /search",
             "search_stream": "GET /search/stream",
             "ingest": "POST /ingest",
+            "delete_sources_bulk": "DELETE /sources body {kind, confirm_bulk:true}",
             "ingest_webhook": "POST /ingest/webhook",
             "extensions": "GET /extensions",
             "extensions_reload": "POST /extensions/reload",
             "reconcile": "POST /reconcile",
             "events_ws": "WS /events",
             "identity_claims": "GET /identity/claims",
+            "identity_mirror": "GET /identity/mirror",
             "identity_propose": "POST /identity/claims/propose",
             "identity_export": "POST /identity/export",
             "clusters_rebuild": "POST /identity/clusters/rebuild",
+            "settings_consent_get": "GET /settings/consent",
+            "settings_consent_put": "PUT /settings/consent",
+            "ambient_events": "GET /ambient/events",
+            "feed": "GET /feed",
+            "graph_scaffold": "GET /graph/scaffold",
+            "storage_report": "POST /maintenance/storage-report",
+            "storage_tier_promote_stale": "POST /maintenance/storage-tier-promote-stale",
             "diagnostics_about": "GET /diagnostics/about",
             "diagnostics_log": "GET /diagnostics/log",
             "diagnostics_log_text": "GET /diagnostics/log/text",
@@ -915,14 +1058,25 @@ def source_info(source_id: str) -> Dict[str, Any]:
 
 @app.delete("/sources")
 def delete_endpoint(body: DeleteBody) -> Dict[str, Any]:
-    if not body.path and not body.source_id:
-        raise HTTPException(status_code=400, detail="path or source_id required")
+    conn = State.conn()
+    if body.kind is not None:
+        n_src, n_chunks = delete_sources_by_kind(conn, body.kind.strip())
+        _schedule_broadcast(
+            {
+                "type": "sources_bulk_removed",
+                "kind": body.kind.strip(),
+                "sources_removed": n_src,
+                "counts": _counts(),
+            }
+        )
+        return {"removed_chunks": n_chunks, "sources_removed": n_src, "kind": body.kind.strip()}
     if body.source_id:
-        n = delete_source(State.conn(), body.source_id)
+        n = delete_source(conn, body.source_id)
         key = body.source_id
     else:
+        assert body.path is not None
         p = str(Path(body.path).expanduser().resolve())
-        n = delete_source_by_path(State.conn(), p)
+        n = delete_source_by_path(conn, p)
         key = p
     _schedule_broadcast({"type": "source_removed", "key": key, "counts": _counts()})
     return {"removed_chunks": n}
@@ -945,7 +1099,9 @@ def _get_query_model():
             or os.environ.get("MINION_EMBED_MODEL")
             or "sentence-transformers/all-MiniLM-L6-v2"
         )
-        _query_model = TextEmbedding(model_name=name)
+        _query_model = TextEmbedding(
+            model_name=name, cache_dir=fastembed_cache_dir(data_dir=State.data_dir)
+        )
         return _query_model
 
 
@@ -1010,6 +1166,7 @@ def _embed_search_results(
                 "mtime": h.mtime,
                 "text": text,
                 "meta": h.meta,
+                "storage_tier": getattr(h, "storage_tier", None) or "hot",
             }
         )
     try:
@@ -1034,6 +1191,7 @@ def _embed_search_results(
             bias_claims=bias_meta.get("bias_claims"),
             bias_run_at=bias_meta.get("bias_run_at"),
             adjustments_applied=bias_meta.get("adjustments_applied"),
+            tier_bias_non_hot=bias_meta.get("tier_bias_non_hot"),
         )
     except Exception:
         pass
@@ -1127,34 +1285,73 @@ def identity_propose(body: IdentityProposeBody) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=err)
     assert payload is not None
     telemetry.log_event("identity_propose", claim_id=payload.get("claim_id"))
+    conn = State.conn()
+    identity_audit_log_append(
+        conn,
+        action="identity_propose",
+        claim_id=payload.get("claim_id"),
+        detail={"kind": body.kind, "source_agent": body.source_agent},
+    )
+    conn.commit()
     return payload
 
 
 @app.patch("/identity/claims/{claim_id}")
 def identity_patch_claim(claim_id: str, body: IdentityPatchBody) -> Dict[str, Any]:
-    ok, err = identity.set_claim_status(
-        State.conn(),
+    conn = State.conn()
+    meta_merge: Optional[Dict[str, Any]] = None
+    if body.meta is not None or body.revision_source is not None:
+        meta_merge = dict(body.meta or {})
+        if body.revision_source:
+            rs = body.revision_source.strip()[:64]
+            if rs:
+                meta_merge["revision_source"] = rs
+        if not meta_merge:
+            meta_merge = None
+    row, err = identity.patch_claim(
+        conn,
         claim_id,
         status=body.status,
         superseded_by=body.superseded_by,
+        text=body.text,
+        meta_merge=meta_merge,
     )
     if err:
         raise HTTPException(status_code=404 if "not found" in (err or "") else 400, detail=err)
-    if not ok:
+    if row is None:
         raise HTTPException(status_code=404, detail="claim not found")
-    State.conn().commit()
-    telemetry.log_event(
-        "identity_status",
+    identity_audit_log_append(
+        conn,
+        action="identity_patch",
         claim_id=claim_id,
-        status=body.status,
+        detail={
+            "status": body.status,
+            "superseded_by": body.superseded_by,
+            "revision_source": (meta_merge or {}).get("revision_source"),
+        },
     )
-    row = identity_claim_get(State.conn(), claim_id)
-    return {"claim": row}
+    conn.commit()
+    telemetry.log_event(
+        "identity_patch",
+        claim_id=claim_id,
+        status=body.status or row.get("status"),
+    )
+    return {"claim": identity_claim_get(conn, claim_id)}
 
 
 @app.get("/identity/summary")
 def identity_summary() -> Dict[str, Any]:
     return {"markdown": identity.build_identity_summary(State.conn())}
+
+
+@app.get("/identity/mirror")
+def identity_mirror(limit_history: int = 60) -> Dict[str, Any]:
+    """Time-aware mirror: digest markdown plus superseded/rejected claim history."""
+    conn = State.conn()
+    lim = int(max(1, min(limit_history, 500)))
+    hist = identity_claim_mirror_history(conn, limit=lim)
+    md = identity.build_identity_summary(conn, history_tail=min(12, lim))
+    return {"markdown": md, "history": hist, "history_count": len(hist)}
 
 
 @app.get("/identity/clusters")
@@ -1176,6 +1373,486 @@ def identity_clusters_rebuild(body: ClusterRebuildBody) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}")
     State.conn().commit()
     return out
+
+
+@app.get("/ambient/events")
+def ambient_events_list(limit: int = 80) -> Dict[str, Any]:
+    rows = ambient_events_recent(State.conn(), limit=limit)
+    return {"events": rows, "count": len(rows)}
+
+
+@app.get("/attention/summary")
+def attention_summary(hours: float = 24.0) -> Dict[str, Any]:
+    from attention_rollup import rollup_attention
+
+    since = time.time() - max(0.5, min(hours, 168.0)) * 3600.0
+    return rollup_attention(State.conn(), since_ts=since, limit=800)
+
+
+class WikiPageBody(BaseModel):
+    page_type: str = Field(..., min_length=1, max_length=64)
+    title: str = Field(..., min_length=1, max_length=500)
+    body_md: str = ""
+    status: str = "active"
+    meta: Dict[str, Any] = Field(default_factory=dict)
+    page_id: Optional[str] = None
+
+
+class WikiLinkBody(BaseModel):
+    to_page_id: str
+    link_kind: str = "related"
+
+
+class TaskInferBody(BaseModel):
+    title: str = Field(..., min_length=1, max_length=500)
+    body_md: str = ""
+    origin: str = "agent"
+    priority: Optional[str] = None
+    context_refs: List[Any] = Field(default_factory=list)
+    wiki_refs: List[str] = Field(default_factory=list)
+
+
+class TaskPatchBody(BaseModel):
+    status: Optional[str] = None
+    title: Optional[str] = None
+    body_md: Optional[str] = None
+
+
+class OutputBody(BaseModel):
+    kind: str = "draft"
+    body_md: str = ""
+    wiki_read: List[str] = Field(default_factory=list)
+
+
+class OutputPatchBody(BaseModel):
+    status: Optional[str] = None
+    body_md: Optional[str] = None
+
+
+class AmbientIndexAxBody(BaseModel):
+    dry_run: bool = False
+
+
+@app.get("/today")
+def today_bundle() -> Dict[str, Any]:
+    return build_today_bundle(State.conn(), State.data_dir)
+
+
+@app.get("/feed")
+def activity_feed(limit: int = 80, since_hours: float = 48.0) -> Dict[str, Any]:
+    return build_activity_feed(
+        State.conn(),
+        State.data_dir,
+        limit=limit,
+        since_hours=since_hours,
+    )
+
+
+class CouncilApproveBody(BaseModel):
+    proposal_id: str
+    action: str
+    edited_payload: Optional[Dict[str, Any]] = None
+    snooze_days: Optional[float] = None
+
+
+@app.post("/council/approve")
+def council_approve(body: CouncilApproveBody) -> Dict[str, Any]:
+    return handle_council_approve(
+        State.conn(),
+        proposal_id=body.proposal_id,
+        action=body.action,
+        edited_payload=body.edited_payload,
+        snooze_days=body.snooze_days,
+    )
+
+
+@app.get("/graph/scaffold")
+def graph_scaffold() -> Dict[str, Any]:
+    return graph_scaffold_list(State.conn())
+
+
+@app.get("/chat/threads")
+def chat_threads_list(status: str = "open", limit: int = 30) -> Dict[str, Any]:
+    return graph_clarify.list_threads(State.conn(), status=status, limit=limit)
+
+
+@app.get("/chat/badge")
+def chat_badge() -> Dict[str, int]:
+    return graph_clarify.badge(State.conn())
+
+
+@app.get("/chat/threads/{thread_id}")
+def chat_thread_get(thread_id: str) -> Dict[str, Any]:
+    t = graph_clarify.get_thread(State.conn(), thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="thread not found")
+    return t
+
+
+@app.post("/chat/threads/next")
+def chat_threads_next() -> Dict[str, Any]:
+    out = graph_clarify.next_clarification(State.conn(), State.data_dir)
+    State.conn().commit()
+    return out
+
+
+class ChatReplyBody(BaseModel):
+    body: str = ""
+    action: Optional[str] = None
+
+
+@app.post("/chat/threads/{thread_id}/reply")
+def chat_thread_reply(thread_id: str, body: ChatReplyBody) -> Dict[str, Any]:
+    out = graph_clarify.reply(
+        State.conn(),
+        thread_id,
+        body=body.body,
+        action=body.action,
+    )
+    State.conn().commit()
+    return out
+
+
+class FortyTwoReplyBody(BaseModel):
+    message: str = ""
+    thread_id: Optional[str] = None
+    action: Optional[str] = None
+
+
+@app.post("/chat/42/next")
+def chat_forty_two_next() -> Dict[str, Any]:
+    import forty_two
+
+    out = forty_two.next_question(State.conn(), State.data_dir)
+    State.conn().commit()
+    return out
+
+
+@app.post("/chat/42/reply")
+def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
+    import forty_two
+
+    tid = body.thread_id
+    if not tid:
+        active = forty_two.active_thread(State.conn())
+        if not active:
+            raise HTTPException(status_code=400, detail="no active thread; call /chat/42/next")
+        tid = active["thread_id"]
+    out = forty_two.reply(
+        State.conn(),
+        tid,
+        body=body.message,
+        action=body.action,
+    )
+    State.conn().commit()
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error") or "reply failed")
+    return out
+
+
+@app.post("/chat/42/dismiss")
+def chat_forty_two_dismiss(body: FortyTwoReplyBody) -> Dict[str, Any]:
+    import forty_two
+
+    if not body.thread_id:
+        raise HTTPException(status_code=400, detail="thread_id required")
+    out = forty_two.dismiss(State.conn(), body.thread_id)
+    State.conn().commit()
+    return out
+
+
+@app.get("/keys/capabilities")
+def keys_capabilities_list() -> Dict[str, Any]:
+    return {"items": keys_api.list_capabilities(State.conn())}
+
+
+class KeysLinkBody(BaseModel):
+    cap_key: str
+    vault_ref: str
+    label: str
+    provider: str = ""
+
+
+@app.post("/keys/link")
+def keys_link(body: KeysLinkBody) -> Dict[str, Any]:
+    out = keys_api.link_capability(
+        State.conn(),
+        cap_key=body.cap_key,
+        vault_ref=body.vault_ref,
+        label=body.label,
+        provider=body.provider,
+    )
+    State.conn().commit()
+    return out
+
+
+@app.post("/keys/unlink")
+def keys_unlink(cap_key: str) -> Dict[str, Any]:
+    ok = keys_api.unlink_capability(State.conn(), cap_key=cap_key)
+    State.conn().commit()
+    return {"ok": ok}
+
+
+@app.get("/health")
+def health_summary() -> Dict[str, Any]:
+    conn = State.conn()
+    return {
+        "sync_sources": sync_sources_list(conn),
+        "open_issues": system_issues_open(conn, limit=20),
+    }
+
+
+@app.post("/health/issues/{issue_id}/resolve")
+def health_issue_resolve(issue_id: str) -> Dict[str, Any]:
+    ok = system_issue_resolve(State.conn(), issue_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="issue not found or already resolved")
+    State.conn().commit()
+    return {"status": "ok", "issue_id": issue_id}
+
+
+@app.get("/wiki/pages")
+def wiki_pages_list(
+    page_type: Optional[str] = None,
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 100,
+) -> Dict[str, Any]:
+    rows = wiki_page_list(
+        State.conn(), page_type=page_type, status=status, q=q, limit=limit
+    )
+    return {"pages": rows, "count": len(rows)}
+
+
+@app.post("/wiki/pages")
+def wiki_pages_create(body: WikiPageBody) -> Dict[str, Any]:
+    conn = State.conn()
+    pid = wiki_page_upsert(
+        conn,
+        page_id=body.page_id,
+        page_type=body.page_type,
+        title=body.title,
+        body_md=body.body_md,
+        status=body.status,
+        meta=body.meta,
+    )
+    conn.commit()
+    page = wiki_page_get(conn, pid)
+    return {"page": page, "page_id": pid}
+
+
+@app.get("/wiki/pages/{page_id}")
+def wiki_pages_detail(page_id: str) -> Dict[str, Any]:
+    page = wiki_page_get(State.conn(), page_id)
+    if page is None:
+        raise HTTPException(status_code=404, detail="page not found")
+    links = wiki_links_for_page(State.conn(), page_id)
+    return {"page": page, "links": links}
+
+
+@app.patch("/wiki/pages/{page_id}")
+def wiki_pages_patch(page_id: str, body: WikiPageBody) -> Dict[str, Any]:
+    conn = State.conn()
+    existing = wiki_page_get(conn, page_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="page not found")
+    wiki_page_upsert(
+        conn,
+        page_id=page_id,
+        page_type=body.page_type,
+        title=body.title,
+        body_md=body.body_md,
+        status=body.status,
+        meta=body.meta or existing.get("meta"),
+    )
+    conn.commit()
+    return {"page": wiki_page_get(conn, page_id)}
+
+
+@app.delete("/wiki/pages/{page_id}")
+def wiki_pages_delete(page_id: str) -> Dict[str, Any]:
+    ok = wiki_page_delete(State.conn(), page_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="page not found")
+    State.conn().commit()
+    return {"status": "ok", "page_id": page_id}
+
+
+@app.post("/wiki/pages/{page_id}/links")
+def wiki_pages_link(page_id: str, body: WikiLinkBody) -> Dict[str, Any]:
+    conn = State.conn()
+    if wiki_page_get(conn, page_id) is None:
+        raise HTTPException(status_code=404, detail="page not found")
+    if wiki_page_get(conn, body.to_page_id) is None:
+        raise HTTPException(status_code=404, detail="target page not found")
+    lid = wiki_link_add(
+        conn, from_page_id=page_id, to_page_id=body.to_page_id, link_kind=body.link_kind
+    )
+    conn.commit()
+    return {"link_id": lid, "links": wiki_links_for_page(conn, page_id)}
+
+
+@app.get("/tasks")
+def tasks_list(
+    status: Optional[str] = None,
+    origin: Optional[str] = None,
+    limit: int = 100,
+) -> Dict[str, Any]:
+    rows = task_list(State.conn(), status=status, origin=origin, limit=limit)
+    return {"tasks": rows, "count": len(rows)}
+
+
+@app.get("/tasks/{task_id}")
+def tasks_detail(task_id: str) -> Dict[str, Any]:
+    row = task_get(State.conn(), task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    out = None
+    if row.get("output_id"):
+        out = output_get(State.conn(), row["output_id"])
+    return {"task": row, "output": out}
+
+
+@app.post("/tasks/infer")
+def tasks_infer(body: TaskInferBody) -> Dict[str, Any]:
+    conn = State.conn()
+    tid = task_infer_insert(
+        conn,
+        title=body.title,
+        body_md=body.body_md,
+        origin=body.origin,
+        priority=body.priority,
+        context_refs=body.context_refs,
+        wiki_refs=body.wiki_refs,
+    )
+    conn.commit()
+    return {"task": task_get(conn, tid), "task_id": tid}
+
+
+@app.patch("/tasks/{task_id}")
+def tasks_patch(task_id: str, body: TaskPatchBody) -> Dict[str, Any]:
+    conn = State.conn()
+    row = task_patch(
+        conn, task_id, status=body.status, title=body.title, body_md=body.body_md
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    conn.commit()
+    return {"task": row}
+
+
+@app.post("/tasks/{task_id}/outputs")
+def tasks_output_create(task_id: str, body: OutputBody) -> Dict[str, Any]:
+    conn = State.conn()
+    if task_get(conn, task_id) is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    oid = output_create(
+        conn,
+        task_id=task_id,
+        kind=body.kind,
+        body_md=body.body_md,
+        wiki_read=body.wiki_read,
+    )
+    conn.commit()
+    return {"output": output_get(conn, oid), "output_id": oid}
+
+
+@app.get("/outputs/{output_id}")
+def outputs_detail(output_id: str) -> Dict[str, Any]:
+    row = output_get(State.conn(), output_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="output not found")
+    return {"output": row}
+
+
+@app.patch("/outputs/{output_id}")
+def outputs_patch(output_id: str, body: OutputPatchBody) -> Dict[str, Any]:
+    conn = State.conn()
+    row = output_patch(conn, output_id, status=body.status, body_md=body.body_md)
+    if row is None:
+        raise HTTPException(status_code=404, detail="output not found")
+    conn.commit()
+    return {"output": row}
+
+
+@app.post("/ambient/index-ax")
+def ambient_index_ax(body: AmbientIndexAxBody = Body(default_factory=AmbientIndexAxBody)) -> Dict[str, Any]:
+    conn = State.conn()
+    out = index_ax_from_stream(data_dir=State.data_dir, conn=conn, dry_run=body.dry_run)
+    if not body.dry_run:
+        conn.commit()
+    return out
+
+
+@app.post("/maintenance/storage-report")
+def maintenance_storage_report() -> Dict[str, Any]:
+    conn = State.conn()
+    row = conn.execute("SELECT COUNT(*) AS n FROM ambient_events").fetchone()
+    amb_count = int(row["n"]) if row else 0
+    return {
+        "chunk_storage_tiers": chunk_storage_tier_counts(conn),
+        "ambient_event_count": amb_count,
+        "sqlite": sqlite_storage_fingerprint(conn),
+        "note": "Compaction tiers are metadata-first; sqlite.freelist_bytes_approx is reclaimable "
+        "only after an offline VACUUM. Cold offload hooks land behind policy.",
+    }
+
+
+@app.post("/maintenance/storage-tier-promote-stale")
+def maintenance_storage_tier_promote_stale(body: StorageTierPromoteStaleBody) -> Dict[str, Any]:
+    """Promote tiers (hot→warm, warm→cold, …) when ``sources.updated_at`` is older than threshold."""
+    try:
+        f_t, t_t = validate_stale_tier_promotion(body.from_tier, body.to_tier)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    thr = time.time() - float(body.min_source_age_days) * 86400.0
+    conn = State.conn()
+    kinds = body.source_kinds
+    n_cand = count_chunks_stale_source_tier_promotion_candidates(
+        conn, source_updated_before=thr, source_kinds=kinds, from_tier=f_t
+    )
+    if body.dry_run:
+        return {
+            "dry_run": True,
+            "candidates": n_cand,
+            "promoted": 0,
+            "source_updated_before_unix": thr,
+            "min_source_age_days": body.min_source_age_days,
+            "source_kinds": kinds,
+            "from_tier": f_t,
+            "to_tier": t_t,
+        }
+    promoted = promote_chunks_for_stale_sources(
+        conn,
+        source_updated_before=thr,
+        source_kinds=kinds,
+        from_tier=f_t,
+        to_tier=t_t,
+    )
+    identity_audit_log_append(
+        conn,
+        action="storage_tier_promote_stale",
+        detail={
+            "promoted": promoted,
+            "source_updated_before_unix": thr,
+            "min_source_age_days": body.min_source_age_days,
+            "source_kinds": kinds,
+            "from_tier": f_t,
+            "to_tier": t_t,
+        },
+    )
+    conn.commit()
+    return {
+        "dry_run": False,
+        "candidates": n_cand,
+        "promoted": promoted,
+        "source_updated_before_unix": thr,
+        "min_source_age_days": body.min_source_age_days,
+        "source_kinds": kinds,
+        "from_tier": f_t,
+        "to_tier": t_t,
+        "chunk_storage_tiers": chunk_storage_tier_counts(conn),
+    }
 
 
 @app.post("/identity/export")

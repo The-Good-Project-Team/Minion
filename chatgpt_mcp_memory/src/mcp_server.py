@@ -22,6 +22,7 @@ warnings.filterwarnings(
 
 from fastembed import TextEmbedding
 
+from fastembed_cache import fastembed_cache_dir, register_fastembed_data_dir
 from store import (
     DB_FILENAME,
     browse_chunks_chronological as store_browse_chronological,
@@ -37,11 +38,21 @@ from store import (
     list_conversations as store_list_conversations,
     list_sources as store_list_sources,
     search as store_search,
+    wiki_page_list,
+    wiki_page_get,
+    wiki_page_upsert,
+    wiki_link_add,
+    task_list,
+    task_get,
+    task_infer_insert,
+    output_create,
 )
 import telemetry
 import identity
+from second_brain import build_working_context
 from version import __version__
 from retrieval_bias import apply_identity_rerank, rrf_fuse
+import screen_context_store
 from build_voice import (
     AUTO_DRAFT_SENTINEL,
     USER_EDITS_SENTINEL,
@@ -58,7 +69,7 @@ TOP_K_CAP = 12
 DEFAULT_TOP_K = 8
 DEFAULT_MAX_CHARS = 900
 DEFAULT_MAX_CHARS_FULL = 2000
-PROTOCOL_VERSION = "2025-11-25"
+PROTOCOL_VERSION = "2026-05-06"
 DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 _INSTRUCTIONS_FALLBACK = (
@@ -122,6 +133,25 @@ def _data_dir() -> Path:
         return candidate
     exe = Path(sys.argv[0]).resolve()
     return exe.parent.parent / "data" / "derived"
+
+
+def _consent_filter_hits_for_mcp(hits: List[Any]) -> List[Any]:
+    try:
+        from consent_policy import filter_hits_for_mcp
+
+        return filter_hits_for_mcp(hits, _data_dir())
+    except Exception:
+        log.exception("MCP consent filter failed; using unfiltered hits")
+        return hits
+
+
+def _screen_context_tools_allowed() -> bool:
+    try:
+        from consent_policy import screen_tools_allowed_for_mcp
+
+        return screen_tools_allowed_for_mcp(_data_dir())
+    except Exception:
+        return True
 
 
 def _inbox_dir() -> Path:
@@ -293,6 +323,7 @@ def _get_conn() -> sqlite3.Connection:
             return _CONN
         data_dir = _data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
+        register_fastembed_data_dir(data_dir)
         _maybe_auto_migrate(data_dir)
         telemetry.configure(data_dir)
         db_path = data_dir / DB_FILENAME
@@ -338,7 +369,9 @@ def _get_model() -> TextEmbedding:
         )
         if _MODEL is not None and _MODEL_NAME == name:
             return _MODEL
-        _MODEL = TextEmbedding(model_name=name)
+        _MODEL = TextEmbedding(
+            model_name=name, cache_dir=fastembed_cache_dir(data_dir=_data_dir())
+        )
         _MODEL_NAME = name
         return _MODEL
 
@@ -410,6 +443,7 @@ def _hit_to_result(hit: Any, max_chars: int) -> Dict[str, Any]:
         "conversation_title": meta.get("conversation_title"),
         "create_time": meta.get("create_time"),
         "text": _cap_text(hit.text, max_chars),
+        "storage_tier": getattr(hit, "storage_tier", None) or "hot",
     }
 
 
@@ -475,15 +509,30 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Fetch 3x the user's top_k as candidates: gives dedup + fusion room
         # to promote under-ranked scanned docs without starving the final list.
         internal_k = max(top_k * 3, top_k + 8)
-        relevance_hits = store_search(
-            conn,
-            qvec,
-            top_k=internal_k,
-            kind=kind,
-            path_glob=path_glob,
-            since=since_f,
-            role=role,
-        )
+        try:
+            from graph_retrieval import neighborhood_search
+
+            relevance_hits = neighborhood_search(
+                conn,
+                qvec,
+                query,
+                top_k=internal_k,
+                kind=kind,
+                path_glob=path_glob,
+                since=since_f,
+                role=role,
+            )
+        except Exception:
+            log.exception("graph neighborhood search failed; using global search")
+            relevance_hits = store_search(
+                conn,
+                qvec,
+                top_k=internal_k,
+                kind=kind,
+                path_glob=path_glob,
+                since=since_f,
+                role=role,
+            )
         # Hybrid rerank: fuse semantic cosine with FTS5 BM25 via Reciprocal
         # Rank Fusion. Fixes the classic failure mode where a short chat turn
         # echoing the query ("ok and how does this fit the patriarchal
@@ -512,6 +561,8 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Bookkeeping for telemetry below.
         _SESSION_STATE["_last_rerank"] = rerank_used
         _SESSION_STATE["_last_candidates"] = len(relevance_hits)
+
+    hits = _consent_filter_hits_for_mcp(hits)
 
     if mode in ("relevance", "keyword") and hits:
         hits, bias_meta = apply_identity_rerank(conn, hits)
@@ -566,6 +617,7 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
             bias_claims=bias_meta.get("bias_claims"),
             bias_run_at=bias_meta.get("bias_run_at"),
             adjustments_applied=bias_meta.get("adjustments_applied"),
+            tier_bias_non_hot=bias_meta.get("tier_bias_non_hot"),
         )
     except Exception:
         pass
@@ -878,6 +930,160 @@ def _tool_get_identity_summary(_: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "ok", "markdown": md}
 
 
+def _tool_what_am_i_working_on(_: Dict[str, Any]) -> Dict[str, Any]:
+    if not _screen_context_tools_allowed():
+        return {
+            "status": "blocked",
+            "hint": "Disabled via consent_policy.json → readers.mcp.allow_screen_context_tools=false.",
+        }
+    row = screen_context_store.current_record(_data_dir())
+    if row is None:
+        return {
+            "status": "empty",
+            "hint": (
+                "Open the Minion desktop app on macOS. Grant Accessibility + Screen Recording. "
+                "Focused-window events append to <data_dir>/ambient/stream.jsonl."
+            ),
+        }
+    return {
+        "status": "ok",
+        "app_name": row.get("app_name"),
+        "window_title": row.get("window_title"),
+        "process_path": row.get("process_path"),
+        "ts": row.get("ts"),
+        "screenshot_inbox_rel": row.get("screenshot_inbox_rel"),
+        "record": row,
+    }
+
+
+def _tool_search_screen_memory(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    if not _screen_context_tools_allowed():
+        return {
+            "status": "error",
+            "error": "screen context MCP tools disabled in consent_policy.json",
+        }
+    query = str(arguments.get("query") or "").strip()
+    lim = int(arguments.get("limit") or 30)
+    lim = max(1, min(lim, 200))
+    if not query:
+        return {"status": "error", "error": "query is required"}
+    hits = screen_context_store.search_substring(_data_dir(), query, limit=lim)
+    return {"status": "ok", "matches": hits, "count": len(hits), "query": query}
+
+
+def _tool_summarize_recent_activity(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    if not _screen_context_tools_allowed():
+        return {
+            "status": "blocked",
+            "summary": (
+                "Screen-context MCP tools are disabled via consent_policy.json "
+                "(readers.mcp.allow_screen_context_tools=false)."
+            ),
+            "events_used": 0,
+        }
+    lim = int(arguments.get("event_limit") or arguments.get("limit") or 60)
+    return screen_context_store.summarize_recent_heuristic(_data_dir(), event_limit=lim)
+
+
+def _tool_get_working_context(_: Dict[str, Any]) -> Dict[str, Any]:
+    conn = _get_conn()
+    return build_working_context(conn, _data_dir(), for_mcp=True)
+
+
+def _tool_list_wiki_pages(args: Dict[str, Any]) -> Dict[str, Any]:
+    conn = _get_conn()
+    rows = wiki_page_list(
+        conn,
+        page_type=args.get("page_type"),
+        q=args.get("query"),
+        status=args.get("status") or "active",
+        limit=int(args.get("limit") or 50),
+    )
+    return {"pages": rows, "count": len(rows)}
+
+
+def _tool_get_wiki_page(args: Dict[str, Any]) -> Dict[str, Any]:
+    pid = str(args.get("page_id") or "").strip()
+    if not pid:
+        return {"status": "error", "error": "page_id is required"}
+    conn = _get_conn()
+    page = wiki_page_get(conn, pid)
+    if page is None:
+        return {"status": "error", "error": "page not found"}
+    return {"status": "ok", "page": page}
+
+
+def _tool_propose_wiki_update(args: Dict[str, Any]) -> Dict[str, Any]:
+    conn = _get_conn()
+    pid = wiki_page_upsert(
+        conn,
+        page_id=args.get("page_id"),
+        page_type=str(args.get("page_type") or "topic"),
+        title=str(args.get("title") or "Untitled"),
+        body_md=str(args.get("body_md") or ""),
+        status="proposed",
+        meta=args.get("meta") if isinstance(args.get("meta"), dict) else {},
+    )
+    conn.commit()
+    return {"status": "ok", "page_id": pid, "page": wiki_page_get(conn, pid)}
+
+
+def _tool_list_inferred_work(args: Dict[str, Any]) -> Dict[str, Any]:
+    conn = _get_conn()
+    origin = args.get("origin")
+    status = args.get("status")
+    rows = task_list(conn, status=status, origin=origin, limit=int(args.get("limit") or 50))
+    return {"tasks": rows, "count": len(rows)}
+
+
+def _tool_get_work_item(args: Dict[str, Any]) -> Dict[str, Any]:
+    tid = str(args.get("task_id") or "").strip()
+    if not tid:
+        return {"status": "error", "error": "task_id is required"}
+    conn = _get_conn()
+    row = task_get(conn, tid)
+    if row is None:
+        return {"status": "error", "error": "task not found"}
+    return {"status": "ok", "task": row}
+
+
+def _tool_propose_work_item(args: Dict[str, Any]) -> Dict[str, Any]:
+    title = str(args.get("title") or "").strip()
+    if not title:
+        return {"status": "error", "error": "title is required"}
+    conn = _get_conn()
+    tid = task_infer_insert(
+        conn,
+        title=title,
+        body_md=str(args.get("body_md") or ""),
+        origin="agent",
+        priority=args.get("priority"),
+        context_refs=args.get("context_refs") if isinstance(args.get("context_refs"), list) else [],
+        wiki_refs=args.get("wiki_refs") if isinstance(args.get("wiki_refs"), list) else [],
+    )
+    conn.commit()
+    return {"status": "ok", "task_id": tid, "task": task_get(conn, tid)}
+
+
+def _tool_attach_work_output(args: Dict[str, Any]) -> Dict[str, Any]:
+    tid = str(args.get("task_id") or "").strip()
+    body = str(args.get("body_md") or "").strip()
+    if not tid or not body:
+        return {"status": "error", "error": "task_id and body_md are required"}
+    conn = _get_conn()
+    if task_get(conn, tid) is None:
+        return {"status": "error", "error": "task not found"}
+    oid = output_create(
+        conn,
+        task_id=tid,
+        kind=str(args.get("kind") or "draft"),
+        body_md=body,
+        wiki_read=args.get("wiki_read") if isinstance(args.get("wiki_read"), list) else [],
+    )
+    conn.commit()
+    return {"status": "ok", "output_id": oid, "task": task_get(conn, tid)}
+
+
 TOOLS: List[Dict[str, Any]] = [
     {
         "name": "ask_minion",
@@ -1117,6 +1323,56 @@ TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "what_am_i_working_on",
+        "title": "Current focused window (live screen context)",
+        "description": (
+            "Return the latest focused-window snapshot from the Minion desktop app on macOS "
+            "(app name, window title, process path, timestamp). May include `ax_text_sample`: "
+            "a bounded Accessibility-tree text scrape under the focused window (needs Accessibility permission). "
+            "Optional screenshots land in `inbox/screen-memory/` for OCR — search visible text with `ask_minion` "
+            "using `path_glob='**/screen-memory/**'` once indexed."
+        ),
+        "inputSchema": {"type": "object", "additionalProperties": False},
+    },
+    {
+        "name": "search_screen_memory",
+        "title": "Search recent window-focus timeline",
+        "description": (
+            "Substring search over recent screen-context events (app/title/path and `ax_text_sample`). "
+            "Does not run semantic search; pair with `ask_minion` for OCR'd screen content."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "description": "Case-insensitive substring."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 30},
+            },
+        },
+    },
+    {
+        "name": "summarize_recent_activity",
+        "title": "Summarize recent screen context (heuristic)",
+        "description": (
+            "Compact digest of recent window-focus events (counts + last titles). "
+            "No LLM call — fast grounding before deeper `ask_minion` retrieval."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "event_limit": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 300,
+                    "default": 60,
+                    "description": "How many recent events to consider.",
+                },
+            },
+        },
+    },
+    {
         "name": "propose_identity_update",
         "title": "Propose a structured identity claim",
         "description": (
@@ -1164,6 +1420,111 @@ TOOLS: List[Dict[str, Any]] = [
         "title": "Identity summary (markdown)",
         "description": "Digest of active claims, pending proposals, and latest preference clusters.",
         "inputSchema": {"type": "object", "additionalProperties": False},
+    },
+    {
+        "name": "get_working_context",
+        "title": "Refresh live working context",
+        "description": (
+            "Mid-session refresh of focus, recent attention, and prefetched memory hits. "
+            "On session start, Minion already attaches working_context in initialize instructions."
+        ),
+        "inputSchema": {"type": "object", "additionalProperties": False},
+    },
+    {
+        "name": "list_wiki_pages",
+        "title": "List wiki knowledge pages",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "page_type": {"type": "string"},
+                "query": {"type": "string"},
+                "status": {"type": "string", "default": "active"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+        },
+    },
+    {
+        "name": "get_wiki_page",
+        "title": "Get one wiki page",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["page_id"],
+            "properties": {"page_id": {"type": "string"}},
+        },
+    },
+    {
+        "name": "propose_wiki_update",
+        "title": "Propose wiki page create/update",
+        "description": "Creates or updates a page with status proposed until user approves in Minion.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["title"],
+            "properties": {
+                "page_id": {"type": ["string", "null"]},
+                "page_type": {"type": "string", "default": "topic"},
+                "title": {"type": "string"},
+                "body_md": {"type": "string"},
+                "meta": {"type": "object"},
+            },
+        },
+    },
+    {
+        "name": "list_inferred_work",
+        "title": "List inferred work items",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "status": {"type": "string"},
+                "origin": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+        },
+    },
+    {
+        "name": "get_work_item",
+        "title": "Get one work item",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["task_id"],
+            "properties": {"task_id": {"type": "string"}},
+        },
+    },
+    {
+        "name": "propose_work_item",
+        "title": "Propose inferred work item",
+        "description": "Suggest work from context; user accepts in Minion Work view.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["title"],
+            "properties": {
+                "title": {"type": "string"},
+                "body_md": {"type": "string"},
+                "priority": {"type": ["string", "null"]},
+                "context_refs": {"type": "array"},
+                "wiki_refs": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "name": "attach_work_output",
+        "title": "Attach draft output to work item",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["task_id", "body_md"],
+            "properties": {
+                "task_id": {"type": "string"},
+                "body_md": {"type": "string"},
+                "kind": {"type": "string", "default": "draft"},
+                "wiki_read": {"type": "array", "items": {"type": "string"}},
+            },
+        },
     },
     {
         "name": "index_info",
@@ -1377,6 +1738,27 @@ def _handle_initialize(req: Dict[str, Any]) -> Dict[str, Any]:
             "`structuredContent.profile_brief`. Treat it as priors, not binding rules."
         )
     instructions += (
+        "\n\n## Live screen context (macOS Minion desktop)\n\n"
+        "**Working context is attached below at session start** — use it before searching. "
+        "Call `get_working_context` only if you need a mid-session refresh.\n\n"
+        "When the Minion desktop app runs on macOS it logs focused-window metadata to "
+        "`<MINION_DATA_DIR>/ambient/stream.jsonl` and indexes Accessibility text into memory.\n\n"
+        "- **`what_am_i_working_on`** — latest app/window title (+ optional AX text).\n"
+        "- **`search_screen_memory`** — substring search over recent events.\n"
+        "- **`summarize_recent_activity`** — compact heuristic digest.\n"
+        "`ask_minion` complements live context; it does not replace it.\n"
+    )
+    try:
+        wc = build_working_context(_get_conn(), _data_dir(), for_mcp=True)
+        instructions += (
+            "\n\n---\n\n# Working context (auto-attached butler bundle)\n\n"
+            + "```json\n"
+            + json.dumps(wc, ensure_ascii=False, indent=2)[:12000]
+            + "\n```\n"
+        )
+    except Exception:
+        pass
+    instructions += (
         "\n\n## Digital identity graph\n\n"
         "Structured claims (preferences, values, relationships, goals, boundaries, facts) "
         "can be stored with evidence from `ask_minion` chunk_ids. Use `propose_identity_update`; "
@@ -1412,6 +1794,17 @@ _DISPATCH = {
     "propose_identity_update": _tool_propose_identity_update,
     "list_identity_claims": _tool_list_identity_claims,
     "get_identity_summary": _tool_get_identity_summary,
+    "what_am_i_working_on": _tool_what_am_i_working_on,
+    "search_screen_memory": _tool_search_screen_memory,
+    "summarize_recent_activity": _tool_summarize_recent_activity,
+    "get_working_context": _tool_get_working_context,
+    "list_wiki_pages": _tool_list_wiki_pages,
+    "get_wiki_page": _tool_get_wiki_page,
+    "propose_wiki_update": _tool_propose_wiki_update,
+    "list_inferred_work": _tool_list_inferred_work,
+    "get_work_item": _tool_get_work_item,
+    "propose_work_item": _tool_propose_work_item,
+    "attach_work_output": _tool_attach_work_output,
 }
 
 

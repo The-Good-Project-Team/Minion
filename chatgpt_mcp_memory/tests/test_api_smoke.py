@@ -46,6 +46,92 @@ def test_status_ready(sidecar) -> None:
     assert body["watcher"]["mode"] == "disabled"
 
 
+def test_maintenance_storage_report(sidecar) -> None:
+    r = sidecar.post("/maintenance/storage-report", {})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert isinstance(body["chunk_storage_tiers"], dict)
+    assert body["chunk_storage_tiers"].get("hot", 0) >= 0
+    assert body["ambient_event_count"] == 0
+    sq = body.get("sqlite")
+    assert sq is not None and isinstance(sq, dict)
+    assert "page_count" in sq and int(sq["page_count"]) >= 1
+    assert "freelist_ratio" in sq
+    assert "Compaction" in body["note"] or "metadata" in body["note"].lower()
+
+
+def test_today_and_wiki_crud(sidecar) -> None:
+    r = sidecar.get("/today")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "working_context" in body
+    assert "work_items" in body
+
+    r2 = sidecar.post(
+        "/wiki/pages",
+        {
+            "page_type": "topic",
+            "title": "Test topic",
+            "body_md": "Body",
+            "status": "active",
+        },
+    )
+    assert r2.status_code == 200, r2.text
+    pid = r2.json()["page_id"]
+
+    r3 = sidecar.post(
+        "/tasks/infer",
+        {"title": "Inferred task", "body_md": "ctx", "origin": "agent"},
+    )
+    assert r3.status_code == 200, r3.text
+    tid = r3.json()["task_id"]
+
+    r4 = sidecar.patch(f"/tasks/{tid}", {"status": "archived"})
+    assert r4.status_code == 200, r4.text
+
+    r5 = sidecar.get("/health")
+    assert r5.status_code == 200
+    assert "sync_sources" in r5.json()
+
+
+def test_maintenance_storage_tier_promote_stale_dry_run(sidecar) -> None:
+    r = sidecar.post(
+        "/maintenance/storage-tier-promote-stale",
+        {"dry_run": True, "min_source_age_days": 30},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["dry_run"] is True
+    assert body["candidates"] == 0
+    assert body["promoted"] == 0
+    assert body["from_tier"] == "hot"
+    assert body["to_tier"] == "warm"
+
+
+def test_maintenance_storage_tier_promote_rejects_invalid_pair(sidecar) -> None:
+    r = sidecar.post(
+        "/maintenance/storage-tier-promote-stale",
+        {"dry_run": True, "from_tier": "warm", "to_tier": "hot"},
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_maintenance_storage_tier_promote_warm_to_cold_dry_run(sidecar) -> None:
+    r = sidecar.post(
+        "/maintenance/storage-tier-promote-stale",
+        {
+            "dry_run": True,
+            "min_source_age_days": 30,
+            "from_tier": "warm",
+            "to_tier": "cold",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["from_tier"] == "warm"
+    assert body["to_tier"] == "cold"
+
+
 def test_reconcile_picks_up_inbox_files(sidecar, staged_note: Path) -> None:
     """POST /reconcile should ingest files already on disk when the watcher is off."""
     dest = sidecar.inbox / "already-here.md"
@@ -279,3 +365,107 @@ def test_events_ws_streams_ingest(sidecar, staged_note: Path) -> None:
     assert "snapshot" in types, f"no snapshot event: {types}"
     assert "ingest_started" in types, f"no ingest_started event: {types}"
     assert "source_updated" in types, f"no source_updated event: {types}"
+
+
+# ---------------------------------------------------------------------------
+# 8. Identity claims + summary (API contract)
+# ---------------------------------------------------------------------------
+
+
+def test_identity_propose_patch_summary(sidecar) -> None:
+    prop = sidecar.post(
+        "/identity/claims/propose",
+        {
+            "kind": "fact",
+            "text": "E2E identity claim about household.",
+            "meta": {"relation": "partner", "labels": ["family", "e2e"]},
+        },
+    )
+    assert prop.status_code == 200, prop.text
+    cid = prop.json()["claim_id"]
+    patched = sidecar.patch(
+        f"/identity/claims/{cid}",
+        {"status": "active"},
+    )
+    assert patched.status_code == 200, patched.text
+    summ = sidecar.get("/identity/summary").json()
+    md = summ["markdown"]
+    assert "partner" in md
+    assert "household" in md
+
+
+def test_identity_patch_text(sidecar) -> None:
+    prop = sidecar.post(
+        "/identity/claims/propose",
+        {"kind": "boundary", "text": "Original boundary text for patch."},
+    )
+    assert prop.status_code == 200, prop.text
+    cid = prop.json()["claim_id"]
+    patched = sidecar.patch(
+        f"/identity/claims/{cid}",
+        {"text": "Updated boundary wording from e2e."},
+    )
+    assert patched.status_code == 200, patched.text
+    assert "Updated boundary" in patched.json()["claim"]["text"]
+
+
+def test_identity_mirror(sidecar) -> None:
+    r = sidecar.get("/identity/mirror", params={"limit_history": 10})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "markdown" in body and isinstance(body["markdown"], str)
+    assert "history" in body and isinstance(body["history"], list)
+
+
+# ---------------------------------------------------------------------------
+# 10. Bulk DELETE /sources by kind
+# ---------------------------------------------------------------------------
+
+
+def test_delete_sources_by_kind_requires_confirm(sidecar) -> None:
+    r = sidecar.delete("/sources", {"kind": "text", "confirm_bulk": False})
+    assert r.status_code == 422
+
+
+def test_delete_sources_by_kind_bulk(sidecar, staged_note: Path) -> None:
+    shutil.copy2(staged_note, sidecar.inbox / "bulk-a.md")
+    shutil.copy2(staged_note, sidecar.inbox / "bulk-b.md")
+    sidecar.post("/reconcile", {"force": False}).raise_for_status()
+    srcs = sidecar.wait_for_sources(2, timeout=45.0)
+    assert len(srcs) == 2
+    r = sidecar.delete("/sources", {"kind": "text", "confirm_bulk": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("sources_removed") == 2
+    assert body["removed_chunks"] >= 1
+    after = sidecar.get("/sources").json()
+    assert after["counts"]["sources"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 11. Webhook ingest + extensions reload
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_webhook_json(sidecar) -> None:
+    r = sidecar.post(
+        "/ingest/webhook",
+        {
+            "source_key": "pytest-webhook-e2e",
+            "kind": "external",
+            "chunks": [{"text": "Webhook fixture chunk for pytest.", "role": None, "meta": {}}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json().get("ok") is True
+    sidecar.wait_for_sources(1, timeout=45.0)
+    hits = sidecar.post("/search", {"query": "Webhook fixture chunk", "top_k": 4}).json()["results"]
+    assert hits and any("Webhook fixture" in h["text"] for h in hits)
+
+
+def test_extensions_reload(sidecar) -> None:
+    r = sidecar.post("/extensions/reload", {})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "reloaded" in body
+    assert "manifest_path" in body

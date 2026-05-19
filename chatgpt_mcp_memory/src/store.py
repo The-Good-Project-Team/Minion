@@ -84,6 +84,7 @@ class Hit:
     mtime: float
     meta: Dict[str, Any]
     source_meta: Dict[str, Any]
+    storage_tier: str = "hot"
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +192,318 @@ CREATE TRIGGER IF NOT EXISTS chunks_au_fts AFTER UPDATE ON chunks BEGIN
     INSERT INTO fts_chunks(rowid, text) VALUES (new.rowid, new.text);
 END;
 """
+
+
+def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
+    """Idempotent migrations layered onto `_SCHEMA_SQL` for older installs."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ambient_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            captured_at REAL NOT NULL,
+            sensitivity TEXT NOT NULL DEFAULT 'vault_local',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            storage_tier TEXT NOT NULL DEFAULT 'hot',
+            ttl_expires_at REAL,
+            dedupe_key TEXT UNIQUE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ambient_events_captured ON ambient_events(captured_at DESC)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS identity_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            action TEXT NOT NULL,
+            claim_id TEXT,
+            detail_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_identity_audit_ts ON identity_audit_log(ts DESC)"
+    )
+
+    cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+    if cols and "storage_tier" not in cols:
+        conn.execute(
+            "ALTER TABLE chunks ADD COLUMN storage_tier TEXT NOT NULL DEFAULT 'hot'"
+        )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wiki_pages (
+            page_id TEXT PRIMARY KEY,
+            page_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body_md TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            last_updated REAL NOT NULL,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            storage_tier TEXT NOT NULL DEFAULT 'hot'
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wiki_pages_type ON wiki_pages(page_type)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wiki_pages_status ON wiki_pages(status)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wiki_links (
+            link_id TEXT PRIMARY KEY,
+            from_page_id TEXT NOT NULL REFERENCES wiki_pages(page_id) ON DELETE CASCADE,
+            to_page_id TEXT NOT NULL REFERENCES wiki_pages(page_id) ON DELETE CASCADE,
+            link_kind TEXT NOT NULL DEFAULT 'related',
+            created_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wiki_links_from ON wiki_links(from_page_id)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            origin TEXT NOT NULL DEFAULT 'inferred',
+            priority TEXT,
+            due_at REAL,
+            body_md TEXT NOT NULL DEFAULT '',
+            context_refs_json TEXT NOT NULL DEFAULT '[]',
+            wiki_refs_json TEXT NOT NULL DEFAULT '[]',
+            output_id TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_origin ON tasks(origin)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outputs (
+            output_id TEXT PRIMARY KEY,
+            task_id TEXT REFERENCES tasks(task_id) ON DELETE SET NULL,
+            kind TEXT NOT NULL DEFAULT 'draft',
+            body_md TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft',
+            wiki_read_json TEXT NOT NULL DEFAULT '[]',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_sources (
+            source_key TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'healthy',
+            last_sync_at REAL,
+            config_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_job_runs (
+            run_id TEXT PRIMARY KEY,
+            source_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at REAL NOT NULL,
+            finished_at REAL,
+            items_count INTEGER NOT NULL DEFAULT 0,
+            error TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sync_job_runs_started ON sync_job_runs(started_at DESC)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS system_issues (
+            issue_id TEXT PRIMARY KEY,
+            severity TEXT NOT NULL DEFAULT 'warning',
+            source_key TEXT,
+            body_md TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at REAL NOT NULL,
+            resolved_at REAL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_system_issues_status ON system_issues(status)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_nodes (
+            node_id TEXT PRIMARY KEY,
+            node_kind TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'stub',
+            body_md TEXT NOT NULL DEFAULT '',
+            wiki_page_id TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_graph_nodes_kind ON graph_nodes(node_kind)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_edges (
+            edge_id TEXT PRIMARY KEY,
+            from_node_id TEXT NOT NULL,
+            to_node_id TEXT NOT NULL,
+            rel_kind TEXT NOT NULL DEFAULT 'related',
+            created_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_node_id)"
+    )
+    _migrate_graph_schema(conn)
+    _migrate_council_schema(conn)
+    from chat_store import _migrate_chat_schema
+
+    _migrate_chat_schema(conn)
+
+    seed_sync_sources(conn)
+    seed_graph_scaffold(conn)
+    conn.commit()
+
+
+def _migrate_graph_schema(conn: sqlite3.Connection) -> None:
+    """Layer new life-graph columns onto older graph_nodes / graph_edges installs."""
+    node_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(graph_nodes)").fetchall()}
+    if node_cols:
+        adds = [
+            ("parent_node_id", "TEXT"),
+            ("aliases_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("summary", "TEXT NOT NULL DEFAULT ''"),
+            ("confidence", "REAL NOT NULL DEFAULT 0.0"),
+            ("source_refs_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("privacy_level", "TEXT NOT NULL DEFAULT 'vault_local'"),
+        ]
+        for col, ddl in adds:
+            if col not in node_cols:
+                conn.execute(f"ALTER TABLE graph_nodes ADD COLUMN {col} {ddl}")
+    edge_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
+    if edge_cols:
+        for col, ddl in [
+            ("confidence", "REAL NOT NULL DEFAULT 0.0"),
+            ("source_refs_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("updated_at", "REAL"),
+        ]:
+            if col not in edge_cols:
+                conn.execute(f"ALTER TABLE graph_edges ADD COLUMN {col} {ddl}")
+
+
+def _migrate_council_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS council_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            pattern_id TEXT NOT NULL,
+            evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+            detected_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_council_events_detected ON council_events(detected_at DESC)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS council_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            proposal_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            intensity TEXT NOT NULL DEFAULT 'standard',
+            required_skill TEXT NOT NULL,
+            required_info_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'open',
+            pattern_id TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_council_proposals_open "
+        "ON council_proposals(status, intensity, updated_at DESC)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS council_approvals (
+            approval_id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            snooze_until REAL,
+            edited_payload_json TEXT,
+            created_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS council_pattern_state (
+            pattern_id TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            learned_cadence_days REAL,
+            suppress_until REAL,
+            reject_count INTEGER NOT NULL DEFAULT 0,
+            last_approved_at REAL,
+            last_signal_at REAL,
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (pattern_id, subject_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS capability_refs (
+            cap_key TEXT NOT NULL,
+            ref_id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL DEFAULT '',
+            label TEXT NOT NULL DEFAULT '',
+            vault_ref TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active',
+            meta_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_capability_refs_key ON capability_refs(cap_key, status)"
+    )
 
 
 def _ensure_vec_table(conn: sqlite3.Connection, dim: int) -> None:
@@ -328,6 +641,7 @@ def _bootstrap_schema(conn: sqlite3.Connection, embed_dim: int) -> None:
     conn.executescript(_SCHEMA_SQL)
     _ensure_vec_table(conn, embed_dim)
     _ensure_fts_table(conn)
+    _apply_schema_upgrades(conn)
 
     existing = conn.execute("SELECT value FROM meta WHERE key='embed_dim'").fetchone()
     if existing is None:
@@ -556,7 +870,21 @@ def _l2_normalise(vec: np.ndarray) -> np.ndarray:
 
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
-    """`with transaction(conn) as c:` — commits on success, rolls back on raise."""
+    """`with transaction(conn) as c:` — commits on success, rolls back on raise.
+
+    Uses a SAVEPOINT when already inside a transaction (ambient tick + upsert_source).
+    """
+    nested = bool(getattr(conn, "in_transaction", False))
+    if nested:
+        conn.execute("SAVEPOINT minion_sp")
+        try:
+            yield conn
+            conn.execute("RELEASE SAVEPOINT minion_sp")
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT minion_sp")
+            conn.execute("RELEASE SAVEPOINT minion_sp")
+            raise
+        return
     try:
         conn.execute("BEGIN")
         yield conn
@@ -668,6 +996,18 @@ def delete_source_by_path(conn: sqlite3.Connection, path: str) -> int:
     if src is None:
         return 0
     return delete_source(conn, src.source_id)
+
+
+def delete_sources_by_kind(conn: sqlite3.Connection, kind: str) -> Tuple[int, int]:
+    """Remove every source of ``kind``. Returns ``(sources_removed, chunks_removed)``."""
+    rows = conn.execute(
+        "SELECT source_id FROM sources WHERE kind=?", (kind,)
+    ).fetchall()
+    ids = [str(r["source_id"]) for r in rows]
+    chunk_total = 0
+    for sid in ids:
+        chunk_total += delete_source(conn, sid)
+    return len(ids), chunk_total
 
 
 def upsert_source(
@@ -791,7 +1131,8 @@ def search(
     placeholders = ",".join("?" * len(rowids))
     sql = [
         f"SELECT c.rowid AS rid, c.chunk_id, c.source_id, c.role, c.text, c.meta_json, "
-        f"s.path, s.kind, s.mtime, s.meta_json AS source_meta_json "
+        f"s.path, s.kind, s.mtime, s.meta_json AS source_meta_json, "
+        f"COALESCE(c.storage_tier, 'hot') AS storage_tier "
         f"FROM chunks c JOIN sources s ON s.source_id = c.source_id "
         f"WHERE c.rowid IN ({placeholders})"
     ]
@@ -831,6 +1172,7 @@ def search(
                 mtime=r["mtime"],
                 meta=json.loads(r["meta_json"] or "{}"),
                 source_meta=json.loads(r["source_meta_json"] or "{}"),
+                storage_tier=str(r["storage_tier"] or "hot"),
             )
         )
     return hits
@@ -839,6 +1181,7 @@ def search(
 def get_chunk(conn: sqlite3.Connection, chunk_id: str) -> Optional[Dict[str, Any]]:
     row = conn.execute(
         "SELECT c.chunk_id, c.source_id, c.role, c.text, c.meta_json, "
+        "COALESCE(c.storage_tier, 'hot') AS storage_tier, "
         "s.path, s.kind, s.mtime, s.meta_json AS source_meta_json "
         "FROM chunks c JOIN sources s ON s.source_id=c.source_id "
         "WHERE c.chunk_id=?",
@@ -854,6 +1197,7 @@ def get_chunk(conn: sqlite3.Connection, chunk_id: str) -> Optional[Dict[str, Any
         "path": row["path"],
         "kind": row["kind"],
         "mtime": row["mtime"],
+        "storage_tier": str(row["storage_tier"] or "hot"),
         "meta": json.loads(row["meta_json"] or "{}"),
         "source_meta": json.loads(row["source_meta_json"] or "{}"),
     }
@@ -883,6 +1227,7 @@ def browse_chunks_chronological(
     sql = [
         "SELECT c.rowid AS rid, c.chunk_id, c.source_id, c.role, c.text, c.meta_json, "
         "s.path, s.kind, s.mtime, s.meta_json AS source_meta_json, "
+        "COALESCE(c.storage_tier, 'hot') AS storage_tier, "
         "json_extract(c.meta_json, '$.create_time') AS ctime "
         "FROM chunks c JOIN sources s ON s.source_id = c.source_id "
         "WHERE json_extract(c.meta_json, '$.create_time') IS NOT NULL"
@@ -926,6 +1271,7 @@ def browse_chunks_chronological(
                 mtime=r["mtime"],
                 meta=json.loads(r["meta_json"] or "{}"),
                 source_meta=json.loads(r["source_meta_json"] or "{}"),
+                storage_tier=str(r["storage_tier"] or "hot"),
             )
         )
     return hits
@@ -958,6 +1304,7 @@ def keyword_search(
     sql = [
         "SELECT c.chunk_id, c.source_id, c.role, c.text, c.meta_json, "
         "s.path, s.kind, s.mtime, s.meta_json AS source_meta_json, "
+        "COALESCE(c.storage_tier, 'hot') AS storage_tier, "
         "bm25(fts_chunks) AS rank "
         "FROM fts_chunks "
         "JOIN chunks c ON c.rowid = fts_chunks.rowid "
@@ -1001,6 +1348,7 @@ def keyword_search(
                 mtime=r["mtime"],
                 meta=json.loads(r["meta_json"] or "{}"),
                 source_meta=json.loads(r["source_meta_json"] or "{}"),
+                storage_tier=str(r["storage_tier"] or "hot"),
             )
         )
     return hits
@@ -1222,6 +1570,43 @@ def identity_claim_list(
     return [_row_identity_claim(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def identity_claim_patch_fields(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    *,
+    text: Optional[str] = None,
+    status: Optional[str] = None,
+    superseded_by: Optional[str] = None,
+    meta_merge: Optional[Dict[str, Any]] = None,
+) -> bool:
+    row = conn.execute(
+        "SELECT text, status, superseded_by, meta_json FROM identity_claims WHERE claim_id=?",
+        (claim_id,),
+    ).fetchone()
+    if not row:
+        return False
+    new_text = text if text is not None else row["text"]
+    new_status = status if status is not None else row["status"]
+    new_sup = superseded_by if superseded_by is not None else row["superseded_by"]
+    meta = json.loads(row["meta_json"] or "{}")
+    if meta_merge:
+        meta.update(meta_merge)
+    now = time.time()
+    conn.execute(
+        "UPDATE identity_claims SET text=?, status=?, superseded_by=?, "
+        "updated_at=?, meta_json=? WHERE claim_id=?",
+        (
+            new_text,
+            new_status,
+            new_sup,
+            now,
+            json.dumps(meta, ensure_ascii=False),
+            claim_id,
+        ),
+    )
+    return True
+
+
 def identity_claim_set_status(
     conn: sqlite3.Connection,
     claim_id: str,
@@ -1229,17 +1614,9 @@ def identity_claim_set_status(
     status: str,
     superseded_by: Optional[str] = None,
 ) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM identity_claims WHERE claim_id=?", (claim_id,)
-    ).fetchone()
-    if not row:
-        return False
-    now = time.time()
-    conn.execute(
-        "UPDATE identity_claims SET status=?, updated_at=?, superseded_by=? WHERE claim_id=?",
-        (status, now, superseded_by, claim_id),
+    return identity_claim_patch_fields(
+        conn, claim_id, status=status, superseded_by=superseded_by
     )
-    return True
 
 
 def identity_edge_insert(
@@ -1322,6 +1699,254 @@ def preference_clusters_list(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return out
 
 
+def identity_audit_log_append(
+    conn: sqlite3.Connection,
+    *,
+    action: str,
+    claim_id: Optional[str] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO identity_audit_log(ts, action, claim_id, detail_json) VALUES (?,?,?,?)",
+        (
+            time.time(),
+            action.strip()[:128],
+            claim_id,
+            json.dumps(detail or {}, ensure_ascii=False),
+        ),
+    )
+
+
+def identity_claim_mirror_history(
+    conn: sqlite3.Connection, *, limit: int = 50
+) -> List[Dict[str, Any]]:
+    """Claims no longer active/proposed-only narrative — superseded or rejected."""
+    lim = int(max(1, min(limit, 500)))
+    rows = conn.execute(
+        "SELECT claim_id, kind, text, status, confidence, source_agent, "
+        "created_at, updated_at, superseded_by, meta_json FROM identity_claims "
+        "WHERE status IN ('superseded', 'rejected') "
+        "ORDER BY updated_at DESC LIMIT ?",
+        (lim,),
+    ).fetchall()
+    return [_row_identity_claim(r) for r in rows]
+
+
+def ambient_events_recent(
+    conn: sqlite3.Connection, *, limit: int = 80
+) -> List[Dict[str, Any]]:
+    lim = int(max(1, min(limit, 2000)))
+    rows = conn.execute(
+        "SELECT event_id, event_type, captured_at, sensitivity, payload_json, storage_tier, dedupe_key "
+        "FROM ambient_events ORDER BY captured_at DESC LIMIT ?",
+        (lim,),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "event_id": r["event_id"],
+                "event_type": r["event_type"],
+                "captured_at": float(r["captured_at"]),
+                "sensitivity": r["sensitivity"],
+                "payload": json.loads(r["payload_json"] or "{}"),
+                "storage_tier": r["storage_tier"],
+                "dedupe_key": r["dedupe_key"],
+            }
+        )
+    return out
+
+
+def ambient_event_insert_ignore(
+    conn: sqlite3.Connection,
+    *,
+    event_type: str,
+    captured_at: float,
+    dedupe_key: str,
+    payload: Dict[str, Any],
+    sensitivity: str = "vault_local",
+    storage_tier: str = "hot",
+) -> bool:
+    """Returns True if a row was inserted (dedupe_key unseen)."""
+    event_id = "amb-" + hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:24]
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO ambient_events(event_id, event_type, captured_at, sensitivity, "
+        "payload_json, storage_tier, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            event_id,
+            event_type.strip()[:64],
+            float(captured_at),
+            sensitivity.strip()[:64],
+            json.dumps(payload, ensure_ascii=False),
+            storage_tier.strip()[:32],
+            dedupe_key[:2048],
+        ),
+    )
+    return cur.rowcount == 1
+
+
+def chunk_storage_tier_counts(conn: sqlite3.Connection) -> Dict[str, int]:
+    rows = conn.execute(
+        "SELECT COALESCE(storage_tier, 'hot') AS t, COUNT(*) AS n FROM chunks GROUP BY t"
+    ).fetchall()
+    return {str(r["t"]): int(r["n"]) for r in rows}
+
+
+def sqlite_storage_fingerprint(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Cheap PRAGMA snapshot for maintenance UI (free list → reclaimable space after offline VACUUM)."""
+    pc_row = conn.execute("PRAGMA page_count").fetchone()
+    fc_row = conn.execute("PRAGMA freelist_count").fetchone()
+    ps_row = conn.execute("PRAGMA page_size").fetchone()
+    page_count = int(pc_row[0]) if pc_row and pc_row[0] is not None else 0
+    freelist_pages = int(fc_row[0]) if fc_row and fc_row[0] is not None else 0
+    page_size = int(ps_row[0]) if ps_row and ps_row[0] is not None else 0
+    logical_bytes = page_count * page_size
+    freelist_bytes_approx = freelist_pages * page_size
+    freelist_ratio = (freelist_pages / page_count) if page_count > 0 else 0.0
+
+    db_path_str = ""
+    disk_bytes: Optional[int] = None
+    for row in conn.execute("PRAGMA database_list"):
+        if row["name"] == "main" and row["file"]:
+            db_path_str = str(row["file"])
+            p = Path(db_path_str)
+            if p.is_file():
+                try:
+                    disk_bytes = int(p.stat().st_size)
+                except OSError:
+                    disk_bytes = None
+            break
+
+    return {
+        "page_count": page_count,
+        "freelist_pages": freelist_pages,
+        "page_size": page_size,
+        "logical_bytes": logical_bytes,
+        "freelist_bytes_approx": freelist_bytes_approx,
+        "freelist_ratio": round(freelist_ratio, 8),
+        "db_file_bytes": disk_bytes,
+        "db_path": db_path_str or None,
+    }
+
+
+_STORAGE_TIER_RANK: Dict[str, int] = {"hot": 0, "warm": 1, "cold": 2}
+
+
+def normalize_storage_tier_name(name: str) -> str:
+    t = (name or "hot").strip().lower()
+    return t if t in _STORAGE_TIER_RANK else "hot"
+
+
+def validate_stale_tier_promotion(from_tier: str, to_tier: str) -> Tuple[str, str]:
+    """``from`` must be strictly fresher than ``to`` (hot→warm→cold). Returns normalized names."""
+    f = normalize_storage_tier_name(from_tier)
+    t = normalize_storage_tier_name(to_tier)
+    if _STORAGE_TIER_RANK[f] >= _STORAGE_TIER_RANK[t]:
+        raise ValueError(
+            "stale-source tier promotion requires from_tier strictly fresher than to_tier "
+            f"(e.g. hot→warm); got {f!r} -> {t!r}"
+        )
+    return f, t
+
+
+def count_chunks_stale_source_tier_promotion_candidates(
+    conn: sqlite3.Connection,
+    *,
+    source_updated_before: float,
+    source_kinds: Optional[Sequence[str]] = None,
+    from_tier: str = "hot",
+) -> int:
+    """Count chunks currently at ``from_tier`` whose parent sources are older than threshold."""
+    ft = normalize_storage_tier_name(from_tier)
+    kinds_norm: Optional[List[str]] = None
+    if source_kinds:
+        kinds_norm = [k.strip().lower() for k in source_kinds if k and k.strip()]
+        if not kinds_norm:
+            kinds_norm = None
+    base = """
+            SELECT COUNT(*) AS n FROM chunks c
+            JOIN sources s ON s.source_id = c.source_id
+            WHERE COALESCE(c.storage_tier, 'hot') = ? AND s.updated_at < ?
+    """
+    if kinds_norm:
+        placeholders = ",".join("?" * len(kinds_norm))
+        row = conn.execute(
+            f"{base} AND lower(s.kind) IN ({placeholders})",
+            (ft, float(source_updated_before), *kinds_norm),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            base,
+            (ft, float(source_updated_before)),
+        ).fetchone()
+    return int(row["n"]) if row and row["n"] is not None else 0
+
+
+def promote_chunks_for_stale_sources(
+    conn: sqlite3.Connection,
+    *,
+    source_updated_before: float,
+    source_kinds: Optional[Sequence[str]] = None,
+    from_tier: str,
+    to_tier: str,
+) -> int:
+    """Bump ``storage_tier`` from ``from_tier`` to ``to_tier`` when sources are stale. Returns rows changed."""
+    f_norm, t_norm = validate_stale_tier_promotion(from_tier, to_tier)
+    kinds_norm: Optional[List[str]] = None
+    if source_kinds:
+        kinds_norm = [k.strip().lower() for k in source_kinds if k and k.strip()]
+        if not kinds_norm:
+            kinds_norm = None
+    before = int(conn.total_changes)
+    sub = [
+        "SELECT c.chunk_id FROM chunks c ",
+        "JOIN sources s ON s.source_id = c.source_id ",
+        "WHERE COALESCE(c.storage_tier, 'hot') = ? AND s.updated_at < ? ",
+    ]
+    params: List[Any] = [f_norm, float(source_updated_before)]
+    if kinds_norm:
+        placeholders = ",".join("?" * len(kinds_norm))
+        sub.append(f"AND lower(s.kind) IN ({placeholders})")
+        params.extend(kinds_norm)
+    sql_sub = "".join(sub)
+    conn.execute(
+        f"UPDATE chunks SET storage_tier = ? WHERE chunk_id IN ({sql_sub})",
+        [t_norm, *params],
+    )
+    return int(conn.total_changes) - before
+
+
+def count_chunks_hot_to_warm_candidates(
+    conn: sqlite3.Connection,
+    *,
+    source_updated_before: float,
+    source_kinds: Optional[Sequence[str]] = None,
+) -> int:
+    """Compatibility: ``hot`` rows eligible for promotion to ``warm``."""
+    return count_chunks_stale_source_tier_promotion_candidates(
+        conn,
+        source_updated_before=source_updated_before,
+        source_kinds=source_kinds,
+        from_tier="hot",
+    )
+
+
+def promote_chunks_hot_to_warm_for_stale_sources(
+    conn: sqlite3.Connection,
+    *,
+    source_updated_before: float,
+    source_kinds: Optional[Sequence[str]] = None,
+) -> int:
+    """Compatibility: ``hot`` → ``warm`` for stale sources."""
+    return promote_chunks_for_stale_sources(
+        conn,
+        source_updated_before=source_updated_before,
+        source_kinds=source_kinds,
+        from_tier="hot",
+        to_tier="warm",
+    )
+
+
 def iter_chunk_embedding_rows(
     conn: sqlite3.Connection,
     *,
@@ -1345,3 +1970,649 @@ def iter_chunk_embedding_rows(
             continue
         out.append((str(r["chunk_id"]), str(r["text"]), vec.copy()))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Second-brain entities (wiki, tasks, outputs, sync health)
+# ---------------------------------------------------------------------------
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}-{hashlib.sha256(f'{prefix}{time.time()}{os.urandom(8)!r}'.encode()).hexdigest()[:20]}"
+
+
+def meta_get(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return str(row["value"]) if row else None
+
+
+def meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+
+
+def seed_sync_sources(conn: sqlite3.Connection) -> None:
+    defaults = (
+        ("inbox", "Inbox watcher"),
+        ("screen_context", "macOS screen context"),
+        ("ambient_ax_index", "Accessibility text indexer"),
+        ("ambient_fs", "Home filesystem watcher"),
+        ("ambient_process", "Process snapshot collector"),
+        ("ambient_listening", "Mic listening sessions"),
+    )
+    for key, label in defaults:
+        conn.execute(
+            "INSERT OR IGNORE INTO sync_sources(source_key, label, status, config_json) "
+            "VALUES(?, ?, 'healthy', '{}')",
+            (key, label),
+        )
+
+
+def sync_source_touch(
+    conn: sqlite3.Connection,
+    source_key: str,
+    *,
+    status: str = "healthy",
+    items: int = 0,
+) -> None:
+    seed_sync_sources(conn)
+    now = time.time()
+    conn.execute(
+        "UPDATE sync_sources SET status=?, last_sync_at=? WHERE source_key=?",
+        (status.strip()[:32], now, source_key),
+    )
+
+
+def sync_sources_list(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT source_key, label, status, last_sync_at, config_json FROM sync_sources ORDER BY source_key"
+    ).fetchall()
+    return [
+        {
+            "source_key": r["source_key"],
+            "label": r["label"],
+            "status": r["status"],
+            "last_sync_at": float(r["last_sync_at"]) if r["last_sync_at"] is not None else None,
+            "config": json.loads(r["config_json"] or "{}"),
+        }
+        for r in rows
+    ]
+
+
+def sync_job_run_append(
+    conn: sqlite3.Connection,
+    *,
+    source_key: str,
+    status: str,
+    started_at: float,
+    finished_at: Optional[float],
+    items_count: int = 0,
+    error: Optional[str] = None,
+) -> str:
+    run_id = _new_id("run")
+    conn.execute(
+        "INSERT INTO sync_job_runs(run_id, source_key, status, started_at, finished_at, items_count, error) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?)",
+        (
+            run_id,
+            source_key,
+            status[:32],
+            float(started_at),
+            float(finished_at) if finished_at is not None else None,
+            int(items_count),
+            (error or "")[:2000] or None,
+        ),
+    )
+    return run_id
+
+
+def system_issue_upsert(
+    conn: sqlite3.Connection,
+    *,
+    issue_id: str,
+    severity: str,
+    source_key: Optional[str],
+    body_md: str,
+) -> None:
+    now = time.time()
+    conn.execute(
+        "INSERT INTO system_issues(issue_id, severity, source_key, body_md, status, created_at) "
+        "VALUES(?, ?, ?, ?, 'open', ?) "
+        "ON CONFLICT(issue_id) DO UPDATE SET "
+        "severity=excluded.severity, body_md=excluded.body_md, status='open', resolved_at=NULL",
+        (issue_id, severity[:32], source_key, body_md, now),
+    )
+
+
+def system_issues_open(conn: sqlite3.Connection, *, limit: int = 50) -> List[Dict[str, Any]]:
+    lim = int(max(1, min(limit, 200)))
+    rows = conn.execute(
+        "SELECT issue_id, severity, source_key, body_md, status, created_at, resolved_at "
+        "FROM system_issues WHERE status='open' ORDER BY created_at DESC LIMIT ?",
+        (lim,),
+    ).fetchall()
+    return [
+        {
+            "issue_id": r["issue_id"],
+            "severity": r["severity"],
+            "source_key": r["source_key"],
+            "body_md": r["body_md"],
+            "status": r["status"],
+            "created_at": float(r["created_at"]),
+            "resolved_at": float(r["resolved_at"]) if r["resolved_at"] is not None else None,
+        }
+        for r in rows
+    ]
+
+
+def system_issue_resolve(conn: sqlite3.Connection, issue_id: str) -> bool:
+    cur = conn.execute(
+        "UPDATE system_issues SET status='resolved', resolved_at=? WHERE issue_id=? AND status='open'",
+        (time.time(), issue_id),
+    )
+    return cur.rowcount > 0
+
+
+def _row_wiki_page(r: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "page_id": r["page_id"],
+        "page_type": r["page_type"],
+        "title": r["title"],
+        "body_md": r["body_md"],
+        "status": r["status"],
+        "last_updated": float(r["last_updated"]),
+        "meta": json.loads(r["meta_json"] or "{}"),
+        "storage_tier": r["storage_tier"],
+    }
+
+
+def wiki_page_list(
+    conn: sqlite3.Connection,
+    *,
+    page_type: Optional[str] = None,
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    lim = int(max(1, min(limit, 500)))
+    clauses: List[str] = []
+    params: List[Any] = []
+    if page_type:
+        clauses.append("page_type=?")
+        params.append(page_type.strip()[:64])
+    if status:
+        clauses.append("status=?")
+        params.append(status.strip()[:32])
+    if q:
+        clauses.append("(title LIKE ? OR body_md LIKE ?)")
+        like = f"%{q.strip()[:200]}%"
+        params.extend([like, like])
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT page_id, page_type, title, body_md, status, last_updated, meta_json, storage_tier "
+        f"FROM wiki_pages{where} ORDER BY last_updated DESC LIMIT ?",
+        (*params, lim),
+    ).fetchall()
+    return [_row_wiki_page(r) for r in rows]
+
+
+def wiki_page_get(conn: sqlite3.Connection, page_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT page_id, page_type, title, body_md, status, last_updated, meta_json, storage_tier "
+        "FROM wiki_pages WHERE page_id=?",
+        (page_id,),
+    ).fetchone()
+    return _row_wiki_page(row) if row else None
+
+
+def wiki_page_upsert(
+    conn: sqlite3.Connection,
+    *,
+    page_id: Optional[str],
+    page_type: str,
+    title: str,
+    body_md: str,
+    status: str = "active",
+    meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    now = time.time()
+    pid = page_id or _new_id("wiki")
+    conn.execute(
+        "INSERT INTO wiki_pages(page_id, page_type, title, body_md, status, last_updated, meta_json) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(page_id) DO UPDATE SET "
+        "page_type=excluded.page_type, title=excluded.title, body_md=excluded.body_md, "
+        "status=excluded.status, last_updated=excluded.last_updated, meta_json=excluded.meta_json",
+        (
+            pid,
+            page_type.strip()[:64],
+            title.strip()[:500],
+            body_md,
+            status.strip()[:32],
+            now,
+            json.dumps(meta or {}, ensure_ascii=False),
+        ),
+    )
+    return pid
+
+
+def wiki_page_delete(conn: sqlite3.Connection, page_id: str) -> bool:
+    cur = conn.execute("DELETE FROM wiki_pages WHERE page_id=?", (page_id,))
+    return cur.rowcount > 0
+
+
+def wiki_link_add(
+    conn: sqlite3.Connection,
+    *,
+    from_page_id: str,
+    to_page_id: str,
+    link_kind: str = "related",
+) -> str:
+    lid = _new_id("lnk")
+    conn.execute(
+        "INSERT INTO wiki_links(link_id, from_page_id, to_page_id, link_kind, created_at) "
+        "VALUES(?, ?, ?, ?, ?)",
+        (lid, from_page_id, to_page_id, link_kind[:32], time.time()),
+    )
+    return lid
+
+
+def wiki_links_for_page(conn: sqlite3.Connection, page_id: str) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT l.link_id, l.from_page_id, l.to_page_id, l.link_kind, l.created_at, "
+        "p.title AS to_title, p.page_type AS to_type "
+        "FROM wiki_links l JOIN wiki_pages p ON p.page_id = l.to_page_id "
+        "WHERE l.from_page_id=? ORDER BY l.created_at DESC",
+        (page_id,),
+    ).fetchall()
+    return [
+        {
+            "link_id": r["link_id"],
+            "from_page_id": r["from_page_id"],
+            "to_page_id": r["to_page_id"],
+            "link_kind": r["link_kind"],
+            "created_at": float(r["created_at"]),
+            "to_title": r["to_title"],
+            "to_type": r["to_type"],
+        }
+        for r in rows
+    ]
+
+
+def _row_task(r: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "task_id": r["task_id"],
+        "title": r["title"],
+        "status": r["status"],
+        "origin": r["origin"],
+        "priority": r["priority"],
+        "due_at": float(r["due_at"]) if r["due_at"] is not None else None,
+        "body_md": r["body_md"],
+        "context_refs": json.loads(r["context_refs_json"] or "[]"),
+        "wiki_refs": json.loads(r["wiki_refs_json"] or "[]"),
+        "output_id": r["output_id"],
+        "created_at": float(r["created_at"]),
+        "updated_at": float(r["updated_at"]),
+    }
+
+
+def task_list(
+    conn: sqlite3.Connection,
+    *,
+    status: Optional[str] = None,
+    origin: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    lim = int(max(1, min(limit, 500)))
+    clauses: List[str] = []
+    params: List[Any] = []
+    if status:
+        clauses.append("status=?")
+        params.append(status.strip()[:32])
+    if origin:
+        clauses.append("origin=?")
+        params.append(origin.strip()[:32])
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = conn.execute(
+        f"SELECT task_id, title, status, origin, priority, due_at, body_md, context_refs_json, "
+        f"wiki_refs_json, output_id, created_at, updated_at FROM tasks{where} "
+        f"ORDER BY updated_at DESC LIMIT ?",
+        (*params, lim),
+    ).fetchall()
+    return [_row_task(r) for r in rows]
+
+
+def task_get(conn: sqlite3.Connection, task_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT task_id, title, status, origin, priority, due_at, body_md, context_refs_json, "
+        "wiki_refs_json, output_id, created_at, updated_at FROM tasks WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    return _row_task(row) if row else None
+
+
+def task_infer_insert(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    body_md: str = "",
+    origin: str = "inferred",
+    priority: Optional[str] = None,
+    context_refs: Optional[List[Any]] = None,
+    wiki_refs: Optional[List[str]] = None,
+) -> str:
+    now = time.time()
+    tid = _new_id("task")
+    conn.execute(
+        "INSERT INTO tasks(task_id, title, status, origin, priority, body_md, context_refs_json, "
+        "wiki_refs_json, created_at, updated_at) VALUES(?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)",
+        (
+            tid,
+            title.strip()[:500],
+            origin.strip()[:32],
+            priority,
+            body_md,
+            json.dumps(context_refs or [], ensure_ascii=False),
+            json.dumps(wiki_refs or [], ensure_ascii=False),
+            now,
+            now,
+        ),
+    )
+    return tid
+
+
+def task_patch(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    status: Optional[str] = None,
+    title: Optional[str] = None,
+    body_md: Optional[str] = None,
+    output_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    fields: List[str] = []
+    params: List[Any] = []
+    if status is not None:
+        fields.append("status=?")
+        params.append(status.strip()[:32])
+    if title is not None:
+        fields.append("title=?")
+        params.append(title.strip()[:500])
+    if body_md is not None:
+        fields.append("body_md=?")
+        params.append(body_md)
+    if output_id is not None:
+        fields.append("output_id=?")
+        params.append(output_id)
+    if not fields:
+        return task_get(conn, task_id)
+    fields.append("updated_at=?")
+    params.append(time.time())
+    params.append(task_id)
+    cur = conn.execute(
+        f"UPDATE tasks SET {', '.join(fields)} WHERE task_id=?",
+        params,
+    )
+    if cur.rowcount == 0:
+        return None
+    return task_get(conn, task_id)
+
+
+def output_create(
+    conn: sqlite3.Connection,
+    *,
+    task_id: Optional[str],
+    kind: str,
+    body_md: str,
+    wiki_read: Optional[List[str]] = None,
+) -> str:
+    now = time.time()
+    oid = _new_id("out")
+    conn.execute(
+        "INSERT INTO outputs(output_id, task_id, kind, body_md, status, wiki_read_json, created_at, updated_at) "
+        "VALUES(?, ?, ?, ?, 'draft', ?, ?, ?)",
+        (
+            oid,
+            task_id,
+            kind.strip()[:64],
+            body_md,
+            json.dumps(wiki_read or [], ensure_ascii=False),
+            now,
+            now,
+        ),
+    )
+    if task_id:
+        task_patch(conn, task_id, output_id=oid, status="review")
+    return oid
+
+
+def output_get(conn: sqlite3.Connection, output_id: str) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT output_id, task_id, kind, body_md, status, wiki_read_json, created_at, updated_at "
+        "FROM outputs WHERE output_id=?",
+        (output_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "output_id": row["output_id"],
+        "task_id": row["task_id"],
+        "kind": row["kind"],
+        "body_md": row["body_md"],
+        "status": row["status"],
+        "wiki_read": json.loads(row["wiki_read_json"] or "[]"),
+        "created_at": float(row["created_at"]),
+        "updated_at": float(row["updated_at"]),
+    }
+
+
+def output_patch(
+    conn: sqlite3.Connection,
+    output_id: str,
+    *,
+    status: Optional[str] = None,
+    body_md: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    fields: List[str] = []
+    params: List[Any] = []
+    if status is not None:
+        fields.append("status=?")
+        params.append(status.strip()[:32])
+    if body_md is not None:
+        fields.append("body_md=?")
+        params.append(body_md)
+    if not fields:
+        return output_get(conn, output_id)
+    fields.append("updated_at=?")
+    params.append(time.time())
+    params.append(output_id)
+    cur = conn.execute(
+        f"UPDATE outputs SET {', '.join(fields)} WHERE output_id=?",
+        params,
+    )
+    if cur.rowcount == 0:
+        return None
+    return output_get(conn, output_id)
+
+
+def ambient_events_since(
+    conn: sqlite3.Connection,
+    *,
+    since_ts: float,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    lim = int(max(1, min(limit, 2000)))
+    rows = conn.execute(
+        "SELECT event_id, event_type, captured_at, sensitivity, payload_json, storage_tier, dedupe_key "
+        "FROM ambient_events WHERE captured_at >= ? ORDER BY captured_at DESC LIMIT ?",
+        (float(since_ts), lim),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "event_id": r["event_id"],
+                "event_type": r["event_type"],
+                "captured_at": float(r["captured_at"]),
+                "sensitivity": r["sensitivity"],
+                "payload": json.loads(r["payload_json"] or "{}"),
+                "storage_tier": r["storage_tier"],
+                "dedupe_key": r["dedupe_key"],
+            }
+        )
+    return out
+
+
+GRAPH_KINDS: tuple[tuple[str, str, str], ...] = ()  # legacy flat kinds; see life_graph.py
+
+WIKI_PAGE_TYPE_TO_GRAPH: Dict[str, str] = {}
+
+
+def _import_life_graph():
+    from life_graph import LIFE_GRAPH_SCAFFOLD, WIKI_PAGE_TYPE_TO_NODE
+
+    return LIFE_GRAPH_SCAFFOLD, WIKI_PAGE_TYPE_TO_NODE
+
+
+def seed_graph_scaffold(conn: sqlite3.Connection) -> None:
+    """Seed the pre-generated life graph tree (see docs/LIFE_GRAPH.md)."""
+    scaffold, wiki_map = _import_life_graph()
+    global WIKI_PAGE_TYPE_TO_GRAPH
+    WIKI_PAGE_TYPE_TO_GRAPH = wiki_map
+    now = time.time()
+    for node_id, parent_id, node_type, title, hint in scaffold:
+        conn.execute(
+            "INSERT OR IGNORE INTO graph_nodes("
+            "node_id, node_kind, title, status, body_md, wiki_page_id, "
+            "parent_node_id, aliases_json, summary, confidence, source_refs_json, "
+            "privacy_level, created_at, updated_at"
+            ") VALUES(?, ?, ?, 'scaffold', ?, NULL, ?, '[]', ?, 0.0, '[]', 'vault_local', ?, ?)",
+            (node_id, node_type, title, hint, parent_id, hint, now, now),
+        )
+
+
+def _row_graph_node(r: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "node_id": r["node_id"],
+        "node_kind": r["node_kind"],
+        "title": r["title"],
+        "status": r["status"],
+        "body_md": r["body_md"],
+        "wiki_page_id": r["wiki_page_id"],
+        "parent_node_id": r["parent_node_id"] if "parent_node_id" in r.keys() else None,
+        "aliases": json.loads(r["aliases_json"] or "[]") if "aliases_json" in r.keys() else [],
+        "summary": (r["summary"] or "") if "summary" in r.keys() else "",
+        "confidence": float(r["confidence"] or 0) if "confidence" in r.keys() else 0.0,
+        "source_refs": json.loads(r["source_refs_json"] or "[]")
+        if "source_refs_json" in r.keys()
+        else [],
+        "privacy_level": (r["privacy_level"] or "vault_local")
+        if "privacy_level" in r.keys()
+        else "vault_local",
+        "created_at": float(r["created_at"]),
+        "updated_at": float(r["updated_at"]),
+    }
+
+
+def graph_scaffold_nodes(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    scaffold, _ = _import_life_graph()
+    order = {spec[0]: i for i, spec in enumerate(scaffold)}
+    rows = conn.execute(
+        "SELECT node_id, node_kind, title, status, body_md, wiki_page_id, parent_node_id, "
+        "aliases_json, summary, confidence, source_refs_json, privacy_level, created_at, updated_at "
+        "FROM graph_nodes WHERE status='scaffold'"
+    ).fetchall()
+    nodes = [_row_graph_node(r) for r in rows]
+    nodes.sort(key=lambda n: order.get(n["node_id"], 999))
+    return nodes
+
+
+def graph_filled_counts(conn: sqlite3.Connection) -> Dict[str, int]:
+    """Count non-scaffold nodes + wiki pages mapped by type."""
+    _, wiki_map = _import_life_graph()
+    out: Dict[str, int] = {}
+    rows = conn.execute(
+        "SELECT node_kind, COUNT(*) AS n FROM graph_nodes "
+        "WHERE status NOT IN ('stub', 'scaffold') GROUP BY node_kind"
+    ).fetchall()
+    for r in rows:
+        out[str(r["node_kind"])] = int(r["n"])
+    wiki_rows = conn.execute(
+        "SELECT page_type, COUNT(*) AS n FROM wiki_pages WHERE status='active' GROUP BY page_type"
+    ).fetchall()
+    for r in wiki_rows:
+        nk = wiki_map.get(str(r["page_type"] or ""))
+        if nk:
+            out[nk] = out.get(nk, 0) + int(r["n"])
+    return out
+
+
+def graph_scaffold_list(conn: sqlite3.Connection) -> Dict[str, Any]:
+    from life_graph import NODE_TYPES, RELATION_TYPES, scaffold_as_tree
+
+    nodes = graph_scaffold_nodes(conn)
+    counts = graph_filled_counts(conn)
+
+    def _attach_counts(node: Dict[str, Any]) -> Dict[str, Any]:
+        kind = str(node.get("node_kind") or "")
+        filled = counts.get(kind, 0) if kind != "scaffold" else 0
+        child_filled = 0
+        children = [_attach_counts(c) for c in node.get("children") or []]
+        for c in children:
+            child_filled += int(c.get("filled_count") or 0)
+        total = filled + child_filled if kind == "scaffold" else filled
+        return {
+            **node,
+            "filled_count": total,
+            "children": children,
+        }
+
+    flat = [{**n, "children": []} for n in nodes]
+    tree = scaffold_as_tree(flat)
+    tree = [_attach_counts(n) for n in tree]
+
+    # Legacy flat kinds for callers that expect a list
+    kinds = [
+        {
+            "kind": n["node_kind"],
+            "label": n["title"],
+            "hint": n.get("summary") or n.get("body_md") or "",
+            "stub_node_id": n["node_id"],
+            "filled_count": int(n.get("filled_count") or 0),
+        }
+        for n in flat
+        if n["node_id"] != "scaffold-me"
+    ]
+
+    return {
+        "root": tree[0] if tree else None,
+        "tree": tree,
+        "kinds": kinds,
+        "node_types": list(NODE_TYPES),
+        "relation_types": list(RELATION_TYPES),
+    }
+
+
+def sync_job_runs_recent(
+    conn: sqlite3.Connection, *, limit: int = 40
+) -> List[Dict[str, Any]]:
+    lim = int(max(1, min(limit, 500)))
+    rows = conn.execute(
+        "SELECT run_id, source_key, status, started_at, finished_at, items_count, error "
+        "FROM sync_job_runs ORDER BY started_at DESC LIMIT ?",
+        (lim,),
+    ).fetchall()
+    return [
+        {
+            "run_id": r["run_id"],
+            "source_key": r["source_key"],
+            "status": r["status"],
+            "started_at": float(r["started_at"]),
+            "finished_at": float(r["finished_at"]) if r["finished_at"] is not None else None,
+            "items_count": int(r["items_count"]),
+            "error": r["error"],
+        }
+        for r in rows
+    ]

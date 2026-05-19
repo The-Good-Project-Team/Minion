@@ -1,6 +1,6 @@
 {
   "name": "minion-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Minion — private local memory and semantic search for AI assistants (Tauri + Python sidecar).",
   "type": "module",
   "scripts": {
@@ -8,8 +8,13 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test:unit": "vitest run",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:install-browsers": "playwright install chromium",
+    "test:all": "bash scripts/verify-all.sh",
     "tauri:build:macos": "bunx tauri build && bash ./scripts/postbuild_macos_sanitize_app.sh ./src-tauri/target/release/bundle/macos/Minion.app && APP=$(ls -td /var/folders/*/*/*/cursor-sandbox-cache/*/cargo-target/release/bundle/macos/Minion.app 2>/dev/null | head -n 1) && ditto -c -k --sequesterRsrc --keepParent \"$APP\" \"${APP}.zip\""
   },
   "license": "MIT",
@@ -21,6 +26,7 @@
     "@tauri-apps/plugin-updater": "^2.10.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@sveltejs/adapter-static": "^3.0.6",
     "@sveltejs/kit": "^2.9.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
@@ -28,6 +34,7 @@
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
     "typescript": "~5.6.2",
-    "vite": "^6.0.3"
+    "vite": "^6.0.3",
+    "vitest": "^3.2.4"
   }
 }

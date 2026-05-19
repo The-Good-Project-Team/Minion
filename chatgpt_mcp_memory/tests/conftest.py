@@ -6,6 +6,10 @@ We spawn the same `api.py` the Tauri shell spawns so the tests exercise the
 whole HTTP + WebSocket stack (uvicorn, FastAPI, pydantic, CORS, lifespan) --
 not a TestClient mock. Slightly slower, but catches wiring bugs that only
 show up over the wire.
+
+E2E requires the same interpreter capability as production ``store.connect``
+(loadable SQLite extensions + ``sqlite-vec``). A session preflight fails fast
+with setup hints if ``python3`` is wrong; use ``chatgpt_mcp_memory/.venv/bin/python``.
 """
 from __future__ import annotations
 
@@ -27,6 +31,60 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 API_SCRIPT = REPO_ROOT / "chatgpt_mcp_memory" / "src" / "api.py"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+def _e2e_sqlite_environment_error() -> Optional[str]:
+    """Same capability ``store._load_vec_extension`` needs; return message if missing."""
+    try:
+        import sqlite_vec
+    except ImportError:
+        return (
+            "Package `sqlite-vec` is not installed.\n"
+            "  cd chatgpt_mcp_memory && uv pip install -r requirements.txt\n"
+        )
+    conn = None
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(":memory:")
+        if not hasattr(conn, "enable_load_extension"):
+            return (
+                f"This interpreter cannot load SQLite extensions:\n  {sys.executable}\n"
+                "macOS system Python often lacks ``enable_load_extension``. "
+                "Use the project venv (Python 3.11+ from uv or Homebrew):\n"
+                "  cd chatgpt_mcp_memory && uv venv --python 3.11\n"
+                "  uv pip install -r requirements.txt -r requirements-dev.txt\n"
+                "  .venv/bin/python -m pytest tests/ -q\n"
+            )
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+    except Exception as e:
+        return f"sqlite_vec / SQLite preflight failed: {e!r}"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return None
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Fail fast when the env cannot run Minion (wrong Python or missing deps)."""
+    if getattr(session.config.option, "collectonly", False):
+        return
+    if os.environ.get("MINION_SKIP_E2E_PREFLIGHT", "").strip() == "1":
+        return
+    err = _e2e_sqlite_environment_error()
+    if err:
+        pytest.exit(
+            "\n\n=== Minion API e2e: environment check failed ===\n\n"
+            + err
+            + "\nUntil this check passes, red tests only tell you the toolchain is wrong.\n"
+            "After it passes, failing tests mean Minion code or tests need fixing.\n"
+            "Emergency bypass (not recommended): MINION_SKIP_E2E_PREFLIGHT=1\n",
+            returncode=1,
+        )
 
 
 def _pick_free_port() -> int:
@@ -60,6 +118,9 @@ class SidecarClient:
             "DELETE", self.base + path, json=json_body, timeout=15.0, **kwargs
         )
 
+    def patch(self, path: str, json_body: Optional[Dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:
+        return httpx.patch(self.base + path, json=json_body, timeout=15.0, **kwargs)
+
     def wait_for_sources(self, expected_min: int, timeout: float = 30.0) -> List[Dict[str, Any]]:
         """Poll /sources until we see at least `expected_min` sources."""
         deadline = time.monotonic() + timeout
@@ -86,6 +147,7 @@ def _spawn_sidecar(
     env["MINION_DATA_DIR"] = str(data_dir)
     env["MINION_INBOX"] = str(inbox)
     env["MINION_DISABLE_WATCHER"] = "1"  # tests drive ingest explicitly
+    env["MINION_DISABLE_AMBIENT_SCHEDULER"] = "1"
     env["CLAUDE_DESKTOP_CONFIG"] = str(claude_cfg_path)
     env["PYTHONPATH"] = str(API_SCRIPT.parent) + os.pathsep + env.get("PYTHONPATH", "")
 

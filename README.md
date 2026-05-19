@@ -1,6 +1,6 @@
 # Minion
 
-**Minion** is a macOS desktop app that turns your machine into **private, searchable long-term memory** for AI assistants. Drop exports, PDFs, notes, media, and code into one inbox; everything is chunked, embedded, and stored locally in SQLite. **Claude Desktop** (and any other MCP client) can call Minion over stdio to search that archive, browse conversations, and maintain an evolving **voice** profile—without sending your corpus to a hosted service.
+**Minion** is a macOS desktop app that turns your machine into **private, searchable long-term memory** for AI assistants. It **watches and listens on your desk** (windows, browser text, optional mic) as the primary substrate; you can also drop exports, PDFs, notes, and media into an inbox. Everything is chunked, embedded, and stored locally in SQLite. **Claude Desktop** (and any other MCP client) can call Minion over stdio to search that archive, browse conversations, and maintain an evolving **voice** profile—without sending your corpus to a hosted service.
 
 ---
 
@@ -29,7 +29,7 @@
 - **MCP tools for Claude** — Semantic / keyword / temporal **`ask_minion`**, **`get_chunk`**, conversation helpers, **`index_info`**, voice tools (`commit_voice` / `append_to_voice`), and identity helpers where enabled. Claude chooses when to call them.
 - **Settings hub** — Restart the Python sidecar, inspect API and DB paths, tune which file kinds are ingested, and **Add to Claude** to merge Minion into `claude_desktop_config.json`.
 
-For tool tables, parsers, env flags, and CLI-only workflows, see **[`chatgpt_mcp_memory/README.md`](./chatgpt_mcp_memory/README.md)**. For Tauri architecture and `tauri dev` / `tauri build`, see **[`desktop/README.md`](./desktop/README.md)**.
+For tool tables, parsers, env flags, and CLI-only workflows, see **[`chatgpt_mcp_memory/README.md`](./chatgpt_mcp_memory/README.md)**. For Tauri architecture and `tauri dev` / `tauri build`, see **[`desktop/README.md`](./desktop/README.md)**. Product direction and phased themes: **[`docs/ROADMAP.md`](./docs/ROADMAP.md)**.
 
 ### Where the app lives in this repo (on GitHub)
 
@@ -73,7 +73,9 @@ If you pick the wrong one, macOS may refuse to open the app or show an architect
 
 ```bash
 git clone https://github.com/reif-is-a-foofie/Minion.git
-cd Minion/chatgpt_mcp_memory
+cd Minion
+git submodule update --init --recursive
+cd chatgpt_mcp_memory
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
@@ -101,3 +103,5 @@ Indexing and search run **on your machine**. MCP speaks **stdio** to Claude Desk
 ## Credits
 
 Built and dogfooded by **Reif** — questions: [reif@thegoodproject.net](mailto:reif@thegoodproject.net).
+
+**Cursor skills catalog:** [Awesome Cursor Skills](https://github.com/spencerpauly/awesome-cursor-skills) by **[Spencer Pauly](https://github.com/spencerpauly)** — vendored in-repo as a git submodule at [`third_party/awesome-cursor-skills`](third_party/awesome-cursor-skills) so agents can scan curated `SKILL.md` workflows. Third-party list; not affiliated with Minion.

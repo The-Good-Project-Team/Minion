@@ -5,6 +5,7 @@ import os
 import re
 import sys
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -13,6 +14,7 @@ from fastembed import TextEmbedding
 
 DEFAULT_EXPORT_DIR = "/Users/reify/Classified/minion/d9eced211a2a0b9cd1b2d52f595ee063aea7ff88cddbcaad683ae4aa25df7992-2026-03-21-20-25-15-b54da2dcfb0a4295aae2c768c88d320c"
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_EMBED_CACHE = os.environ.get("FASTEMBED_CACHE_PATH") or str(Path(AGENT_DIR) / "fastembed_cache")
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 CHUNKS_PATH = os.path.join(AGENT_DIR, "memory_chunks.jsonl")
 EMBEDDINGS_PATH = os.path.join(AGENT_DIR, "memory_embeddings.npy")
@@ -243,9 +245,10 @@ def build_chunks():
 
 def main():
     os.makedirs(AGENT_DIR, exist_ok=True)
+    Path(_EMBED_CACHE).mkdir(parents=True, exist_ok=True)
     chunks, export_dir = build_chunks()
 
-    model = TextEmbedding(model_name=MODEL_NAME)
+    model = TextEmbedding(model_name=MODEL_NAME, cache_dir=_EMBED_CACHE)
     texts = [chunk.text for chunk in chunks]
     vecs = list(model.embed(texts, batch_size=64))
     embeddings = np.asarray(vecs, dtype=np.float32)

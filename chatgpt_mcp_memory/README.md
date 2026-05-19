@@ -83,6 +83,29 @@ uv pip install -r requirements.txt -r requirements-dev.txt
 .venv/bin/python -m pytest tests/ -q
 ```
 
+Pin for tools that read `.python-version`: **`chatgpt_mcp_memory/.python-version`** recommends **3.11**. Running `pytest` with the wrong interpreter exits immediately with setup instructions (session preflight in `tests/conftest.py`) instead of a wall of HTTP 500s.
+
+Coverage includes identity propose → PATCH → `/identity/summary`, bulk `DELETE /sources` by `kind`, webhook ingest, and `POST /extensions/reload`. Mutating routes respect `MINION_API_TOKEN` when set (tests omit it).
+
+### HTTP API shortcuts (same contract as the desktop app)
+
+| Action | Route |
+| ------ | ----- |
+| Forget every indexed source of one kind | `DELETE /sources` body `{"kind":"text","confirm_bulk":true}` |
+| Patch a claim (approve, edit text, merge `meta`) | `PATCH /identity/claims/{claim_id}` |
+| Push pre-chunked text | `POST /ingest/webhook` (Bearer when token set) |
+| Reload `parser_extensions.json` | `POST /extensions/reload` |
+
+Optional **`meta`** keys on proposed claims (API/MCP): `relation` (e.g. spouse), `labels` (string array, e.g. `family`). These surface in `GET /identity/summary` markdown and the desktop Identity pane.
+
+**Operational signals:** `GET /status` includes an `active` block (ingest/reconcile progress). Local feedback-loop logs append to `<data_dir>/telemetry.jsonl`; see the repo root `AGENTS.md` for how to tail and interpret events during retrieval tuning.
+
+### MCP protocol + other hosts
+
+`PROTOCOL_VERSION` in `src/mcp_server.py` tracks the MCP initialization/tool surface; note changes in release notes when behavior shifts materially.
+
+Clients that support MCP over stdio (not only Claude Desktop) can reuse `claude_desktop_config.example.json`: same `command`, `args`, and `env`, especially `MINION_DATA_DIR`.
+
 ## 2) Drop files into the inbox (recommended)
 
 The fastest path for arbitrary files is the watched inbox. Minion reconciles

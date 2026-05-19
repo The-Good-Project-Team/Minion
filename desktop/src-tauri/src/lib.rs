@@ -28,6 +28,20 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
+mod ax_sample;
+mod browser_focus;
+mod capture_deny;
+mod capture_trigger;
+mod council_bridges;
+mod keychain;
+mod life_evidence;
+mod ambient_collectors;
+mod ambient_stream;
+mod listening_session;
+mod screen_context;
+mod screen_reader;
+mod window_capture;
+
 // ---------------------------------------------------------------------------
 // Debug NDJSON instrumentation (active until post-release verification).
 // Writes one JSON line per significant event to the session logfile defined
@@ -192,9 +206,9 @@ fn sidecar_api_token(data_dir: &Path) -> String {
 
 /// Locate the sidecar source directory containing `api.py`. Resolution order:
 ///   1. $MINION_SIDECAR_DIR env override (user or test harness)
-///   2. Tauri bundled resource `<Resources>/sidecar/src/api.py` (shipped path)
-///   3. Dev fallback: walk up from current_exe looking for
-///      `chatgpt_mcp_memory/src/api.py`
+///   2. Dev checkout: walk up from current_exe for `chatgpt_mcp_memory/src/api.py`
+///      (must beat bundled resources in `tauri dev` — the staged copy only updates on build)
+///   3. Tauri bundled resource `<Resources>/sidecar/src/api.py` (shipped .app path)
 /// Returns the directory containing api.py (cwd for the sidecar process).
 fn resolve_sidecar_src_dir(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(p) = std::env::var("MINION_SIDECAR_DIR") {
@@ -202,6 +216,18 @@ fn resolve_sidecar_src_dir(app: &AppHandle) -> Option<PathBuf> {
         if pb.join("api.py").exists() {
             dbg("sidecar_src_dir", serde_json::json!({"via": "env", "path": pb}));
             return Some(pb);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe.parent().map(Path::to_path_buf);
+        for _ in 0..10 {
+            let Some(c) = cur.as_ref() else { break };
+            let cand = c.join("chatgpt_mcp_memory").join("src");
+            if cand.join("api.py").exists() {
+                dbg("sidecar_src_dir", serde_json::json!({"via": "dev_walk", "path": cand}));
+                return Some(cand);
+            }
+            cur = c.parent().map(Path::to_path_buf);
         }
     }
     if let Ok(res_dir) = app.path().resource_dir() {
@@ -214,18 +240,6 @@ fn resolve_sidecar_src_dir(app: &AppHandle) -> Option<PathBuf> {
         if c2.join("api.py").exists() {
             dbg("sidecar_src_dir", serde_json::json!({"via": "resource_up", "path": c2}));
             return Some(c2);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cur = exe.parent().map(Path::to_path_buf);
-        for _ in 0..8 {
-            let Some(c) = cur.as_ref() else { break };
-            let cand = c.join("chatgpt_mcp_memory").join("src");
-            if cand.join("api.py").exists() {
-                dbg("sidecar_src_dir", serde_json::json!({"via": "dev_walk", "path": cand}));
-                return Some(cand);
-            }
-            cur = c.parent().map(Path::to_path_buf);
         }
     }
     dbg("sidecar_src_dir", serde_json::json!({"via": "none", "path": serde_json::Value::Null}));
@@ -1163,6 +1177,18 @@ fn ollama_has_model(bin: &Path, model: &str) -> bool {
 // Tauri commands
 // ---------------------------------------------------------------------------
 
+fn env_truthy(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v) => {
+            let t = v.trim();
+            t == "1"
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
+}
+
 #[tauri::command]
 fn app_config(state: tauri::State<AppState>) -> serde_json::Value {
     let sidecar_bootstrapped = state
@@ -1185,6 +1211,107 @@ fn app_config(state: tauri::State<AppState>) -> serde_json::Value {
         "api_token": state.api_token,
         "sidecar_bootstrapped": sidecar_bootstrapped,
         "sidecar_running": sidecar_running,
+        "auto_install_updates": env_truthy("MINION_AUTO_INSTALL_UPDATES"),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_watch_env_snapshot() -> serde_json::Value {
+    let watchers_disabled = match std::env::var("MINION_SCREEN_CONTEXT") {
+        Err(_) => false,
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+    };
+    let pixel_capture_requested = match std::env::var("MINION_SCREEN_CAPTURE") {
+        Err(_) => false,
+        Ok(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            matches!(t.as_str(), "1" | "true" | "yes" | "on")
+        }
+    };
+    let ax_text_sample_enabled = match std::env::var("MINION_AX_CAPTURE") {
+        Err(_) => true,
+        Ok(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            !(t.is_empty() || t == "0" || t == "false" || t == "no" || t == "off")
+        }
+    };
+    let capture_on_empty_ax = match std::env::var("MINION_SCREEN_CAPTURE_ON_EMPTY_AX") {
+        Err(_) => false,
+        Ok(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            matches!(t.as_str(), "1" | "true" | "yes" | "on")
+        }
+    };
+    let poll_interval_sec = std::env::var("MINION_SCREEN_CONTEXT_POLL_SEC")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(3)
+        .clamp(2, 120);
+
+    serde_json::json!({
+        "watchers_env_disabled": watchers_disabled,
+        "pixel_capture_requested": pixel_capture_requested,
+        "capture_on_empty_ax": capture_on_empty_ax,
+        "ax_text_sample_enabled": ax_text_sample_enabled,
+        "poll_interval_sec": poll_interval_sec,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_watch_env_snapshot() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
+#[tauri::command]
+fn screen_context_status(state: tauri::State<AppState>) -> serde_json::Value {
+    let path = state
+        .data_dir
+        .join("ambient")
+        .join("stream.jsonl");
+    let legacy_path = state.data_dir.join("screen_context").join("stream.jsonl");
+    #[cfg(target_os = "macos")]
+    let platform = "macos";
+    #[cfg(target_os = "windows")]
+    let platform = "windows";
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let platform = "linux";
+
+    let mut last_event = serde_json::Value::Null;
+    for p in [&path, &legacy_path] {
+        if p.is_file() {
+            if let Ok(s) = fs::read_to_string(p) {
+                if let Some(line) = s.lines().filter(|l| !l.trim().is_empty()).last() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                        last_event = v;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let collectors = serde_json::json!({
+        "window_focus": ambient_stream::collector_enabled(&state.data_dir, "window_focus"),
+        "ax_content_changed": ambient_stream::collector_enabled(&state.data_dir, "ax_content_changed"),
+        "process_snapshot": ambient_stream::collector_enabled(&state.data_dir, "process_snapshot"),
+        "app_launched": ambient_stream::collector_enabled(&state.data_dir, "app_launched"),
+        "browser_visit": ambient_stream::collector_enabled(&state.data_dir, "browser_visit"),
+        "listening": ambient_stream::collector_enabled(&state.data_dir, "listening"),
+        "full_listening": listening_session::full_listening_enabled(&state.data_dir),
+        "screen_reader": ambient_stream::collector_enabled(&state.data_dir, "screen_reader"),
+    });
+    serde_json::json!({
+        "platform": platform,
+        "watcher_supported": cfg!(target_os = "macos"),
+        "stream_path": path.to_string_lossy(),
+        "legacy_stream_path": legacy_path.to_string_lossy(),
+        "last_event": last_event,
+        "macos_watch": macos_watch_env_snapshot(),
+        "ambient_collectors": collectors,
+        "listening_active": listening_session::is_active(),
+        "full_listening_active": listening_session::is_full_active(),
     })
 }
 
@@ -1794,6 +1921,11 @@ pub fn run() {
             let inbox_bg = inbox.clone();
             let port_bg = api_port;
             thread::spawn(move || {
+                screen_context::spawn_watcher(handle.clone(), data_dir_bg.clone(), inbox_bg.clone());
+                screen_reader::spawn_watcher(data_dir_bg.clone(), inbox_bg.clone());
+                ambient_collectors::spawn_collectors(data_dir_bg.clone());
+                listening_session::spawn_wake_watcher(handle.clone(), data_dir_bg.clone());
+                listening_session::maybe_auto_start_full(data_dir_bg.clone());
                 let state = match handle.try_state::<AppState>() {
                     Some(s) => s,
                     None => {
@@ -2000,6 +2132,18 @@ pub fn run() {
             restart_sidecar,
             vision_status,
             ensure_vision_model,
+            screen_context_status,
+            life_evidence::snapshot_life_evidence,
+            council_bridges::council_bridge_open,
+            keychain::keychain_search,
+            keychain::keychain_add,
+            listening_session::listening_start,
+            listening_session::listening_stop,
+            listening_session::listening_status,
+            listening_session::full_listening_start,
+            listening_session::full_listening_stop,
+            listening_session::full_listening_status,
+            listening_session::full_listening_sync,
         ])
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::Destroyed) {
@@ -2021,4 +2165,20 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running minion desktop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_dup_suffix;
+
+    #[test]
+    fn strip_dup_suffix_numeric_copy() {
+        assert_eq!(strip_dup_suffix("report (2)"), "report");
+        assert_eq!(strip_dup_suffix("notes"), "notes");
+    }
+
+    #[test]
+    fn strip_dup_suffix_non_numeric_preserved() {
+        assert_eq!(strip_dup_suffix("foo (bar)"), "foo (bar)");
+    }
 }

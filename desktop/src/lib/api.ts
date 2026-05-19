@@ -2,8 +2,7 @@
 // (app_config command) so we stay in sync with whatever port the sidecar
 // actually bound to.
 
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen } from "./tauri-bridge";
 
 export type SidecarStatus = {
   state: "starting" | "bootstrapping" | "installing" | "ready" | "error";
@@ -27,6 +26,8 @@ export type AppConfig = {
   api_token: string;
   sidecar_bootstrapped: boolean;
   sidecar_running: boolean;
+  /** From Rust env MINION_AUTO_INSTALL_UPDATES — fleet installs skip the update dialog. */
+  auto_install_updates?: boolean;
 };
 
 export type Source = {
@@ -52,6 +53,8 @@ export type SearchHit = {
   mtime: number;
   text: string;
   meta?: Record<string, unknown>;
+  /** Chunk storage tier (hot / warm / cold); retrieval ordering bias only today. */
+  storage_tier?: string;
 };
 
 export type Active = {
@@ -100,6 +103,51 @@ export type EventMsg =
  * change or sidecar restart caused POST /nuke to hit the wrong listener (404). */
 export async function getConfig(): Promise<AppConfig> {
   return (await invoke("app_config")) as AppConfig;
+}
+
+export type MacosWatchEnv = {
+  watchers_env_disabled: boolean;
+  /** True when MINION_SCREEN_CAPTURE opts in (still needs macOS Screen Recording). */
+  pixel_capture_requested: boolean;
+  /** False when MINION_AX_CAPTURE turns off Accessibility sampling. */
+  ax_text_sample_enabled: boolean;
+  poll_interval_sec: number;
+};
+
+export type AmbientCollectorsStatus = Record<string, boolean>;
+
+export type ScreenContextStatus = {
+  platform: string;
+  /** macOS-only background watcher; false on Windows/Linux. */
+  watcher_supported: boolean;
+  stream_path: string;
+  legacy_stream_path?: string;
+  /** Latest JSON line from stream.jsonl, or null if missing/empty. */
+  last_event: unknown;
+  /** macOS env Effective for watcher; null on other platforms. */
+  macos_watch: MacosWatchEnv | null;
+  ambient_collectors?: AmbientCollectorsStatus;
+  listening_active?: boolean;
+  full_listening_active?: boolean;
+};
+
+/** Focused-window logger status + last snapshot path (macOS). */
+export async function screenContextStatus(): Promise<ScreenContextStatus> {
+  return (await invoke("screen_context_status")) as ScreenContextStatus;
+}
+
+/** macOS: snapshot Contacts + Calendar into life_evidence/ (needs Automation access). */
+export async function snapshotLifeEvidence(): Promise<{
+  contacts: number;
+  events: number;
+  skipped?: string;
+}> {
+  const cfg = await getConfig();
+  return (await invoke("snapshot_life_evidence", { dataDir: cfg.data_dir })) as {
+    contacts: number;
+    events: number;
+    skipped?: string;
+  };
 }
 
 async function assertSidecarHasNukeRoute(apiBase: string): Promise<void> {
@@ -278,7 +326,13 @@ export async function fetchIdentityClaims(params: {
 
 export async function patchIdentityClaim(
   claimId: string,
-  body: { status: string; superseded_by?: string },
+  body: {
+    status?: string;
+    superseded_by?: string;
+    text?: string;
+    meta?: Record<string, unknown>;
+    revision_source?: string;
+  },
 ): Promise<{ claim: IdentityClaim | null }> {
   return apiFetch(`/identity/claims/${encodeURIComponent(claimId)}`, {
     method: "PATCH",
@@ -327,6 +381,76 @@ export async function rebuildPreferenceClusters(body: {
   return apiFetch("/identity/clusters/rebuild", {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+export type IdentityMirrorResponse = {
+  markdown: string;
+  history: IdentityClaim[];
+  history_count: number;
+};
+
+/** Time-aware mirror digest + superseded/rejected claims (desktop Identity → Mirror). */
+export async function fetchIdentityMirror(params: { limit_history?: number } = {}): Promise<IdentityMirrorResponse> {
+  const q = new URLSearchParams();
+  if (params.limit_history != null) q.set("limit_history", String(params.limit_history));
+  const qs = q.toString();
+  return apiFetch(`/identity/mirror${qs ? `?${qs}` : ""}`);
+}
+
+/** PRAGMA snapshot from POST /maintenance/storage-report (optional on very old sidecars). */
+export type SqliteStorageFootprint = {
+  page_count: number;
+  freelist_pages: number;
+  page_size: number;
+  logical_bytes: number;
+  freelist_bytes_approx: number;
+  freelist_ratio: number;
+  db_file_bytes: number | null;
+  db_path: string | null;
+};
+
+export type StorageMaintenanceReport = {
+  chunk_storage_tiers: Record<string, number>;
+  ambient_event_count: number;
+  note: string;
+  sqlite?: SqliteStorageFootprint;
+};
+
+/** Chunk tier counts + ambient row count (compaction is metadata-first today). */
+export async function postMaintenanceStorageReport(): Promise<StorageMaintenanceReport> {
+  return apiFetch("/maintenance/storage-report", { method: "POST", body: "{}" });
+}
+
+export type StorageTierPromoteStaleResult = {
+  dry_run: boolean;
+  candidates: number;
+  promoted: number;
+  source_updated_before_unix: number;
+  min_source_age_days: number;
+  source_kinds?: string[] | null;
+  from_tier: string;
+  to_tier: string;
+  chunk_storage_tiers?: Record<string, number>;
+};
+
+/** Preview or apply stale-source tier hops (default hot→warm; e.g. warm→cold). */
+export async function postMaintenanceStorageTierPromoteStale(body: {
+  min_source_age_days?: number;
+  source_kinds?: string[] | null;
+  dry_run?: boolean;
+  from_tier?: string;
+  to_tier?: string;
+}): Promise<StorageTierPromoteStaleResult> {
+  return apiFetch("/maintenance/storage-tier-promote-stale", {
+    method: "POST",
+    body: JSON.stringify({
+      min_source_age_days: body.min_source_age_days ?? 120,
+      source_kinds: body.source_kinds ?? null,
+      dry_run: body.dry_run ?? true,
+      from_tier: body.from_tier ?? "hot",
+      to_tier: body.to_tier ?? "warm",
+    }),
   });
 }
 
@@ -438,7 +562,12 @@ export async function connectClaudeDesktop(body: { server_name?: string; config_
   });
 }
 
-export async function deleteSource(body: { path?: string; source_id?: string }): Promise<{ removed_chunks: number }> {
+export async function deleteSource(body: {
+  path?: string;
+  source_id?: string;
+  kind?: string;
+  confirm_bulk?: boolean;
+}): Promise<{ removed_chunks: number; sources_removed?: number; kind?: string }> {
   return apiFetch("/sources", {
     method: "DELETE",
     body: JSON.stringify(body),
@@ -539,11 +668,82 @@ export async function restartSidecar(): Promise<{ pid: number; api_port: number 
   return (await invoke("restart_sidecar")) as { pid: number; api_port: number };
 }
 
+export type AmbientCollectorsSettings = {
+  window_focus?: boolean;
+  ax_content_changed?: boolean;
+  process_snapshot?: boolean;
+  app_launched?: boolean;
+  browser_visit?: boolean;
+  listening?: boolean;
+  full_listening?: boolean;
+  screenshot_fallback?: boolean;
+  screen_reader?: boolean;
+};
+
 export type Settings = {
   disabled_kinds: string[];
   /** When true, do not POST anonymized telemetry to the configured collector. */
   telemetry_opt_out?: boolean;
+  ambient_sensing_enabled?: boolean;
+  /** Continuous mic + local transcripts; default off. */
+  full_listening_enabled?: boolean;
+  ambient_collectors?: AmbientCollectorsSettings;
+  capture_on_empty_ax?: boolean;
+  ambient_deny?: { app_names?: string[]; title_substrings?: string[] };
 };
+
+export type FullListeningStatus = {
+  active: boolean;
+  full_listening: boolean;
+  session_id?: string;
+  last_wake_ts?: number;
+  last_wake_excerpt?: string;
+};
+
+export async function fetchAttentionSummary(hours = 24): Promise<Record<string, unknown>> {
+  return apiFetch(`/attention/summary?hours=${hours}`);
+}
+
+export async function listeningStart(): Promise<{ session_id: string; active: boolean }> {
+  const cfg = await getConfig();
+  return (await invoke("listening_start", { dataDir: cfg.data_dir })) as {
+    session_id: string;
+    active: boolean;
+  };
+}
+
+export async function listeningStop(): Promise<{ session_id: string; active: boolean }> {
+  const cfg = await getConfig();
+  return (await invoke("listening_stop", { dataDir: cfg.data_dir })) as {
+    session_id: string;
+    active: boolean;
+  };
+}
+
+export async function listeningStatus(): Promise<FullListeningStatus> {
+  const cfg = await getConfig();
+  return (await invoke("listening_status", { dataDir: cfg.data_dir })) as FullListeningStatus;
+}
+
+export async function fullListeningStart(): Promise<FullListeningStatus> {
+  const cfg = await getConfig();
+  return (await invoke("full_listening_start", { dataDir: cfg.data_dir })) as FullListeningStatus;
+}
+
+export async function fullListeningStop(): Promise<FullListeningStatus> {
+  const cfg = await getConfig();
+  return (await invoke("full_listening_stop", { dataDir: cfg.data_dir })) as FullListeningStatus;
+}
+
+export async function fullListeningStatus(): Promise<FullListeningStatus> {
+  const cfg = await getConfig();
+  return (await invoke("full_listening_status", { dataDir: cfg.data_dir })) as FullListeningStatus;
+}
+
+export async function fullListeningSync(): Promise<FullListeningStatus> {
+  const cfg = await getConfig();
+  return (await invoke("full_listening_sync", { dataDir: cfg.data_dir })) as FullListeningStatus;
+}
 
 export type SettingsResponse = {
   settings: Settings;
@@ -702,4 +902,382 @@ export async function fetchDiagnosticsLogTextAtBase(apiBase: string, lines = 400
 
 export function loopbackApiBaseForPort(port: number): string {
   return `http://127.0.0.1:${port}`;
+}
+
+// --- Second brain / butler API ---
+
+export type TodayBundle = {
+  working_context: Record<string, unknown>;
+  attention_24h: { top_apps: string; recent: Array<Record<string, unknown>> };
+  work_items: {
+    open: WorkItem[];
+    review: WorkItem[];
+    inferred_pending: WorkItem[];
+  };
+  needs_attention: SystemIssue[];
+  identity_excerpt_md: string;
+};
+
+export type WorkItem = {
+  task_id: string;
+  title: string;
+  status: string;
+  origin: string;
+  priority?: string | null;
+  body_md: string;
+  context_refs: unknown[];
+  wiki_refs: string[];
+  output_id?: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+export type WikiPage = {
+  page_id: string;
+  page_type: string;
+  title: string;
+  body_md: string;
+  status: string;
+  last_updated: number;
+  meta: Record<string, unknown>;
+};
+
+export type SystemIssue = {
+  issue_id: string;
+  severity: string;
+  source_key?: string | null;
+  body_md: string;
+  status: string;
+  created_at: number;
+};
+
+export type ConsentPolicy = {
+  schema_version: number;
+  readers: {
+    mcp: {
+      deny_chunk_source_kinds: string[];
+      deny_path_substrings: string[];
+      allow_screen_context_tools: boolean;
+    };
+  };
+};
+
+export async function fetchToday(): Promise<TodayBundle> {
+  return apiFetch("/today");
+}
+
+export type GraphKindScaffold = {
+  kind: string;
+  label: string;
+  hint: string;
+  stub_node_id: string;
+  filled_count: number;
+};
+
+export type GraphScaffoldNode = {
+  node_id: string;
+  node_kind: string;
+  title: string;
+  status: string;
+  summary?: string;
+  filled_count?: number;
+  parent_node_id?: string | null;
+  children?: GraphScaffoldNode[];
+  depth?: number;
+};
+
+export type GraphScaffoldResponse = {
+  root: GraphScaffoldNode | null;
+  tree: GraphScaffoldNode[];
+  kinds: GraphKindScaffold[];
+  node_types: string[];
+  relation_types: string[];
+};
+
+export type FeedParse = {
+  status: string;
+  reason?: string;
+};
+
+export type FeedAction = {
+  id: string;
+  label: string;
+};
+
+export type FeedItem = {
+  item_kind?: "river";
+  feed_id: string;
+  ts: number;
+  lane: "now" | "observed" | "parsed" | "suggestion" | string;
+  kind: string;
+  title: string;
+  body: string;
+  parse?: FeedParse | null;
+  actions: FeedAction[];
+  refs: Record<string, string>;
+  graph_kinds: string[];
+};
+
+export type CouncilFeedItem = {
+  item_kind: "council";
+  ts: number;
+  event: {
+    event_type: string;
+    subject_id: string;
+    domain: string;
+    evidence_refs: string[];
+    pattern_id?: string;
+  };
+  proposal: {
+    proposal_id: string;
+    proposal_type: string;
+    title: string;
+    summary: string;
+    payload: Record<string, unknown>;
+    intensity: "standard" | "elevated" | string;
+  };
+  required_skill: string;
+  required_info: Record<string, { status: string; ref?: string; label?: string }>;
+  approval: { options: FeedAction[] };
+};
+
+export type FeedRow = FeedItem | CouncilFeedItem;
+
+export type FortyTwoStreamState = {
+  active_thread_id: string | null;
+  needs_question: boolean;
+  open_count: number;
+};
+
+export type ActivityFeedBundle = {
+  now: FeedItem | null;
+  items: FeedRow[];
+  council_items?: CouncilFeedItem[];
+  memory_prefetch: FeedItem[];
+  graph: GraphScaffoldResponse;
+  forty_two?: FortyTwoStreamState;
+  composed_at: number;
+  since_ts: number;
+};
+
+export type ChatThread = {
+  thread_id: string;
+  subject_id?: string | null;
+  status: string;
+  topic: string;
+  meta: Record<string, unknown>;
+  created_at: number;
+  updated_at: number;
+  messages?: ChatMessage[];
+};
+
+export type ChatMessage = {
+  message_id: string;
+  thread_id: string;
+  role: "assistant" | "user" | string;
+  body_md: string;
+  meta: Record<string, unknown>;
+  created_at: number;
+};
+
+export async function fetchChatThreads(status = "open"): Promise<{ threads: ChatThread[]; open_count: number }> {
+  return apiFetch(`/chat/threads?status=${encodeURIComponent(status)}`);
+}
+
+export async function fetchChatBadge(): Promise<{ open_count: number }> {
+  return apiFetch("/chat/badge");
+}
+
+export async function fetchChatThread(threadId: string): Promise<ChatThread> {
+  return apiFetch(`/chat/threads/${encodeURIComponent(threadId)}`);
+}
+
+export async function chatNextThread(): Promise<{ thread: ChatThread | null; created: boolean; message?: string }> {
+  return apiFetch("/chat/threads/next", { method: "POST", body: "{}" });
+}
+
+export async function fortyTwoNext(): Promise<{ thread: ChatThread | null; created: boolean }> {
+  return apiFetch("/chat/42/next", { method: "POST", body: "{}" });
+}
+
+export async function fortyTwoReply(
+  message: string,
+  threadId?: string,
+  action?: string,
+): Promise<{ ok: boolean; thread?: ChatThread; llm?: boolean }> {
+  return apiFetch("/chat/42/reply", {
+    method: "POST",
+    body: JSON.stringify({ message, thread_id: threadId ?? null, action: action ?? null }),
+  });
+}
+
+export async function fortyTwoDismiss(threadId: string): Promise<{ ok: boolean; thread_id: string }> {
+  return apiFetch("/chat/42/dismiss", {
+    method: "POST",
+    body: JSON.stringify({ thread_id: threadId, message: "" }),
+  });
+}
+
+export async function chatReply(threadId: string, body: string, action?: string): Promise<{ ok: boolean; thread?: ChatThread }> {
+  return apiFetch(`/chat/threads/${encodeURIComponent(threadId)}/reply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ body, action }),
+  });
+}
+
+export type KeychainItemMeta = {
+  service: string;
+  account: string;
+  label: string;
+  vault_ref: string;
+};
+
+export async function keychainSearch(query: string): Promise<KeychainItemMeta[]> {
+  const cfg = await getConfig();
+  return (await invoke("keychain_search", { dataDir: cfg.data_dir, query: query || null })) as KeychainItemMeta[];
+}
+
+export async function keychainAdd(
+  service: string,
+  account: string,
+  secret: string,
+  label?: string,
+): Promise<KeychainItemMeta> {
+  const cfg = await getConfig();
+  return (await invoke("keychain_add", {
+    dataDir: cfg.data_dir,
+    service,
+    account,
+    secret,
+    label: label ?? null,
+  })) as KeychainItemMeta;
+}
+
+export async function fetchKeyCapabilities(): Promise<{ items: CapabilityRef[] }> {
+  return apiFetch("/keys/capabilities");
+}
+
+export async function linkKeyCapability(body: {
+  cap_key: string;
+  vault_ref: string;
+  label: string;
+  provider?: string;
+}): Promise<{ ok: boolean }> {
+  return apiFetch("/keys/link", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export type CapabilityRef = {
+  ref_id: string;
+  cap_key: string;
+  provider: string;
+  label: string;
+  vault_ref: string;
+  status: string;
+};
+
+export async function councilApprove(body: {
+  proposal_id: string;
+  action: string;
+  edited_payload?: Record<string, unknown>;
+  snooze_days?: number;
+}): Promise<{ ok: boolean; error?: string; execute?: unknown }> {
+  return apiFetch("/council/approve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchFeed(params: { limit?: number; since_hours?: number } = {}): Promise<ActivityFeedBundle> {
+  const q = new URLSearchParams();
+  if (params.limit != null) q.set("limit", String(params.limit));
+  if (params.since_hours != null) q.set("since_hours", String(params.since_hours));
+  const qs = q.toString();
+  return apiFetch(`/feed${qs ? `?${qs}` : ""}`);
+}
+
+export async function fetchGraphScaffold(): Promise<GraphScaffoldResponse> {
+  return apiFetch("/graph/scaffold");
+}
+
+export async function fetchHealth(): Promise<{ sync_sources: unknown[]; open_issues: SystemIssue[] }> {
+  return apiFetch("/health");
+}
+
+export async function fetchWikiPages(params: {
+  page_type?: string;
+  q?: string;
+  status?: string;
+  limit?: number;
+} = {}): Promise<{ pages: WikiPage[]; count: number }> {
+  const q = new URLSearchParams();
+  if (params.page_type) q.set("page_type", params.page_type);
+  if (params.q) q.set("q", params.q);
+  if (params.status) q.set("status", params.status);
+  if (params.limit != null) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return apiFetch(`/wiki/pages${qs ? `?${qs}` : ""}`);
+}
+
+export async function fetchWikiPage(pageId: string): Promise<{ page: WikiPage; links: unknown[] }> {
+  return apiFetch(`/wiki/pages/${encodeURIComponent(pageId)}`);
+}
+
+export async function patchWikiPage(
+  pageId: string,
+  body: Partial<Pick<WikiPage, "title" | "body_md" | "status">> & { page_type?: string },
+): Promise<{ page: WikiPage }> {
+  return apiFetch(`/wiki/pages/${encodeURIComponent(pageId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      page_type: body.page_type ?? "topic",
+      title: body.title ?? "",
+      body_md: body.body_md ?? "",
+      status: body.status ?? "active",
+      meta: {},
+    }),
+  });
+}
+
+export async function fetchTasks(params: {
+  status?: string;
+  origin?: string;
+  limit?: number;
+} = {}): Promise<{ tasks: WorkItem[]; count: number }> {
+  const q = new URLSearchParams();
+  if (params.status) q.set("status", params.status);
+  if (params.origin) q.set("origin", params.origin);
+  if (params.limit != null) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return apiFetch(`/tasks${qs ? `?${qs}` : ""}`);
+}
+
+export async function patchTask(
+  taskId: string,
+  body: { status?: string; title?: string; body_md?: string },
+): Promise<{ task: WorkItem }> {
+  return apiFetch(`/tasks/${encodeURIComponent(taskId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchConsentPolicy(): Promise<ConsentPolicy> {
+  return apiFetch("/settings/consent");
+}
+
+export async function updateConsentPolicy(policy: ConsentPolicy): Promise<ConsentPolicy> {
+  return apiFetch("/settings/consent", { method: "PUT", body: JSON.stringify(policy) });
+}
+
+export async function resolveHealthIssue(issueId: string): Promise<{ status: string }> {
+  return apiFetch(`/health/issues/${encodeURIComponent(issueId)}/resolve`, {
+    method: "POST",
+    body: "{}",
+  });
 }

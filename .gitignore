@@ -44,3 +44,15 @@ desktop/src-tauri/target/
 desktop/src-tauri/gen/
 # sync_sidecar.sh output; regenerated on every build
 desktop/src-tauri/resources/sidecar/
+# Playwright / UI test output (local)
+desktop/test-results/
+desktop/playwright-report/
+desktop/blob-report/
+
+# Cloudflare Worker dev deps (npm install inside telemetry-collector/)
+telemetry-collector/node_modules/
+telemetry-collector/.wrangler/
+
+# Cursor hooks (session-local queue + verification log)
+.cursor/hooks/.verify-queue
+.cursor/hooks/verify-last.log

@@ -1,0 +1,16 @@
+---
+description: Before substantive work, consult the vendored awesome-cursor-skills index and adopt matching SKILL.md workflows when applicable.
+alwaysApply: true
+---
+
+# Awesome Cursor Skills (in-repo catalog)
+
+Minion vendors **[awesome-cursor-skills](https://github.com/spencerpauly/awesome-cursor-skills)** at `third_party/awesome-cursor-skills/` (git submodule).
+
+**Do this before non-trivial actions** (multi-step implementation, CI, hooks, browser QA, perf profiling, parallel exploration, test grinding, etc.):
+
+1. Open `third_party/awesome-cursor-skills/README.md` and scan the **Skills** sections for a topic that matches the task.
+2. When you find a fit, read the corresponding `third_party/awesome-cursor-skills/resources/<skill-name>/SKILL.md` **before** inventing a bespoke workflow—follow its instructions so behavior matches established Cursor patterns.
+3. Repository-specific rules in root `AGENTS.md` and user/project rules still win when they conflict with a generic skill.
+
+Skim the index when starting work; you do not need to load every SKILL—only those relevant to the current task.

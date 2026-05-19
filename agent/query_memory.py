@@ -2,12 +2,14 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 import numpy as np
 from fastembed import TextEmbedding
 
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_EMBED_CACHE = os.environ.get("FASTEMBED_CACHE_PATH") or str(Path(AGENT_DIR) / "fastembed_cache")
 CHUNKS_PATH = f"{AGENT_DIR}/memory_chunks.jsonl"
 EMBEDDINGS_PATH = f"{AGENT_DIR}/memory_embeddings.npy"
 MANIFEST_PATH = f"{AGENT_DIR}/memory_manifest.json"
@@ -28,7 +30,10 @@ def load_chunks():
 
 def search(query, top_k=8, role=None):
     manifest = load_manifest()
-    model = TextEmbedding(model_name=manifest["model_name"])
+    Path(_EMBED_CACHE).mkdir(parents=True, exist_ok=True)
+    model = TextEmbedding(
+        model_name=manifest["model_name"], cache_dir=_EMBED_CACHE
+    )
     chunks = load_chunks()
     embeddings = np.load(EMBEDDINGS_PATH)
 

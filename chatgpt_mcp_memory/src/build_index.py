@@ -19,6 +19,7 @@ import numpy as np
 from fastembed import TextEmbedding
 from tqdm import tqdm
 
+from fastembed_cache import fastembed_cache_dir
 from chatgpt_export_reader import chunk_text, iter_messages
 from store import DB_FILENAME, connect, set_meta, upsert_source
 
@@ -116,7 +117,9 @@ def main() -> None:
     print(f"Done chunking: {len(built)} chunks. Loading embedding model {args.model!r} (fastembed)…", flush=True)
 
     texts = [b.text for b in built]
-    model = TextEmbedding(model_name=args.model)
+    model = TextEmbedding(
+        model_name=args.model, cache_dir=fastembed_cache_dir(data_dir=derived_dir)
+    )
     print("Encoding chunks (progress bar)…", flush=True)
     embeddings = _embed_all(model, texts, batch_size=args.batch_size)
 

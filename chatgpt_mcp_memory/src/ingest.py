@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict
 
 import numpy as np
 
+from fastembed_cache import fastembed_cache_dir
 from parsers import (
     ALL_KINDS,
     ParseResult,
@@ -207,7 +208,7 @@ def _get_model(name: str):
             return _MODEL
         from fastembed import TextEmbedding
 
-        _MODEL = TextEmbedding(model_name=name)
+        _MODEL = TextEmbedding(model_name=name, cache_dir=fastembed_cache_dir())
         _MODEL_NAME = name
         return _MODEL
 

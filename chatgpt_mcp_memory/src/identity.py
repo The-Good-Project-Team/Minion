@@ -5,15 +5,19 @@ import hashlib
 import json
 import secrets
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import sqlite3
 
 from store import (
+    ambient_events_since,
     get_chunk,
     identity_claim_get,
     identity_claim_insert,
     identity_claim_list,
+    identity_claim_mirror_history,
+    identity_claim_patch_fields,
     identity_claim_set_status,
     identity_edge_insert,
     identity_edges_for_claim,
@@ -158,11 +162,45 @@ def set_claim_status(
     return True, None
 
 
+def patch_claim(
+    conn: sqlite3.Connection,
+    claim_id: str,
+    *,
+    status: Optional[str] = None,
+    superseded_by: Optional[str] = None,
+    text: Optional[str] = None,
+    meta_merge: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Partial update: pass only fields to change. At least one field required."""
+    if status is not None and status not in CLAIM_STATUSES:
+        return None, f"status must be one of: {sorted(CLAIM_STATUSES)}"
+    if text is not None:
+        err = validate_text(text)
+        if err:
+            return None, err
+    if all(x is None for x in (status, superseded_by, text, meta_merge)):
+        return None, "at least one of status, superseded_by, text, meta required"
+    if identity_claim_get(conn, claim_id) is None:
+        return None, "claim_id not found"
+    ok = identity_claim_patch_fields(
+        conn,
+        claim_id,
+        text=text,
+        status=status,
+        superseded_by=superseded_by,
+        meta_merge=meta_merge,
+    )
+    if not ok:
+        return None, "claim_id not found"
+    return identity_claim_get(conn, claim_id), None
+
+
 def build_identity_summary(
     conn: sqlite3.Connection,
     *,
     max_claims: int = 40,
     max_clusters: int = 8,
+    history_tail: int = 0,
 ) -> str:
     active = identity_claim_list(conn, status="active", limit=max_claims)
     proposed = identity_claim_list(conn, status="proposed", limit=min(20, max_claims))
@@ -172,7 +210,16 @@ def build_identity_summary(
     if active:
         lines.append("### Active claims")
         for c in active:
-            lines.append(f"- **{c['kind']}**: {c['text']}")
+            meta = c.get("meta") or {}
+            rel = meta.get("relation")
+            labels = meta.get("labels")
+            suffix = ""
+            if rel:
+                suffix += f" _(relation: {rel})_"
+            if isinstance(labels, list) and labels:
+                lab = ", ".join(str(x) for x in labels[:12])
+                suffix += f" `{lab}`"
+            lines.append(f"- **{c['kind']}**: {c['text']}{suffix}")
     else:
         lines.append("### Active claims\n- _(none yet)_")
 
@@ -180,7 +227,15 @@ def build_identity_summary(
         lines.append("### Pending proposals (need user review)")
         for c in proposed:
             who = f" — _via {c['source_agent']}_" if c.get("source_agent") else ""
-            lines.append(f"- **{c['kind']}** (`{c['claim_id']}`){who}: {c['text']}")
+            meta = c.get("meta") or {}
+            rel = meta.get("relation")
+            labels = meta.get("labels")
+            sfx = ""
+            if rel:
+                sfx += f" _(relation: {rel})_"
+            if isinstance(labels, list) and labels:
+                sfx += f" `{', '.join(str(x) for x in labels[:12])}`"
+            lines.append(f"- **{c['kind']}** (`{c['claim_id']}`){who}: {c['text']}{sfx}")
 
     if clusters:
         lines.append("### Preference clusters (derived)")
@@ -191,6 +246,38 @@ def build_identity_summary(
             if cl["run_at"] != seen_run:
                 break
             lines.append(f"- **{cl['label']}**: {cl['summary']}")
+
+    since_24h = time.time() - 86400.0
+    ambient = ambient_events_since(conn, since_ts=since_24h, limit=120)
+    if ambient:
+        lines.append("### Recent attention (24h)")
+        apps = Counter(
+            str((e.get("payload") or {}).get("app_name") or "?") for e in ambient
+        )
+        if apps:
+            top = ", ".join(f"{a} ({c})" for a, c in apps.most_common(6))
+            lines.append(f"- Apps: {top}")
+        for e in ambient[:5]:
+            p = e.get("payload") or {}
+            title = p.get("window_title") or p.get("app_name") or "?"
+            ts = e.get("captured_at")
+            eid = e.get("event_id", "")
+            lines.append(f"- [{ts}] {title} _(event `{eid}`)_")
+
+    ht = int(max(0, min(history_tail, 500)))
+    if ht > 0:
+        hist = identity_claim_mirror_history(conn, limit=ht)
+        if hist:
+            lines.append("### Recent revisions (superseded / rejected)")
+            for c in hist:
+                meta = c.get("meta") or {}
+                rs = meta.get("revision_source") or "unknown"
+                who = f" — _source: {rs}_"
+                sup = f" → `{c['superseded_by']}`" if c.get("superseded_by") else ""
+                excerpt = c["text"][:280] + ("…" if len(c["text"]) > 280 else "")
+                lines.append(
+                    f"- **{c['kind']}** ({c['status']}){who}{sup}: {excerpt}"
+                )
 
     return "\n".join(lines) + "\n"
 

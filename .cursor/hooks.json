@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": ".cursor/hooks/clear-verify-queue.sh"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": ".cursor/hooks/queue-verify-path.sh"
+      }
+    ],
+    "afterTabFileEdit": [
+      {
+        "command": ".cursor/hooks/queue-verify-path.sh"
+      }
+    ],
+    "stop": [
+      {
+        "command": ".cursor/hooks/run-staged-verify.sh",
+        "timeout": 600,
+        "loop_limit": null
+      }
+    ]
+  }
+}
