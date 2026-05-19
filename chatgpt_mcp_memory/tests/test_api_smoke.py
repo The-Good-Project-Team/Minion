@@ -296,7 +296,7 @@ def test_nuke_and_factory_reset_exist(sidecar, staged_note: Path) -> None:
     assert any(sidecar.inbox.iterdir()), "expected inbox to have at least one file after ingest"
 
     # /nuke should exist.
-    r = sidecar.post("/nuke", {})
+    r = sidecar.post("/nuke", {"confirm": True})
     assert r.status_code == 200, r.text
 
     # DB should be empty after nuke.
@@ -309,7 +309,7 @@ def test_nuke_and_factory_reset_exist(sidecar, staged_note: Path) -> None:
     sidecar.wait_for_sources(1, timeout=45.0)
     assert any(sidecar.inbox.iterdir()), "expected inbox to be non-empty before factory reset"
 
-    r2 = sidecar.post("/factory-reset", {})
+    r2 = sidecar.post("/factory-reset", {"confirm": True})
     assert r2.status_code == 200, r2.text
     assert not any(sidecar.inbox.iterdir()), "expected inbox to be empty after factory reset"
 

@@ -68,8 +68,8 @@
       bind:value={draft}
       rows="2"
       placeholder={activeThreadId
-        ? "Answer 42 — short is fine…"
-        : "Waiting for 42 to ask something…"}
+        ? "Answer 42 — fills your life graph…"
+        : "42 finds the next empty spot on your graph…"}
       disabled={busy || !activeThreadId}
       onkeydown={onKeydown}
     ></textarea>

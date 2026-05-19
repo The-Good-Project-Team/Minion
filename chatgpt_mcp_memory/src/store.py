@@ -563,6 +563,42 @@ def _safe_unlink_wal_shm(db_path: Path) -> list[str]:
     return removed
 
 
+def _db_looks_corrupt(db_path: Path, err: Optional[BaseException]) -> bool:
+    """Only rotate aside when corruption is likely — not on transient lock/I/O blips."""
+    if os.environ.get("MINION_SQLITE_ROTATE_ON_FAILURE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return True
+    err_s = (str(err) if err else "").lower()
+    if any(
+        x in err_s
+        for x in (
+            "malformed",
+            "corrupt",
+            "not a database",
+            "disk image",
+            "quick_check",
+            "file is not a database",
+        )
+    ):
+        return True
+    if not db_path.exists() or db_path.stat().st_size < 512:
+        return False
+    try:
+        ro = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        row = ro.execute("PRAGMA quick_check").fetchone()
+        ro.close()
+        if row is None:
+            return True
+        return str(row[0]).lower() != "ok"
+    except sqlite3.Error:
+        return True
+    except OSError:
+        return False
+
+
 def _rotate_corrupt_database(db_path: Path) -> Path:
     """Rename the main DB aside so the next open creates a fresh file. Returns backup path."""
     backup = db_path.with_name(f"{db_path.name}.corrupt.{int(time.time())}.bak")
@@ -574,6 +610,21 @@ def _rotate_corrupt_database(db_path: Path) -> Path:
                 f"Could not move aside corrupt database {db_path}: {e}"
             ) from e
     _safe_unlink_wal_shm(db_path)
+    try:
+        flag = db_path.parent / ".last_db_rotate.json"
+        flag.write_text(
+            json.dumps(
+                {
+                    "backup_path": str(backup),
+                    "rotated_at": time.time(),
+                    "db_path": str(db_path),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        log.warning("could not write last_db_rotate flag", exc_info=True)
     return backup
 
 
@@ -725,6 +776,13 @@ def connect(db_path: Path, *, embed_dim: int = DEFAULT_EMBED_DIM) -> sqlite3.Con
                 for x in ("disk full", "no space left", "enospc", "sqlite_full", "database or disk is full")
             ):
                 log.error("Skipping corrupt-database rotate (likely disk full): %s", last_err)
+                break
+            if db_path.exists() and not _db_looks_corrupt(db_path, last_err):
+                log.error(
+                    "Skipping automatic DB rotate (graph/data preserved); "
+                    "transient open error: %s. Set MINION_SQLITE_ROTATE_ON_FAILURE=1 to force.",
+                    last_err,
+                )
                 break
             if db_path.exists():
                 backup = _rotate_corrupt_database(db_path)

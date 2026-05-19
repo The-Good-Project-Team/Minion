@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     connectClaudeDesktop,
+    getConfig,
     fetchConsentPolicy,
     fetchKeyCapabilities,
     fetchSettings,
@@ -68,6 +69,11 @@
   let keySecret = $state("");
   let keyMsg = $state("");
   let keyBusy = $state(false);
+  let vaultPath = $state("");
+
+  void getConfig().then((c) => {
+    vaultPath = c.data_dir;
+  });
 
   async function loadKeys() {
     try {
@@ -469,11 +475,30 @@
 </div>
 
 <div class="card">
+  <h2>Vault</h2>
+  <p class="muted">
+    Your graph and index live here. Keep this folder on local disk (not iCloud). Backups:
+    <code>graph_snapshot.json</code> after 42 fills the graph.
+  </p>
+  {#if vaultPath}
+    <p class="vault-path mono">{vaultPath}</p>
+  {/if}
+</div>
+
+<div class="card">
   <h2>Support</h2>
   <p class="muted">Diagnostics and advanced options remain in the legacy module if needed during transition.</p>
 </div>
 
 <style>
+  .vault-path {
+    font-size: 0.78rem;
+    word-break: break-all;
+    margin: 0.5rem 0 0;
+    padding: 0.45rem 0.55rem;
+    background: var(--panel-2);
+    border-radius: var(--radius);
+  }
   .capture-list {
     margin: 0.5rem 0 0;
     padding-left: 1.1rem;

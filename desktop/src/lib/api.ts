@@ -577,7 +577,10 @@ export async function deleteSource(body: {
 export async function nukeDb(): Promise<{ removed: string[]; missing: string[]; db_path: string }> {
   const cfg = await getConfig();
   await assertSidecarHasNukeRoute(cfg.api_base);
-  return apiFetch("/nuke", { method: "POST" });
+  return apiFetch("/nuke", {
+    method: "POST",
+    body: JSON.stringify({ confirm: true }),
+  });
 }
 
 export async function factoryReset(): Promise<{
@@ -590,7 +593,10 @@ export async function factoryReset(): Promise<{
 }> {
   const cfg = await getConfig();
   await assertSidecarHasNukeRoute(cfg.api_base);
-  return apiFetch("/factory-reset", { method: "POST" });
+  return apiFetch("/factory-reset", {
+    method: "POST",
+    body: JSON.stringify({ confirm: true }),
+  });
 }
 
 export type ConnState = "connecting" | "open" | "closed" | "unreachable";

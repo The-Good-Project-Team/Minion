@@ -36,7 +36,9 @@ def test_next_clarification_sparse_person(conn) -> None:
     assert out["created"] is True
     thread = out["thread"]
     assert thread is not None
-    assert "Alex" in (thread["messages"][0]["body_md"] or "")
+    body = thread["messages"][0]["body_md"] or ""
+    assert "Alex" in body
+    assert "42" in body
 
 
 def test_reply_resolves_person_summary(conn) -> None:
@@ -52,8 +54,11 @@ def test_reply_resolves_person_summary(conn) -> None:
     conn.commit()
     out = next_clarification(conn, None)
     tid = out["thread"]["thread_id"]
-    reply(conn, tid, body="College friend from Portland.")
+    out = reply(conn, tid, body="College friend from Portland.")
+    assert out["ok"] is True
     row = conn.execute("SELECT summary FROM graph_nodes WHERE node_id=?", (nid,)).fetchone()
     assert row is not None
     meta = json.loads(row["summary"] or "{}")
     assert "Portland" in str(meta.get("user_note") or "")
+    thread = out["thread"]
+    assert thread is not None

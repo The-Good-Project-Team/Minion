@@ -5,9 +5,9 @@ import json
 import logging
 import time
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
-from typing import Any, Dict, List, Optional
 
 from council_engine import council_subject_ids_with_open, list_open_feed_items
 from second_brain import build_working_context

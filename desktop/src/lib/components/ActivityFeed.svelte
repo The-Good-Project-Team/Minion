@@ -90,6 +90,13 @@
       if (item.kind === "health_issue" && item.refs.issue_id && actionId === "resolve") {
         await resolveHealthIssue(item.refs.issue_id);
       }
+      if (
+        (item.kind === "forty_two" || item.lane === "conversation") &&
+        item.refs.thread_id &&
+        actionId === "dismiss"
+      ) {
+        await fortyTwoDismiss(item.refs.thread_id);
+      }
       await onRefresh?.();
     } finally {
       busy = null;
@@ -154,6 +161,34 @@
             <li class="timeline-row" style="--i: {i}">
               {#if isCouncil(item)}
                 <ProposalCard {item} {onRefresh} />
+              {:else if isConversation(item.kind)}
+                <article
+                  class="chat-bubble"
+                  class:chat-bubble-42={item.kind === "forty_two"}
+                  class:chat-bubble-you={item.kind === "you"}
+                >
+                  <header class="chat-bubble-head">
+                    <span class="chat-speaker">{item.kind === "forty_two" ? "42" : "You"}</span>
+                    <time class="feed-ts">{formatTs(item.ts)}</time>
+                  </header>
+                  {#if item.body}
+                    <p class="chat-bubble-body">{item.body}</p>
+                  {/if}
+                  {#if item.actions?.length}
+                    <div class="feed-actions">
+                      {#each item.actions as action}
+                        <button
+                          type="button"
+                          class="btn"
+                          disabled={busy === item.feed_id}
+                          onclick={() => void act(item, action.id)}
+                        >
+                          {action.label}
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </article>
               {:else}
                 <article
                   class="feed-item lane-{item.lane}"
@@ -469,5 +504,51 @@
     gap: 0.45rem;
     margin-top: 0.55rem;
     flex-wrap: wrap;
+  }
+  .timeline-row:has(.chat-bubble) {
+    list-style: none;
+  }
+  .timeline-row:has(.chat-bubble)::before {
+    display: none;
+  }
+  .chat-bubble {
+    max-width: min(36rem, 92%);
+    padding: 0.65rem 0.85rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel);
+    box-shadow: var(--shadow-s);
+  }
+  .chat-bubble-42 {
+    margin-right: auto;
+    border-left: 3px solid var(--accent);
+    background: color-mix(in srgb, var(--accent-soft) 40%, var(--panel));
+  }
+  .chat-bubble-you {
+    margin-left: auto;
+    border-right: 3px solid color-mix(in srgb, var(--muted) 50%, var(--border));
+    background: var(--panel-2);
+  }
+  .chat-bubble-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.35rem;
+    font-size: 0.7rem;
+  }
+  .chat-speaker {
+    font-weight: 600;
+    font-family: var(--font-display);
+    color: var(--accent);
+  }
+  .chat-bubble-you .chat-speaker {
+    color: var(--ink);
+  }
+  .chat-bubble-body {
+    margin: 0;
+    font-size: 0.86rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 </style>

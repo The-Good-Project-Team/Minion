@@ -130,6 +130,7 @@ from store import (
     sync_sources_list,
     system_issues_open,
     system_issue_resolve,
+    system_issue_upsert,
 )
 import numpy as np
 
@@ -438,6 +439,11 @@ async def _lifespan(app: FastAPI):
     if not os.environ.get("MINION_DISABLE_AMBIENT_SCHEDULER", "").strip():
         start_ambient_scheduler(State.data_dir, State.conn)
     try:
+        _surface_db_rotate_flag(State.data_dir, State.conn())
+        State.conn().commit()
+    except Exception:
+        log.exception("db_rotate flag handling failed")
+    try:
         analytics_remote.emit_session_if_ready()
     except Exception:
         pass
@@ -635,13 +641,47 @@ class StorageTierPromoteStaleBody(BaseModel):
     to_tier: str = Field(default="warm", max_length=16)
 
 
+class DestructiveConfirmBody(BaseModel):
+    confirm: bool = False
+
+
+def _surface_db_rotate_flag(data_dir: Path, conn) -> None:
+    """If SQLite recovery rotated the DB aside, surface one Activity health issue."""
+    flag = data_dir / ".last_db_rotate.json"
+    if not flag.exists():
+        return
+    try:
+        meta = json.loads(flag.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        meta = {}
+    backup = str(meta.get("backup_path") or "see data folder")
+    system_issue_upsert(
+        conn,
+        severity="elevated",
+        source_key="db_rotate",
+        body_md=(
+            "Your vault database was replaced after corruption was detected. "
+            f"Backup: `{backup}`. Life-graph answers may also be in `graph_snapshot.json`."
+        ),
+    )
+    try:
+        flag.unlink()
+    except OSError:
+        pass
+
+
 @app.post("/nuke")
-def nuke_db() -> Dict[str, Any]:
+def nuke_db(body: DestructiveConfirmBody = DestructiveConfirmBody()) -> Dict[str, Any]:
     """Delete the local memory database and related runtime artifacts.
 
     Intended for "factory reset" / clean-slate behaviour. The desktop app
-    should restart the sidecar after calling this.
+    should restart the sidecar after calling this. Requires ``{"confirm": true}``.
     """
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail='destructive action requires JSON body {"confirm": true}',
+        )
     removed: List[str] = []
     missing: List[str] = []
 
@@ -687,13 +727,14 @@ def nuke_db() -> Dict[str, Any]:
 
 
 @app.post("/factory-reset")
-def factory_reset() -> Dict[str, Any]:
+def factory_reset(body: DestructiveConfirmBody = DestructiveConfirmBody()) -> Dict[str, Any]:
     """More aggressive reset than /nuke.
 
     Deletes the database *and* clears the inbox directory contents.
     The desktop app should restart the sidecar after calling this.
+    Requires ``{"confirm": true}``.
     """
-    result = nuke_db()
+    result = nuke_db(body)
     inbox_removed: List[str] = []
     inbox_missing: List[str] = []
 
@@ -1508,6 +1549,7 @@ def chat_thread_reply(thread_id: str, body: ChatReplyBody) -> Dict[str, Any]:
         thread_id,
         body=body.body,
         action=body.action,
+        data_dir=State.data_dir,
     )
     State.conn().commit()
     return out
@@ -1543,6 +1585,7 @@ def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
         tid,
         body=body.message,
         action=body.action,
+        data_dir=State.data_dir,
     )
     State.conn().commit()
     if not out.get("ok"):

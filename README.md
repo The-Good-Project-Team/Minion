@@ -1,6 +1,42 @@
 # Minion
 
-**Minion** is a macOS desktop app that turns your machine into **private, searchable long-term memory** for AI assistants. It **watches and listens on your desk** (windows, browser text, optional mic) as the primary substrate; you can also drop exports, PDFs, notes, and media into an inbox. Everything is chunked, embedded, and stored locally in SQLite. **Claude Desktop** (and any other MCP client) can call Minion over stdio to search that archive, browse conversations, and maintain an evolving **voice** profile—without sending your corpus to a hosted service.
+**Minion** is a **capture-first macOS second brain**: it watches what you work on (window focus, accessibility text, selective screenshots when text is thin), ingests files you drop in, and stores everything in a **local vault** at `~/Library/Application Support/Minion/data`. The app opens to **Activity**—one Slack-like stream of capture, sync, parsing, council proposals, and **42** conversation—not a search box you have to remember to use. **42** is the proactive guide that asks questions and offers guidance; you answer in short bursts. **Claude Desktop** (and other MCP clients) can read the same vault over stdio when you want an assistant in the loop.
+
+---
+
+## What you get
+
+| Surface | Role |
+|--------|------|
+| **Activity** | Home: chronological river of context—ambient capture, ingest/sync jobs, health issues, council suggestions, and **42** threads. |
+| **42** | Proactive guide embedded in Activity. Surfaces questions and nudges so you do not have to invent good prompts; reply or dismiss. |
+| **Sources** | Drop zone, inbox watcher, ingest toggles, and search over your indexed corpus. |
+| **Mirror / graph** | Life-graph scaffold (people, projects, obligations, …) with evidence attached; identity mirror and wiki routes where enabled. |
+| **MCP** | Memory tools for Claude (`ask_minion`, working context, voice helpers, wiki/work proposals)—local index only, no hosted memory service. |
+
+Under the hood: one **`memory.db`** (plus vectors) in the vault; override the data directory with `MINION_DATA_DIR`. macOS capture respects deny lists and keeps screenshots sparse (OCR when accessibility text is thin). Settings cover sidecar paths, Claude one-click MCP setup, and per-format ingest.
+
+**Ships today:** Tauri desktop, Python sidecar, ambient capture, Activity + 42, vault + MCP, life-graph seed, council-style suggestions. **Roadmap** (mirror sharing, belief plasticity, tiered compression at scale, ambient audio, and more) is spelled out in [`docs/ROADMAP.md`](docs/ROADMAP.md)—not promised here.
+
+### Documentation
+
+| Doc | Contents |
+|-----|----------|
+| [`docs/SECOND_BRAIN.md`](docs/SECOND_BRAIN.md) | Four-loop model, routes, Activity feed, MCP posture |
+| [`docs/LIFE_GRAPH.md`](docs/LIFE_GRAPH.md) | Graph scaffold, domains, retrieval order |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | Product direction and phased themes |
+| [`chatgpt_mcp_memory/README.md`](chatgpt_mcp_memory/README.md) | Tool tables, parsers, env flags, CLI |
+| [`desktop/README.md`](desktop/README.md) | Tauri architecture, `tauri dev` / release bundles |
+| [`AGENTS.md`](AGENTS.md) · [`PROCESS.md`](PROCESS.md) | Agent playbook and delivery loop (contributors) |
+
+### Repo layout
+
+| Path | What it is |
+|------|------------|
+| [`desktop/`](desktop/) | macOS app: **SvelteKit** UI + **Tauri 2** Rust shell (`src-tauri/`). |
+| [`chatgpt_mcp_memory/`](chatgpt_mcp_memory/) | **Python** sidecar (FastAPI, ingest, SQLite, MCP). |
+
+On `tauri build`, `desktop/src-tauri/scripts/sync_sidecar.sh` copies `chatgpt_mcp_memory` into `desktop/src-tauri/resources/sidecar/` (gitignored; canonical source stays `chatgpt_mcp_memory/`).
 
 ---
 
@@ -22,33 +58,11 @@
 
 ---
 
-## What you get
-
-- **Local index** — One `memory.db` (plus vectors) under `~/Library/Application Support/Minion/data` by default. Override with `MINION_DATA_DIR` if needed.
-- **Drop zone + watcher** — Drag files or folders onto the app (or use **Choose files…**). The sidecar ingests in the background; the **Activity** list shows progress and chunk counts.
-- **MCP tools for Claude** — Semantic / keyword / temporal **`ask_minion`**, **`get_chunk`**, conversation helpers, **`index_info`**, voice tools (`commit_voice` / `append_to_voice`), and identity helpers where enabled. Claude chooses when to call them.
-- **Settings hub** — Restart the Python sidecar, inspect API and DB paths, tune which file kinds are ingested, and **Add to Claude** to merge Minion into `claude_desktop_config.json`.
-
-For tool tables, parsers, env flags, and CLI-only workflows, see **[`chatgpt_mcp_memory/README.md`](./chatgpt_mcp_memory/README.md)**. For Tauri architecture and `tauri dev` / `tauri build`, see **[`desktop/README.md`](./desktop/README.md)**. Product direction and phased themes: **[`docs/ROADMAP.md`](./docs/ROADMAP.md)**.
-
-### Where the app lives in this repo (on GitHub)
-
-All of it is in **this monorepo**—nothing is shipped from a private subtree:
-
-| Path | What it is |
-|------|----------------|
-| **[`desktop/`](https://github.com/reif-is-a-foofie/Minion/tree/main/desktop)** | macOS app: **SvelteKit** UI + **Tauri 2** Rust shell (`src-tauri/`). |
-| **[`chatgpt_mcp_memory/`](https://github.com/reif-is-a-foofie/Minion/tree/main/chatgpt_mcp_memory)** | **Python** sidecar (FastAPI, ingest, SQLite, MCP). |
-
-On `tauri build`, **`desktop/src-tauri/scripts/sync_sidecar.sh`** copies `chatgpt_mcp_memory`’s `src/` and `requirements*.txt` into `desktop/src-tauri/resources/sidecar/`. That `sidecar/` folder is **gitignored** (generated each build); the canonical source is always **`chatgpt_mcp_memory/`** on GitHub.
-
----
-
 ## Install (macOS app)
 
 ### 1. Pick the right download (Intel vs Apple Silicon)
 
-On [**GitHub Releases**](https://github.com/reif-is-a-foofie/Minion/releases) there are **two** macOS downloads. **Read the file name**—it says which kind of Mac it is for (no “arm64” / “x64” jargon):
+On [**GitHub Releases**](https://github.com/reif-is-a-foofie/Minion/releases) there are **two** macOS downloads. **Read the file name**—it says which kind of Mac it is for:
 
 | Download file name contains… | Use for | How to tell on the Mac |
 |------------------------------|---------|---------------------------|
@@ -60,12 +74,12 @@ If you pick the wrong one, macOS may refuse to open the app or show an architect
 ### 2. Install and run
 
 1. Download the matching zip from [**GitHub Releases**](https://github.com/reif-is-a-foofie/Minion/releases) (or build from source — below).
-2. Unzip, then move **Minion.app** to **Applications** when prompted (avoid running forever from the disk image or a translocated copy; that can confuse paths and file access).
+2. Unzip, then move **Minion.app** to **Applications** when prompted (avoid running forever from the disk image or a translocated copy).
 3. **First launch** can take a few minutes while Minion prepares its embedded Python environment and starts the sidecar. Later launches are quick.
-4. In Minion, open **Settings → Claude (MCP)** and click **Add to Claude**. Then **fully quit and reopen Claude Desktop** so it loads the new MCP entry.
+4. Open **Activity** to see capture and ingest; engage **42** when it surfaces a thread. Optional: open **Settings → Claude (MCP)** and click **Add to Claude**, then **fully quit and reopen Claude Desktop**.
 5. Optional: import a **ChatGPT export** (zip or folder) via the drop zone so the index has history on day one.
 
-**Ollama (image captions):** If you do not already have Ollama installed, Minion downloads the **official macOS Ollama app** (one build for both Apple Silicon and Intel) into your Minion data folder on first launch and starts it locally. To skip that behavior (e.g. corporate machines), set **`MINION_SKIP_MANAGED_OLLAMA=1`** before opening the app.
+**Ollama (image captions):** If you do not already have Ollama installed, Minion can download the **official macOS Ollama app** into your Minion data folder on first launch and start it locally. To skip that behavior, set **`MINION_SKIP_MANAGED_OLLAMA=1`** before opening the app.
 
 ---
 
@@ -73,8 +87,9 @@ If you pick the wrong one, macOS may refuse to open the app or show an architect
 
 ```bash
 git clone https://github.com/reif-is-a-foofie/Minion.git
-cd Minion
+cd Minion   # or your clone path, e.g. ~/Classified/minion
 git submodule update --init --recursive
+
 cd chatgpt_mcp_memory
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -84,19 +99,19 @@ npm install
 npm run tauri dev
 ```
 
-The Rust shell prefers `../chatgpt_mcp_memory/.venv/bin/python`. Release builds produce `desktop/src-tauri/target/release/bundle/macos/Minion.app`; bundling details may evolve — see `desktop/README.md` and `desktop/src-tauri/` notes.
+The Rust shell prefers `../chatgpt_mcp_memory/.venv/bin/python`. Release builds produce `desktop/src-tauri/target/release/bundle/macos/Minion.app`; see [`desktop/README.md`](desktop/README.md) for bundling notes.
 
 ---
 
 ## CLI (`minion` command)
 
-For a **terminal-first** setup (export path, `minion doctor`, `minion setup`, inbox CRUD without the GUI), use the launcher in **`bin/minion`** and the instructions in **`chatgpt_mcp_memory/README.md`**. The desktop app and the CLI share the same store and MCP server code.
+For a **terminal-first** setup (export path, `minion doctor`, `minion setup`, inbox CRUD without the GUI), use the launcher in **`bin/minion`** and [`chatgpt_mcp_memory/README.md`](chatgpt_mcp_memory/README.md). The desktop app and the CLI share the same store and MCP server code.
 
 ---
 
 ## Privacy
 
-Indexing and search run **on your machine**. MCP speaks **stdio** to Claude Desktop by default—no cloud “memory service” in the loop for your chunks. Optional components (for example **Ollama** for voice synthesis, or **HF Hub** for some embedding downloads) only touch the network if you configure them; keep exports and large corpora **outside** the git tree if you prefer (e.g. a sibling folder).
+Indexing, capture, and search run **on your machine**. MCP speaks **stdio** to Claude Desktop by default—no cloud “memory service” for your chunks. Optional components (for example **Ollama** for voice or captions, or **HF Hub** for some embedding downloads) only touch the network if you configure them. Keep exports and large corpora **outside** the git tree if you prefer.
 
 ---
 
@@ -104,4 +119,4 @@ Indexing and search run **on your machine**. MCP speaks **stdio** to Claude Desk
 
 Built and dogfooded by **Reif** — questions: [reif@thegoodproject.net](mailto:reif@thegoodproject.net).
 
-**Cursor skills catalog:** [Awesome Cursor Skills](https://github.com/spencerpauly/awesome-cursor-skills) by **[Spencer Pauly](https://github.com/spencerpauly)** — vendored in-repo as a git submodule at [`third_party/awesome-cursor-skills`](third_party/awesome-cursor-skills) so agents can scan curated `SKILL.md` workflows. Third-party list; not affiliated with Minion.
+**Cursor skills catalog:** [Awesome Cursor Skills](https://github.com/spencerpauly/awesome-cursor-skills) by **[Spencer Pauly](https://github.com/spencerpauly)** — vendored in-repo at [`third_party/awesome-cursor-skills`](third_party/awesome-cursor-skills). Third-party list; not affiliated with Minion.

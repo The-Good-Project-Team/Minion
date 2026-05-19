@@ -41,7 +41,7 @@
       {/if}
     </h1>
     <p class="lede">
-      One stream — capture, sync, and <strong>42</strong> asking the questions so you don't have to.
+      One stream — capture, sync, and <strong>42</strong> filling gaps on your life graph.
     </p>
   </div>
   <button type="button" class="btn btn-refresh" onclick={() => void load()} aria-label="Refresh activity">
