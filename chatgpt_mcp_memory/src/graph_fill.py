@@ -993,7 +993,8 @@ _PHRASE_FILLER = frozenset(
 
 def _is_plausible_graph_title(text: str, *, node_kind: str = "person") -> bool:
     """Reject greetings and filler when 42 expects a real graph label."""
-    phrase = _first_phrase(text).strip()
+    # Person labels keep initials (e.g. "A. Kim"); _first_phrase truncates on ".".
+    phrase = (text.strip() if node_kind == "person" else _first_phrase(text)).strip()
     if len(phrase) < 2:
         return False
     low = " ".join(phrase.lower().split())
