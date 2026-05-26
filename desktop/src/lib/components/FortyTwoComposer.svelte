@@ -1,14 +1,20 @@
 <script lang="ts">
-  import { fortyTwoDismiss, fortyTwoNext, fortyTwoReply } from "$lib/api";
+  import { fortyTwoNext, openFortyTwoReplyStream } from "$lib/api";
 
   let {
     activeThreadId = null,
     needsQuestion = false,
+    suggestions = [],
     onRefresh,
+    streaming = $bindable(false),
+    streamBuf = $bindable(""),
   }: {
     activeThreadId?: string | null;
     needsQuestion?: boolean;
+    suggestions?: import("$lib/api").FortyTwoSuggestion[];
     onRefresh?: () => void | Promise<void>;
+    streaming?: boolean;
+    streamBuf?: string;
   } = $props();
 
   let draft = $state("");
@@ -16,7 +22,7 @@
   let err = $state<string | null>(null);
 
   $effect(() => {
-    if (needsQuestion && !busy) {
+    if (needsQuestion && !busy && !streaming) {
       void poke42();
     }
   });
@@ -34,18 +40,41 @@
     }
   }
 
+  async function pick(name: string) {
+    if (!activeThreadId || busy || streaming) return;
+    draft = name;
+    await send();
+  }
+
   async function send() {
     const text = draft.trim();
-    if (!text && !activeThreadId) return;
+    if (!text || !activeThreadId) return;
     busy = true;
+    streaming = true;
+    streamBuf = "";
     err = null;
+    const tid = activeThreadId;
+    draft = "";
+
+    const stream = openFortyTwoReplyStream(text, tid, undefined, {
+      onDelta: (d) => {
+        streamBuf += d;
+      },
+      onDone: async () => {
+        streaming = false;
+        streamBuf = "";
+        await onRefresh?.();
+      },
+      onError: (m) => {
+        err = m;
+        streaming = false;
+        streamBuf = "";
+      },
+    });
     try {
-      await fortyTwoReply(text, activeThreadId ?? undefined);
-      draft = "";
-      await onRefresh?.();
-    } catch (e) {
-      err = e instanceof Error ? e.message : String(e);
+      await stream.finished;
     } finally {
+      stream.cancel();
       busy = false;
     }
   }
@@ -59,27 +88,24 @@
 </script>
 
 <div class="composer">
-  {#if err}
-    <p class="composer-err">{err}</p>
+  {#if err}<p class="composer-err">{err}</p>{/if}
+  {#if suggestions.length > 0 && activeThreadId && !busy && !streaming}
+    <div class="chips">
+      {#each suggestions as s (s.name)}
+        <button type="button" class="chip" onclick={() => void pick(s.name)}>{s.name}</button>
+      {/each}
+    </div>
   {/if}
-  <div class="composer-row">
-    <span class="composer-label" aria-hidden="true">42</span>
+  <div class="row">
     <textarea
       bind:value={draft}
       rows="2"
-      placeholder={activeThreadId
-        ? "Answer 42 — fills your life graph…"
-        : "42 finds the next empty spot on your graph…"}
-      disabled={busy || !activeThreadId}
+      placeholder={activeThreadId ? "Message #life" : "Message #life"}
+      disabled={busy || streaming || !activeThreadId}
       onkeydown={onKeydown}
     ></textarea>
-    <button
-      type="button"
-      class="btn btn-send"
-      disabled={busy || !draft.trim() || !activeThreadId}
-      onclick={() => void send()}
-    >
-      {busy ? "…" : "Send"}
+    <button type="button" class="btn-send" disabled={busy || streaming || !draft.trim() || !activeThreadId} onclick={() => void send()}>
+      Send
     </button>
   </div>
 </div>
@@ -88,60 +114,50 @@
   .composer {
     position: sticky;
     bottom: 0;
-    margin-top: 0.75rem;
-    padding: 0.65rem 0.75rem;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-s);
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
   }
-  .composer-row {
+  .chips {
     display: flex;
-    gap: 0.5rem;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-bottom: 0.4rem;
+  }
+  .chip {
+    font-size: 0.75rem;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    cursor: pointer;
+  }
+  .row {
+    display: flex;
+    gap: 0.45rem;
     align-items: flex-end;
   }
-  .composer-label {
-    flex-shrink: 0;
-    width: 2rem;
-    height: 2rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: var(--font-display);
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: var(--accent);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
-    border-radius: var(--radius);
-    background: var(--accent-soft);
-  }
-  .composer-row textarea {
+  textarea {
     flex: 1;
-    font-family: inherit;
+    font: inherit;
     font-size: 0.88rem;
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.45rem 0.55rem;
+    padding: 0.4rem 0.5rem;
     resize: none;
-    background: var(--bg);
-    color: var(--ink);
-    min-height: 2.5rem;
-  }
-  .composer-row textarea:focus {
-    outline: none;
-    border-color: var(--accent);
   }
   .btn-send {
-    flex-shrink: 0;
     background: var(--accent);
     color: white;
-    border-color: var(--accent);
+    border: none;
+    border-radius: var(--radius);
+    padding: 0.45rem 0.7rem;
     font-size: 0.8rem;
-    padding: 0.45rem 0.75rem;
   }
   .composer-err {
-    font-size: 0.78rem;
     color: var(--danger);
+    font-size: 0.78rem;
     margin: 0 0 0.35rem;
   }
 </style>

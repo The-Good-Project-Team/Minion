@@ -189,7 +189,7 @@
     try {
       const r = await updateSettings({
         ambient_sensing_enabled: appSettings.ambient_sensing_enabled,
-        capture_on_empty_ax: appSettings.capture_on_empty_ax !== false,
+        capture_on_empty_ax: appSettings.capture_on_empty_ax === true,
         ambient_collectors: appSettings.ambient_collectors,
       });
       appSettings = r.settings;
@@ -316,7 +316,7 @@
     <label style="display:flex;gap:0.5rem;align-items:center;margin:0.5rem 0;">
       <input
         type="checkbox"
-        checked={appSettings.capture_on_empty_ax !== false}
+        checked={appSettings.capture_on_empty_ax === true}
         onchange={(e) => {
           appSettings!.capture_on_empty_ax = (e.currentTarget as HTMLInputElement).checked;
         }}

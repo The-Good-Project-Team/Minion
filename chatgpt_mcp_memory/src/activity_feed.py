@@ -300,40 +300,23 @@ def build_activity_feed(
     focus = working.get("focus")
     now_item: Optional[Dict[str, Any]] = None
     if focus:
-        app = str(focus.get("app_name") or "")
-        title = str(focus.get("window_title") or "")
-        now_item = {
-            **_feed_item(
-                feed_id="now-focus",
-                ts=float(focus.get("ts") or time.time()),
-                lane="now",
-                kind="focus",
-                title=f"Right now · {app}" + (f" — {title}" if title else ""),
-                body="",
-                graph_kinds=["project", "job"],
-            ),
-        }
+        app = str(focus.get("app_name") or "").strip()
+        title = str(focus.get("window_title") or "").strip()
+        if app or title:
+            now_item = {
+                **_feed_item(
+                    feed_id="now-focus",
+                    ts=float(focus.get("ts") or time.time()),
+                    lane="now",
+                    kind="focus",
+                    title=f"{app}{' — ' + title if title else ''}".strip() or "Focused window",
+                    body="",
+                    graph_kinds=["project", "job"],
+                ),
+            }
 
     council_subjects = council_subject_ids_with_open(conn)
     council_items = list_open_feed_items(conn, data_dir)
-
-    memory_items: List[Dict[str, Any]] = []
-    for i, hit in enumerate((working.get("related_memory") or [])[:2]):
-        score = float(hit.get("score") or 0)
-        if score < 0.42:
-            continue
-        memory_items.append(
-            _feed_item(
-                feed_id=f"mem-{hit.get('chunk_id') or i}",
-                ts=time.time(),
-                lane="suggestion",
-                kind="related_memory",
-                title=f"Related · {hit.get('path')}",
-                body=(hit.get("text") or "")[:280],
-                parse={"status": "indexed", "reason": f"score={hit.get('score')}"},
-                graph_kinds=["project"],
-            )
-        )
 
     ambient = ambient_events_since(conn, since_ts=since_ts, limit=lim)
     runs = sync_job_runs_recent(conn, limit=min(30, lim))
@@ -349,12 +332,23 @@ def build_activity_feed(
         "open_count": 0,
     }
     try:
-        from forty_two import conversation_feed_items, stream_state
+        from forty_two import conversation_feed_items, pinned_conversation_item, stream_state
 
         river.extend(conversation_feed_items(conn, since_ts=since_ts, limit=min(40, lim)))
         forty_two_state = stream_state(conn, data_dir)
+        pin = pinned_conversation_item(conn)
+        if pin:
+            pin_ids = {pin["feed_id"]}
+            river = [r for r in river if r.get("feed_id") not in pin_ids]
+            river.insert(0, pin)
     except Exception:
         log.exception("forty_two feed items failed")
+    try:
+        from graph_events import graph_event_feed_items
+
+        river.extend(graph_event_feed_items(data_dir, since_ts=since_ts, limit=min(30, lim)))
+    except Exception:
+        log.debug("graph event feed skipped", exc_info=True)
     river.extend(_ambient_to_items(ambient))
     river.extend(_sync_runs_to_items(runs))
     river.extend(_wiki_to_items(wiki))
@@ -373,7 +367,7 @@ def build_activity_feed(
         "now": now_item,
         "items": items,
         "council_items": council_items,
-        "memory_prefetch": memory_items,
+        "memory_prefetch": [],
         "graph": graph_scaffold_list(conn),
         "forty_two": forty_two_state,
         "composed_at": time.time(),

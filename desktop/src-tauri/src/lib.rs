@@ -721,6 +721,153 @@ fn wait_for_sidecar_http_ready(port: u16, timeout_ms: u64) -> bool {
     false
 }
 
+fn spawn_menu_status_watcher(handle: AppHandle, port: u16) {
+    let notifications_enabled = !minion_env_truthy("MINION_DISABLE_MENU_NOTIFICATIONS");
+    thread::spawn(move || {
+        let poll_sec = std::env::var("MINION_MENU_STATUS_POLL_SEC")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(45)
+            .clamp(15, 300);
+        let mut last_fingerprint = String::new();
+        loop {
+            if let Some(status) = menu_status_snapshot(port, 1200) {
+                let _ = handle.emit("menu://status", status.clone());
+                update_menu_bar_icon(&handle, &status);
+                if notifications_enabled
+                    && status
+                    .get("should_notify")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    if let Some(fp) = menu_status_fingerprint(&status) {
+                        if fp != last_fingerprint {
+                            last_fingerprint = fp;
+                            let (title, body) = menu_notification_text(&status);
+                            send_local_notification(&title, &body);
+                        }
+                    }
+                }
+            }
+            thread::sleep(Duration::from_secs(poll_sec));
+        }
+    });
+}
+
+fn setup_menu_bar_icon(app: &mut tauri::App) {
+    if minion_env_truthy("MINION_DISABLE_MENU_BAR_ICON") {
+        return;
+    }
+    let menu = match tauri::menu::MenuBuilder::new(app)
+        .text("open", "Open Minion")
+        .text("status", "No graph questions")
+        .separator()
+        .text("quit", "Quit Minion")
+        .build()
+    {
+        Ok(menu) => menu,
+        Err(e) => {
+            dbg("menu_bar_icon", serde_json::json!({"state": "menu_err", "error": e.to_string()}));
+            return;
+        }
+    };
+    let mut builder = tauri::tray::TrayIconBuilder::with_id("minion")
+        .tooltip("Minion")
+        .show_menu_on_left_click(true)
+        .menu(&menu);
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone()).icon_as_template(true);
+    }
+    let result = builder
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .build(app);
+    if let Err(e) = result {
+        dbg("menu_bar_icon", serde_json::json!({"state": "tray_err", "error": e.to_string()}));
+    }
+}
+
+fn update_menu_bar_icon(handle: &AppHandle, status: &serde_json::Value) {
+    let Some(tray) = handle.tray_by_id("minion") else {
+        return;
+    };
+    let pending = status
+        .get("pending_questions")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if pending > 0 {
+        let label = if pending > 9 {
+            "9+".to_string()
+        } else {
+            pending.to_string()
+        };
+        let _ = tray.set_title(Some(label));
+        let _ = tray.set_tooltip(Some(format!("Minion: {pending} graph question(s)")));
+    } else {
+        let _ = tray.set_title(None::<&str>);
+        let _ = tray.set_tooltip(Some("Minion"));
+    }
+}
+
+fn menu_status_snapshot(port: u16, timeout_ms: u64) -> Option<serde_json::Value> {
+    let body = http_get_body(port, "/menu/status", timeout_ms)?;
+    serde_json::from_str(body.trim()).ok()
+}
+
+fn menu_status_fingerprint(status: &serde_json::Value) -> Option<String> {
+    let q = status.get("next_question")?;
+    let kind = q.get("kind").and_then(|v| v.as_str()).unwrap_or("question");
+    let id = q
+        .get("candidate_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| q.get("title").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    if id.trim().is_empty() {
+        return None;
+    }
+    Some(format!("{kind}:{id}"))
+}
+
+fn menu_notification_text(status: &serde_json::Value) -> (String, String) {
+    let q = status.get("next_question").unwrap_or(&serde_json::Value::Null);
+    let title = q
+        .get("title")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Minion has a question");
+    let body = q
+        .get("body")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Open Minion to fill your graph.");
+    (title.chars().take(120).collect(), body.chars().take(240).collect())
+}
+
+#[cfg(target_os = "macos")]
+fn send_local_notification(title: &str, body: &str) {
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        applescript_string(body),
+        applescript_string(title)
+    );
+    let _ = Command::new("osascript").args(["-e", &script]).spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn send_local_notification(_title: &str, _body: &str) {}
+
+fn applescript_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn listener_is_minion_with_nuke(port: u16) -> bool {
     let body = match http_get_body(port, "/openapi.json", 800) {
         Some(b) if b.trim_start().starts_with('{') => b,
@@ -1298,6 +1445,11 @@ fn screen_context_status(state: tauri::State<AppState>) -> serde_json::Value {
         "process_snapshot": ambient_stream::collector_enabled(&state.data_dir, "process_snapshot"),
         "app_launched": ambient_stream::collector_enabled(&state.data_dir, "app_launched"),
         "browser_visit": ambient_stream::collector_enabled(&state.data_dir, "browser_visit"),
+        "dom_snapshot": ambient_stream::collector_enabled(&state.data_dir, "dom_snapshot"),
+        "clipboard_event": ambient_stream::collector_enabled(&state.data_dir, "clipboard_event"),
+        "mouse_event": ambient_stream::collector_enabled(&state.data_dir, "mouse_event"),
+        "keyboard_event": ambient_stream::collector_enabled(&state.data_dir, "keyboard_event"),
+        "rolling_video_clip": ambient_stream::collector_enabled(&state.data_dir, "rolling_video_clip"),
         "listening": ambient_stream::collector_enabled(&state.data_dir, "listening"),
         "full_listening": listening_session::full_listening_enabled(&state.data_dir),
         "screen_reader": ambient_stream::collector_enabled(&state.data_dir, "screen_reader"),
@@ -1914,6 +2066,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(state)
         .setup(move |app| {
+            setup_menu_bar_icon(app);
             // Bootstrap + spawn on a background thread so the window paints
             // immediately. UI subscribes to `sidecar://status` for progress.
             let handle = app.handle().clone();
@@ -2081,6 +2234,7 @@ pub fn run() {
                         "sidecar://status",
                         serde_json::json!({"state": "ready"}),
                     );
+                    spawn_menu_status_watcher(handle.clone(), port_bg);
                     if needs_pull_local {
                         let handle2 = handle.clone();
                         let model = target_model.clone();
@@ -2169,7 +2323,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_dup_suffix;
+    use super::{
+        applescript_string, menu_notification_text, menu_status_fingerprint, strip_dup_suffix,
+    };
 
     #[test]
     fn strip_dup_suffix_numeric_copy() {
@@ -2180,5 +2336,34 @@ mod tests {
     #[test]
     fn strip_dup_suffix_non_numeric_preserved() {
         assert_eq!(strip_dup_suffix("foo (bar)"), "foo (bar)");
+    }
+
+    #[test]
+    fn menu_status_fingerprint_uses_candidate_id() {
+        let status = serde_json::json!({
+            "should_notify": true,
+            "next_question": {
+                "kind": "graph_candidate",
+                "candidate_id": "gc-123",
+                "title": "Who is Alex?"
+            }
+        });
+        assert_eq!(
+            menu_status_fingerprint(&status).as_deref(),
+            Some("graph_candidate:gc-123")
+        );
+    }
+
+    #[test]
+    fn menu_notification_text_has_defaults_and_limits() {
+        let status = serde_json::json!({"next_question": {"title": "", "body": ""}});
+        let (title, body) = menu_notification_text(&status);
+        assert_eq!(title, "Minion has a question");
+        assert_eq!(body, "Open Minion to fill your graph.");
+    }
+
+    #[test]
+    fn applescript_string_escapes_quotes_and_backslashes() {
+        assert_eq!(applescript_string(r#"a "quote" \ path"#), r#"a \"quote\" \\ path"#);
     }
 }

@@ -24,6 +24,29 @@ def test_settings_legacy_analytics_opt_in_dropped(tmp_path):
     assert s.get("telemetry_opt_out") is False
 
 
+def test_settings_force_voice_off_unless_env_enabled(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from settings import load_settings
+
+    p = Path(tmp_path) / "settings.json"
+    p.write_text(
+        '{"full_listening_enabled": true, "ambient_collectors": {"listening": true, "full_listening": true}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MINION_ENABLE_VOICE", raising=False)
+    s = load_settings(tmp_path)
+    assert s["full_listening_enabled"] is False
+    assert s["ambient_collectors"]["listening"] is False
+    assert s["ambient_collectors"]["full_listening"] is False
+
+    monkeypatch.setenv("MINION_ENABLE_VOICE", "1")
+    s = load_settings(tmp_path)
+    assert s["full_listening_enabled"] is True
+    assert s["ambient_collectors"]["listening"] is True
+    assert s["ambient_collectors"]["full_listening"] is True
+
+
 def test_remote_disabled_when_opt_out(tmp_path, monkeypatch):
     monkeypatch.setenv("MINION_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MINION_ANALYTICS_URL", "https://example.invalid/collect")

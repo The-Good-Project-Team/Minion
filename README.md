@@ -24,6 +24,9 @@ Under the hood: one **`memory.db`** (plus vectors) in the vault; override the da
 |-----|----------|
 | [`docs/SECOND_BRAIN.md`](docs/SECOND_BRAIN.md) | Four-loop model, routes, Activity feed, MCP posture |
 | [`docs/LIFE_GRAPH.md`](docs/LIFE_GRAPH.md) | Graph scaffold, domains, retrieval order |
+| [`docs/SCREEN_MEMORY.md`](docs/SCREEN_MEMORY.md) | Screen-memory capture, fuse, retrieval, and guidance loop |
+| [`docs/SCREEN_ADAPTERS.md`](docs/SCREEN_ADAPTERS.md) | Playwright, Marlin, and OmniParser adapter command setup |
+| [`docs/SCREEN_MEMORY_AUDIT.md`](docs/SCREEN_MEMORY_AUDIT.md) | Requirement-to-evidence checklist for the screen-memory MVP |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Product direction and phased themes |
 | [`chatgpt_mcp_memory/README.md`](chatgpt_mcp_memory/README.md) | Tool tables, parsers, env flags, CLI |
 | [`desktop/README.md`](desktop/README.md) | Tauri architecture, `tauri dev` / release bundles |
@@ -37,6 +40,17 @@ Under the hood: one **`memory.db`** (plus vectors) in the vault; override the da
 | [`chatgpt_mcp_memory/`](chatgpt_mcp_memory/) | **Python** sidecar (FastAPI, ingest, SQLite, MCP). |
 
 On `tauri build`, `desktop/src-tauri/scripts/sync_sidecar.sh` copies `chatgpt_mcp_memory` into `desktop/src-tauri/resources/sidecar/` (gitignored; canonical source stays `chatgpt_mcp_memory/`).
+
+---
+
+## Context makes the difference
+
+When an AI has access to Minion's index, the output changes character entirely. Here Claude is asked to rewrite website copy *"in my voice — ask minion"*. It calls `ask_minion` across dozens of past conversations, reads the pattern ("short sentences, direct subject-verb, 'we' naturally, thinks out loud without hedging"), and rewrites the copy in that register — quoting actual lines back as evidence.
+
+Without Minion: generic, polished, forgettable.
+With Minion: the AI knows how you actually write and produces something that sounds like you wrote it yourself.
+
+![Claude rewriting copy in the user's voice after calling ask_minion across dozens of conversations](docs/readme/context-enhanced-voice.png)
 
 ---
 
@@ -106,6 +120,20 @@ The Rust shell prefers `../chatgpt_mcp_memory/.venv/bin/python`. Release builds 
 ## CLI (`minion` command)
 
 For a **terminal-first** setup (export path, `minion doctor`, `minion setup`, inbox CRUD without the GUI), use the launcher in **`bin/minion`** and [`chatgpt_mcp_memory/README.md`](chatgpt_mcp_memory/README.md). The desktop app and the CLI share the same store and MCP server code.
+
+Screen-memory MVP commands:
+
+```bash
+./bin/minion remember-screen
+./bin/minion search "where did I see the export button?"
+./bin/minion summarize-last 30m
+./bin/minion what-was-i-doing
+./bin/minion guidance
+./bin/minion screen-memory-status --probe
+./bin/minion verify-screen-memory
+```
+
+When run from this checkout, screen-memory commands use the repo-local `chatgpt_mcp_memory/.venv` automatically. Use `--workspace` only when you want to run against another installed workspace.
 
 ---
 

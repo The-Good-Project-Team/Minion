@@ -97,7 +97,8 @@ export type EventMsg =
   | { type: "source_updated"; result: Record<string, unknown>; counts: any; active?: Active }
   | { type: "source_removed"; key: string; counts: any }
   | { type: "tree_done"; root: string; added: number; skipped: number; counts: any }
-  | { type: "db_error"; message: string };
+  | { type: "db_error"; message: string }
+  | { type: "chat_updated"; thread_id?: string | null; open_count: number };
 
 /** Always ask the Rust shell — never cache. Stale `api_base` after a port
  * change or sidecar restart caused POST /nuke to hit the wrong listener (404). */
@@ -680,6 +681,11 @@ export type AmbientCollectorsSettings = {
   process_snapshot?: boolean;
   app_launched?: boolean;
   browser_visit?: boolean;
+  dom_snapshot?: boolean;
+  clipboard_event?: boolean;
+  mouse_event?: boolean;
+  keyboard_event?: boolean;
+  rolling_video_clip?: boolean;
   listening?: boolean;
   full_listening?: boolean;
   screenshot_fallback?: boolean;
@@ -980,6 +986,36 @@ export type GraphKindScaffold = {
   filled_count: number;
 };
 
+export type GraphMember = {
+  node_id: string;
+  node_kind: string;
+  title: string;
+  summary_snippet?: string;
+};
+
+export type GraphHighlight = {
+  node_id: string;
+  node_kind: string;
+  title: string;
+  bucket?: string;
+  summary_snippet?: string;
+};
+
+export type GraphCandidate = {
+  candidate_id: string;
+  candidate_type: string;
+  status: string;
+  title: string;
+  body_md: string;
+  payload: Record<string, unknown>;
+  evidence_refs: string[];
+  confidence: number;
+  source: string;
+  created_at: number;
+  updated_at: number;
+  resolved_at?: number | null;
+};
+
 export type GraphScaffoldNode = {
   node_id: string;
   node_kind: string;
@@ -988,6 +1024,7 @@ export type GraphScaffoldNode = {
   summary?: string;
   filled_count?: number;
   parent_node_id?: string | null;
+  members?: GraphMember[];
   children?: GraphScaffoldNode[];
   depth?: number;
 };
@@ -998,6 +1035,126 @@ export type GraphScaffoldResponse = {
   kinds: GraphKindScaffold[];
   node_types: string[];
   relation_types: string[];
+  totals?: Record<string, number>;
+  highlights?: GraphHighlight[];
+  user_node_count?: number;
+  has_fill_gap?: boolean;
+  forty_two?: {
+    active_thread_id?: string | null;
+    needs_question?: boolean;
+    question_preview?: string;
+    has_gap?: boolean;
+  } | null;
+};
+
+export type GraphContextResponse = {
+  graph: {
+    user_node_count: number;
+    totals: Record<string, number>;
+    highlights: GraphHighlight[];
+    has_fill_gap: boolean;
+    next_gap?: Record<string, unknown> | null;
+  };
+  open_candidates: GraphCandidate[];
+  focus?: Record<string, unknown> | null;
+  recent_ambient: Array<Record<string, unknown>>;
+  recent_ambient_hints?: Array<Record<string, unknown>>;
+  related_memory: Array<Record<string, unknown>>;
+  generated_at: number;
+};
+
+export type ScreenMemorySummary = {
+  minutes: number;
+  event_count: number;
+  top_apps: Array<{ app: string; events: number }>;
+  recent_windows: Array<Record<string, unknown>>;
+  semantic_events?: ScreenMemoryEvent[];
+  summary: string;
+};
+
+export type ScreenMemoryEvent = {
+  event_id: string;
+  occurred_at: number;
+  time?: string;
+  app: string;
+  window: string;
+  url?: string | null;
+  scene: string;
+  visible_elements: Array<Record<string, unknown>>;
+  events: Array<Record<string, unknown>>;
+  source_refs: string[];
+  confidence: number;
+  trust_tier: string;
+  time_range?: string;
+  clip_path?: string;
+  raw?: Record<string, unknown>;
+};
+
+export type ScreenMemorySearchHit = {
+  chunk_id: string;
+  score: number;
+  path: string;
+  kind: string;
+  text: string;
+  screen_event_id?: string | null;
+  app?: string | null;
+  window?: string | null;
+  trust_tier?: string | null;
+  time_range?: string | null;
+  clip_path?: string | null;
+};
+
+export type ScreenMemoryVideoRange = {
+  screen_event_id?: string | null;
+  score?: number | null;
+  path?: string | null;
+  kind?: string | null;
+  app?: string | null;
+  window?: string | null;
+  trust_tier?: string | null;
+  time_range?: string | null;
+  clip_path?: string | null;
+  text?: string;
+};
+
+export type ScreenMemorySearchResponse = {
+  query: string;
+  filters?: {
+    app?: string | null;
+    after?: number | null;
+    before?: number | null;
+    time_window?: string | null;
+  };
+  hits: ScreenMemorySearchHit[];
+  video_ranges: ScreenMemoryVideoRange[];
+};
+
+export type ScreenMemoryGuidance = {
+  mode: string;
+  do_this: string;
+  candidate?: GraphCandidate;
+  gap?: Record<string, unknown>;
+  recent?: ScreenMemorySummary;
+};
+
+export type MenuStatusResponse = {
+  pending_questions: number;
+  open_candidates: number;
+  next_question?: {
+    kind: string;
+    title: string;
+    body: string;
+    action: string;
+    candidate_id?: string;
+    candidate_type?: string;
+    gap?: Record<string, unknown>;
+  } | null;
+  should_notify?: boolean;
+  capture_health: string;
+  issues: SystemIssue[];
+  graph: GraphContextResponse["graph"];
+  focus?: Record<string, unknown> | null;
+  generated_at: number;
 };
 
 export type FeedParse = {
@@ -1049,10 +1206,15 @@ export type CouncilFeedItem = {
 
 export type FeedRow = FeedItem | CouncilFeedItem;
 
+export type FortyTwoSuggestion = { name: string; source?: string };
+
 export type FortyTwoStreamState = {
   active_thread_id: string | null;
   needs_question: boolean;
   open_count: number;
+  suggestions?: FortyTwoSuggestion[];
+  question_body_md?: string;
+  has_gap?: boolean;
 };
 
 export type ActivityFeedBundle = {
@@ -1115,6 +1277,87 @@ export async function fortyTwoReply(
     method: "POST",
     body: JSON.stringify({ message, thread_id: threadId ?? null, action: action ?? null }),
   });
+}
+
+/** Stream 42 reply over SSE (POST /chat/42/reply/stream). */
+export function openFortyTwoReplyStream(
+  message: string,
+  threadId?: string,
+  action?: string,
+  handlers: {
+    onUser?: (msg: { message_id: string; body_md: string }) => void;
+    onDelta?: (delta: string) => void;
+    onDone?: (thread: ChatThread | null) => void | Promise<void>;
+    onError?: (msg: string) => void;
+  } = {},
+): { cancel: () => void; finished: Promise<void> } {
+  let cancelled = false;
+  const finished = (async () => {
+    const cfg = await getConfig();
+    const res = await fetch(`${cfg.api_base}/chat/42/reply/stream`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(cfg.api_token ? { authorization: `Bearer ${cfg.api_token}` } : {}),
+      },
+      body: JSON.stringify({
+        message,
+        thread_id: threadId ?? null,
+        action: action ?? null,
+      }),
+    });
+    if (!res.ok || !res.body) {
+      handlers.onError?.(`${res.status} ${res.statusText}`);
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (!cancelled) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let ev = "";
+        let data = "";
+        for (const ln of block.split("\n")) {
+          if (ln.startsWith("event:")) ev = ln.slice(6).trim();
+          if (ln.startsWith("data:")) data = ln.slice(5).trim();
+        }
+        if (!ev || !data) continue;
+        try {
+          const payload = JSON.parse(data) as Record<string, unknown>;
+          if (ev === "message.user") {
+            handlers.onUser?.({
+              message_id: String(payload.message_id ?? ""),
+              body_md: String(payload.body_md ?? ""),
+            });
+          } else if (ev === "message.assistant.delta") {
+            handlers.onDelta?.(String(payload.delta ?? ""));
+          } else if (ev === "message.assistant.done") {
+            const t = payload.thread as ChatThread | undefined;
+            await handlers.onDone?.(t ?? null);
+          } else if (ev === "done") {
+            return;
+          } else if (ev === "error") {
+            handlers.onError?.(String(payload.message ?? payload.code ?? "stream error"));
+            return;
+          }
+        } catch {
+          /* ignore parse errors */
+        }
+      }
+    }
+  })();
+  return {
+    cancel: () => {
+      cancelled = true;
+    },
+    finished,
+  };
 }
 
 export async function fortyTwoDismiss(threadId: string): Promise<{ ok: boolean; thread_id: string }> {
@@ -1209,6 +1452,85 @@ export async function fetchFeed(params: { limit?: number; since_hours?: number }
 
 export async function fetchGraphScaffold(): Promise<GraphScaffoldResponse> {
   return apiFetch("/graph/scaffold");
+}
+
+export async function fetchGraphContext(subject = ""): Promise<GraphContextResponse> {
+  const qs = subject ? `?subject=${encodeURIComponent(subject)}` : "";
+  return apiFetch(`/graph/context${qs}`);
+}
+
+export async function fetchGraphCandidates(status = "open"): Promise<{ candidates: GraphCandidate[]; count: number }> {
+  return apiFetch(`/graph/candidates?status=${encodeURIComponent(status)}`);
+}
+
+export async function resolveGraphCandidate(
+  candidateId: string,
+  status: "approved" | "rejected" | "dismissed" | "merged",
+  payload?: Record<string, unknown>,
+): Promise<{ candidate: GraphCandidate; result?: Record<string, unknown> }> {
+  return apiFetch(`/graph/candidates/${encodeURIComponent(candidateId)}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ status, payload }),
+  });
+}
+
+export async function fetchMenuStatus(): Promise<MenuStatusResponse> {
+  return apiFetch("/menu/status");
+}
+
+export async function rememberScreen(params: {
+  max_lines?: number;
+  ingest_screenshots?: boolean;
+  run_adapters?: boolean;
+} = {}): Promise<Record<string, unknown>> {
+  return apiFetch("/screen-memory/remember", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+}
+
+export async function searchScreenMemory(
+  query: string,
+  topK = 8,
+  filters: { app?: string; after?: number; before?: number } = {},
+): Promise<ScreenMemorySearchResponse> {
+  const q = new URLSearchParams({ q: query, top_k: String(topK) });
+  if (filters.app) q.set("app", filters.app);
+  if (filters.after != null) q.set("after", String(filters.after));
+  if (filters.before != null) q.set("before", String(filters.before));
+  return apiFetch(`/screen-memory/search?${q.toString()}`);
+}
+
+export async function summarizeLastScreen(minutes = 30): Promise<ScreenMemorySummary> {
+  return apiFetch(`/screen-memory/summarize-last?minutes=${encodeURIComponent(String(minutes))}`);
+}
+
+export async function whatWasIDoing(minutes = 20): Promise<ScreenMemorySummary & { question: string }> {
+  return apiFetch(`/screen-memory/what-was-i-doing?minutes=${encodeURIComponent(String(minutes))}`);
+}
+
+export async function fetchScreenGuidance(minutes = 30): Promise<ScreenMemoryGuidance> {
+  return apiFetch(`/screen-memory/guidance?minutes=${encodeURIComponent(String(minutes))}`);
+}
+
+export async function fetchScreenMemoryStatus(minutes = 60, probe = false): Promise<Record<string, unknown>> {
+  const q = new URLSearchParams({ minutes: String(minutes), probe: String(probe) });
+  return apiFetch(`/screen-memory/status?${q.toString()}`);
+}
+
+export async function fetchScreenEvents(minutes = 30, limit = 80): Promise<{ events: ScreenMemoryEvent[]; count: number }> {
+  const q = new URLSearchParams({ minutes: String(minutes), limit: String(limit) });
+  return apiFetch(`/screen-memory/events?${q.toString()}`);
+}
+
+export async function createTaskFromScreen(params: {
+  minutes?: number;
+  title?: string;
+} = {}): Promise<{ created: boolean; task_id?: string; task?: WorkItem; reason?: string; summary?: ScreenMemorySummary }> {
+  return apiFetch("/screen-memory/create-task", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
 }
 
 export async function fetchHealth(): Promise<{ sync_sources: unknown[]; open_issues: SystemIssue[] }> {

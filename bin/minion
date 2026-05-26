@@ -248,6 +248,28 @@ def _which(name: str) -> Optional[str]:
 def _default_workspace_dir() -> Path:
     return Path.home() / "minion_private"
 
+
+def _repo_workspace_if_local() -> Optional[Path]:
+    """Use the checkout venv for repo-local development commands."""
+    root = _repo_root()
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError:
+        return None
+    if cwd != root and root not in cwd.parents:
+        return None
+    workspace = _chatgpt_mcp_dir()
+    if (workspace / "requirements.txt").exists():
+        return workspace
+    return None
+
+
+def _screen_memory_workspace(explicit: Optional[str]) -> Path:
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return _repo_workspace_if_local() or _default_workspace_dir()
+
+
 def _workspace_in_cwd() -> Path:
     """
     Default interactive workspace: ./minion_private, or ./minion_private_2, … if taken.
@@ -1082,6 +1104,92 @@ def cmd_add(args: argparse.Namespace) -> int:
     return _cli_add(derived, paths, force=args.force, workspace=Path(args.workspace) if args.workspace else None)
 
 
+def _screen_memory_cmd(args: argparse.Namespace, subcmd: str, extra: List[str]) -> int:
+    derived = Path(args.derived_dir or _derived_dir_default()).expanduser().resolve()
+    derived.mkdir(parents=True, exist_ok=True)
+    return _run_in_venv(
+        "screen_memory_cli.py",
+        ["--data-dir", str(derived), subcmd, *extra],
+        workspace=_screen_memory_workspace(args.workspace),
+    )
+
+
+def cmd_remember_screen(args: argparse.Namespace) -> int:
+    extra = ["--max-lines", str(args.max_lines)]
+    if args.no_screenshots:
+        extra.append("--no-screenshots")
+    if args.no_adapters:
+        extra.append("--no-adapters")
+    return _screen_memory_cmd(args, "remember", extra)
+
+
+def cmd_screen_search(args: argparse.Namespace) -> int:
+    extra = [args.query, "--top-k", str(args.top_k)]
+    if args.app:
+        extra.extend(["--app", args.app])
+    if args.after is not None:
+        extra.extend(["--after", str(args.after)])
+    if args.before is not None:
+        extra.extend(["--before", str(args.before)])
+    return _screen_memory_cmd(args, "search", extra)
+
+
+def _duration_arg(args: argparse.Namespace, default: int) -> str:
+    return str(args.duration or args.minutes or default)
+
+
+def cmd_summarize_last(args: argparse.Namespace) -> int:
+    return _screen_memory_cmd(args, "summarize-last", [_duration_arg(args, 30)])
+
+
+def cmd_what_was_i_doing(args: argparse.Namespace) -> int:
+    return _screen_memory_cmd(args, "what-was-i-doing", [_duration_arg(args, 20)])
+
+
+def cmd_guidance(args: argparse.Namespace) -> int:
+    return _screen_memory_cmd(args, "guidance", ["--minutes", str(args.minutes)])
+
+
+def cmd_screen_memory_status(args: argparse.Namespace) -> int:
+    extra = ["--minutes", str(args.minutes)]
+    if args.probe:
+        extra.append("--probe")
+    return _screen_memory_cmd(args, "status", extra)
+
+
+SCREEN_RECORDING_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+
+
+def cmd_screen_memory_permissions(args: argparse.Namespace) -> int:
+    print("Screen memory needs macOS Screen Recording permission for screenshots and rolling clips.")
+    print("Grant permission to Minion and to the terminal app running `minion`, then retry:")
+    print("  minion screen-memory-status --probe")
+    if sys.platform != "darwin":
+        print("Automatic settings opening is only available on macOS.")
+        return 0
+    if args.no_open:
+        print(f"Open manually: {SCREEN_RECORDING_SETTINGS_URL}")
+        return 0
+    try:
+        subprocess.run(["open", SCREEN_RECORDING_SETTINGS_URL], check=False)
+        print("Opened System Settings > Privacy & Security > Screen Recording.")
+    except OSError as exc:
+        print(f"Could not open System Settings: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_create_task_from_screen(args: argparse.Namespace) -> int:
+    extra = ["--minutes", str(args.minutes)]
+    if args.title:
+        extra.extend(["--title", args.title])
+    return _screen_memory_cmd(args, "create-task", extra)
+
+
+def cmd_verify_screen_memory(args: argparse.Namespace) -> int:
+    return _screen_memory_cmd(args, "verify", [])
+
+
 def cmd_rm(args: argparse.Namespace) -> int:
     derived = Path(args.derived_dir or _derived_dir_default()).expanduser().resolve()
     script = """
@@ -1423,6 +1531,85 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_add.add_argument("--workspace", default=None, help="Workspace whose .venv runs ingest")
     p_add.set_defaults(func=cmd_add)
 
+    p_remember = sub.add_parser(
+        "remember-screen",
+        help="Run one screen-memory pass: ambient stream, AX text, screenshot OCR fallback, graph queue.",
+    )
+    p_remember.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_remember.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
+    p_remember.add_argument("--max-lines", type=int, default=1200)
+    p_remember.add_argument("--no-screenshots", action="store_true", help="Skip screenshot OCR fallback ingest")
+    p_remember.add_argument("--no-adapters", action="store_true", help="Skip configured Marlin/OmniParser sidecar adapters")
+    p_remember.set_defaults(func=cmd_remember_screen)
+
+    p_search = sub.add_parser(
+        "search",
+        help="Search screen-derived memory, e.g. `minion search 'where did I see Export?'`.",
+    )
+    p_search.add_argument("query")
+    p_search.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_search.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
+    p_search.add_argument("--top-k", type=int, default=8)
+    p_search.add_argument("--app", default="", help="Filter screen-event hits by app name")
+    p_search.add_argument("--after", type=float, default=None, help="Only screen-event sources after this unix timestamp")
+    p_search.add_argument("--before", type=float, default=None, help="Only screen-event sources before this unix timestamp")
+    p_search.set_defaults(func=cmd_screen_search)
+
+    p_sum = sub.add_parser("summarize-last", help="Summarize recent screen memory.")
+    p_sum.add_argument("duration", nargs="?", help="Optional duration like 30m or 2h")
+    p_sum.add_argument("--minutes", type=int, default=30)
+    p_sum.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_sum.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
+    p_sum.set_defaults(func=cmd_summarize_last)
+
+    p_doing = sub.add_parser("what-was-i-doing", help="Show the recent screen-memory summary.")
+    p_doing.add_argument("duration", nargs="?", help="Optional duration like 20m or 1h")
+    p_doing.add_argument("--minutes", type=int, default=20)
+    p_doing.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_doing.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
+    p_doing.set_defaults(func=cmd_what_was_i_doing)
+
+    p_guidance = sub.add_parser("guidance", help="Graph-first Miyagi guidance: what to do next.")
+    p_guidance.add_argument("--minutes", type=int, default=30)
+    p_guidance.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_guidance.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
+    p_guidance.set_defaults(func=cmd_guidance)
+
+    p_screen_status = sub.add_parser(
+        "screen-memory-status",
+        help="Inspect screen-memory collector, adapter, fusion, and indexing health.",
+    )
+    p_screen_status.add_argument("--minutes", type=int, default=60)
+    p_screen_status.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_screen_status.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
+    p_screen_status.set_defaults(func=cmd_screen_memory_status)
+    p_screen_status.add_argument("--probe", action="store_true", help="Run lightweight local capture/clipboard/frontmost-app probes")
+
+    p_screen_perms = sub.add_parser(
+        "screen-memory-permissions",
+        help="Open macOS Screen Recording settings for screen-memory capture.",
+    )
+    p_screen_perms.add_argument("--no-open", action="store_true", help="Print instructions without opening System Settings")
+    p_screen_perms.set_defaults(func=cmd_screen_memory_permissions)
+
+    p_create_task = sub.add_parser(
+        "create-task-from-screen",
+        help="Create one inferred task from recent screen memory.",
+    )
+    p_create_task.add_argument("--minutes", type=int, default=20)
+    p_create_task.add_argument("--title", default="", help="Optional explicit task title")
+    p_create_task.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_create_task.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
+    p_create_task.set_defaults(func=cmd_create_task_from_screen)
+
+    p_verify_screen = sub.add_parser(
+        "verify-screen-memory",
+        help="Run a synthetic screen-memory acceptance check without live capture.",
+    )
+    p_verify_screen.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_verify_screen.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
+    p_verify_screen.set_defaults(func=cmd_verify_screen_memory)
+
     p_rm = sub.add_parser(
         "rm",
         help="Remove sources from memory.db by path or source_id.",
@@ -1449,4 +1636,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -360,13 +360,14 @@ mod imp {
 
                 let text_len = ax_text_sample.as_ref().map(|s| s.len()).unwrap_or(0);
                 let mut screenshot_rel: Option<String> = None;
-                if shot_enabled
-                    && capture_empty_ax
-                    && text_len < 80
-                {
+                if shot_enabled && capture_empty_ax && text_len < 80 {
                     let png_name = format!("wsnap_{ts:.0}_{}.png", win.window_id);
                     let png_path = inbox.join("screen-memory").join(&png_name);
-                    if crate::window_capture::try_capture_window_png(&win.window_id, &png_path) {
+                    if crate::window_capture::try_capture_window_png(
+                        data_dir,
+                        &win.window_id,
+                        &png_path,
+                    ) {
                         screenshot_rel = Some(format!("screen-memory/{png_name}"));
                     }
                 }

@@ -25,6 +25,7 @@ import os
 import shutil
 import sqlite3
 import time
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -213,6 +214,32 @@ def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ambient_events_captured ON ambient_events(captured_at DESC)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS screen_memory_events (
+            event_id TEXT PRIMARY KEY,
+            occurred_at REAL NOT NULL,
+            app TEXT NOT NULL DEFAULT '',
+            window TEXT NOT NULL DEFAULT '',
+            url TEXT,
+            scene TEXT NOT NULL DEFAULT '',
+            visible_elements_json TEXT NOT NULL DEFAULT '[]',
+            actions_json TEXT NOT NULL DEFAULT '[]',
+            source_refs_json TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0.0,
+            trust_tier TEXT NOT NULL DEFAULT 'unknown',
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screen_memory_events_time ON screen_memory_events(occurred_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screen_memory_events_app ON screen_memory_events(app, occurred_at DESC)"
+    )
 
     conn.execute(
         """
@@ -380,6 +407,27 @@ def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_graph_edges_from ON graph_edges(from_node_id)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            candidate_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            title TEXT NOT NULL DEFAULT '',
+            body_md TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0.0,
+            source TEXT NOT NULL DEFAULT 'graph',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            resolved_at REAL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_graph_candidates_status ON graph_candidates(status, updated_at DESC)"
     )
     _migrate_graph_schema(conn)
     _migrate_council_schema(conn)
@@ -1161,6 +1209,7 @@ def search(
     kind: Optional[str] = None,
     path_glob: Optional[str] = None,
     since: Optional[float] = None,
+    before: Optional[float] = None,
     role: Optional[str] = None,
 ) -> List[Hit]:
     """KNN search with optional source/role filters.
@@ -1207,6 +1256,9 @@ def search(
     if since is not None:
         sql.append("AND s.mtime >= ?")
         params.append(float(since))
+    if before is not None:
+        sql.append("AND s.mtime <= ?")
+        params.append(float(before))
 
     rows = conn.execute(" ".join(sql), params).fetchall()
     # Preserve vec-order, then cap.
@@ -1841,6 +1893,222 @@ def ambient_event_insert_ignore(
         ),
     )
     return cur.rowcount == 1
+
+
+def _row_screen_memory_event(r: sqlite3.Row) -> Dict[str, Any]:
+    occurred_at = float(r["occurred_at"])
+    events = json.loads(r["actions_json"] or "[]")
+    raw = json.loads(r["raw_json"] or "{}")
+    return {
+        "event_id": r["event_id"],
+        "occurred_at": occurred_at,
+        "time": datetime.fromtimestamp(occurred_at, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "app": r["app"],
+        "window": r["window"],
+        "url": r["url"],
+        "scene": r["scene"],
+        "visible_elements": json.loads(r["visible_elements_json"] or "[]"),
+        "events": events,
+        "source_refs": json.loads(r["source_refs_json"] or "[]"),
+        "confidence": float(r["confidence"] or 0.0),
+        "trust_tier": r["trust_tier"],
+        "time_range": _screen_event_time_range_from_row(events, raw),
+        "clip_path": _screen_event_clip_path_from_row(raw),
+        "raw": raw,
+        "created_at": float(r["created_at"]),
+        "updated_at": float(r["updated_at"]),
+    }
+
+
+def _screen_event_time_range_from_row(events: List[Dict[str, Any]], raw: Dict[str, Any]) -> str:
+    for action in events:
+        if isinstance(action, dict) and action.get("time_range"):
+            return str(action.get("time_range") or "").strip()
+    payload = raw.get("payload") if isinstance(raw, dict) else {}
+    if isinstance(payload, dict):
+        return str(payload.get("time_range") or "").strip()
+    return ""
+
+
+def _screen_event_clip_path_from_row(raw: Dict[str, Any]) -> str:
+    payload = raw.get("payload") if isinstance(raw, dict) else {}
+    if isinstance(payload, dict):
+        return str(payload.get("clip_path") or payload.get("source_path") or "").strip()
+    return ""
+
+
+def screen_memory_event_upsert(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    occurred_at: float,
+    app: str = "",
+    window: str = "",
+    url: Optional[str] = None,
+    scene: str = "",
+    visible_elements: Optional[List[Dict[str, Any]]] = None,
+    events: Optional[List[Dict[str, Any]]] = None,
+    source_refs: Optional[List[str]] = None,
+    confidence: float = 0.0,
+    trust_tier: str = "unknown",
+    raw: Optional[Dict[str, Any]] = None,
+) -> None:
+    now = time.time()
+    conn.execute(
+        "INSERT INTO screen_memory_events(event_id, occurred_at, app, window, url, scene, "
+        "visible_elements_json, actions_json, source_refs_json, confidence, trust_tier, "
+        "raw_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(event_id) DO UPDATE SET occurred_at=excluded.occurred_at, "
+        "app=excluded.app, window=excluded.window, url=excluded.url, scene=excluded.scene, "
+        "visible_elements_json=excluded.visible_elements_json, actions_json=excluded.actions_json, "
+        "source_refs_json=excluded.source_refs_json, confidence=excluded.confidence, "
+        "trust_tier=excluded.trust_tier, raw_json=excluded.raw_json, updated_at=excluded.updated_at",
+        (
+            event_id,
+            float(occurred_at),
+            app.strip()[:200],
+            window.strip()[:500],
+            url,
+            scene.strip()[:1000],
+            json.dumps(visible_elements or [], ensure_ascii=False),
+            json.dumps(events or [], ensure_ascii=False),
+            json.dumps(source_refs or [], ensure_ascii=False),
+            float(max(0.0, min(confidence, 1.0))),
+            trust_tier.strip()[:64],
+            json.dumps(raw or {}, ensure_ascii=False),
+            now,
+            now,
+        ),
+    )
+
+
+def screen_memory_events_since(
+    conn: sqlite3.Connection,
+    *,
+    since_ts: float = 0.0,
+    limit: int = 100,
+    app: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    lim = int(max(1, min(limit, 1000)))
+    sql = [
+        "SELECT event_id, occurred_at, app, window, url, scene, visible_elements_json, "
+        "actions_json, source_refs_json, confidence, trust_tier, raw_json, created_at, updated_at "
+        "FROM screen_memory_events WHERE occurred_at >= ?"
+    ]
+    params: List[Any] = [float(since_ts)]
+    if app:
+        sql.append("AND app = ?")
+        params.append(app)
+    sql.append("ORDER BY occurred_at DESC LIMIT ?")
+    params.append(lim)
+    rows = conn.execute(" ".join(sql), params).fetchall()
+    return [_row_screen_memory_event(r) for r in rows]
+
+
+def _row_graph_candidate(r: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "candidate_id": r["candidate_id"],
+        "candidate_type": r["candidate_type"],
+        "status": r["status"],
+        "title": r["title"],
+        "body_md": r["body_md"],
+        "payload": json.loads(r["payload_json"] or "{}"),
+        "evidence_refs": json.loads(r["evidence_refs_json"] or "[]"),
+        "confidence": float(r["confidence"] or 0),
+        "source": r["source"],
+        "created_at": float(r["created_at"]),
+        "updated_at": float(r["updated_at"]),
+        "resolved_at": float(r["resolved_at"]) if r["resolved_at"] is not None else None,
+    }
+
+
+def graph_candidate_create(
+    conn: sqlite3.Connection,
+    *,
+    candidate_type: str,
+    title: str,
+    body_md: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+    evidence_refs: Optional[List[str]] = None,
+    confidence: float = 0.0,
+    source: str = "graph",
+) -> str:
+    now = time.time()
+    cid = _new_id("gc")
+    conn.execute(
+        "INSERT INTO graph_candidates(candidate_id, candidate_type, status, title, body_md, "
+        "payload_json, evidence_refs_json, confidence, source, created_at, updated_at) "
+        "VALUES(?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            cid,
+            candidate_type.strip()[:64],
+            title.strip()[:300],
+            body_md,
+            json.dumps(payload or {}, ensure_ascii=False),
+            json.dumps(evidence_refs or [], ensure_ascii=False),
+            float(confidence),
+            source.strip()[:64],
+            now,
+            now,
+        ),
+    )
+    return cid
+
+
+def graph_candidate_list(
+    conn: sqlite3.Connection,
+    *,
+    status: str = "open",
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    lim = int(max(1, min(limit, 200)))
+    rows = conn.execute(
+        "SELECT candidate_id, candidate_type, status, title, body_md, payload_json, "
+        "evidence_refs_json, confidence, source, created_at, updated_at, resolved_at "
+        "FROM graph_candidates WHERE status=? ORDER BY updated_at DESC LIMIT ?",
+        (status.strip()[:32], lim),
+    ).fetchall()
+    return [_row_graph_candidate(r) for r in rows]
+
+
+def graph_candidate_get(
+    conn: sqlite3.Connection, candidate_id: str
+) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        "SELECT candidate_id, candidate_type, status, title, body_md, payload_json, "
+        "evidence_refs_json, confidence, source, created_at, updated_at, resolved_at "
+        "FROM graph_candidates WHERE candidate_id=?",
+        (candidate_id,),
+    ).fetchone()
+    return _row_graph_candidate(row) if row else None
+
+
+def graph_candidate_resolve(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    *,
+    status: str,
+    payload_merge: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    current = graph_candidate_get(conn, candidate_id)
+    if not current:
+        return None
+    payload = dict(current.get("payload") or {})
+    if payload_merge:
+        payload.update(payload_merge)
+    now = time.time()
+    conn.execute(
+        "UPDATE graph_candidates SET status=?, payload_json=?, updated_at=?, resolved_at=? "
+        "WHERE candidate_id=?",
+        (
+            status.strip()[:32],
+            json.dumps(payload, ensure_ascii=False),
+            now,
+            now,
+            candidate_id,
+        ),
+    )
+    return graph_candidate_get(conn, candidate_id)
 
 
 def chunk_storage_tier_counts(conn: sqlite3.Connection) -> Dict[str, int]:
@@ -2607,23 +2875,109 @@ def graph_filled_counts(conn: sqlite3.Connection) -> Dict[str, int]:
     return out
 
 
+def _graph_summary_snippet(summary: Any) -> str:
+    if not summary:
+        return ""
+    raw = str(summary).strip()
+    if raw.startswith("{"):
+        try:
+            meta = json.loads(raw)
+            note = str(meta.get("user_note") or meta.get("relation_note") or "").strip()
+            if note:
+                return note[:100]
+        except json.JSONDecodeError:
+            pass
+    return raw[:100]
+
+
+def graph_members_by_parent(conn: sqlite3.Connection) -> Dict[str, List[Dict[str, Any]]]:
+    """User-filled nodes keyed by scaffold parent_node_id."""
+    scaffold, wiki_map = _import_life_graph()
+    default_parent_by_kind = {
+        "person": "scaffold-people-unknown",
+        "family": "scaffold-people-family",
+        "place": "scaffold-places-frequent",
+        "group": "scaffold-groups-teams",
+        "organization": "scaffold-groups-companies",
+        "project": "scaffold-projects-active",
+        "role": "scaffold-work-roles",
+        "job": "scaffold-work-roles",
+        "hobby": "scaffold-hobbies",
+        "asset": "scaffold-assets",
+        "task": "scaffold-tasks",
+        "decision": "scaffold-decisions",
+        "preference": "scaffold-preferences",
+        "obligation": "scaffold-work-obligations",
+    }
+    scaffold_ids = {spec[0] for spec in scaffold}
+    rows = conn.execute(
+        "SELECT node_id, node_kind, title, status, parent_node_id, summary, updated_at "
+        "FROM graph_nodes WHERE status NOT IN ('scaffold', 'stub') "
+        "ORDER BY updated_at DESC"
+    ).fetchall()
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        pid = str(r["parent_node_id"] or "")
+        out.setdefault(pid, []).append(
+            {
+                "node_id": str(r["node_id"]),
+                "node_kind": str(r["node_kind"]),
+                "title": str(r["title"] or ""),
+                "summary_snippet": _graph_summary_snippet(r["summary"]),
+            }
+        )
+    wiki_rows = conn.execute(
+        "SELECT page_id, page_type, title, body_md, last_updated FROM wiki_pages w "
+        "WHERE status='active' AND NOT EXISTS("
+        "SELECT 1 FROM graph_nodes n WHERE n.wiki_page_id=w.page_id)"
+        "ORDER BY last_updated DESC"
+    ).fetchall()
+    for r in wiki_rows:
+        kind = wiki_map.get(str(r["page_type"] or ""))
+        parent = default_parent_by_kind.get(str(kind or ""))
+        if not parent or parent not in scaffold_ids:
+            continue
+        out.setdefault(parent, []).append(
+            {
+                "node_id": f"wiki:{r['page_id']}",
+                "node_kind": str(kind),
+                "title": str(r["title"] or ""),
+                "summary_snippet": _graph_summary_snippet(r["body_md"]),
+            }
+        )
+    return out
+
+
 def graph_scaffold_list(conn: sqlite3.Connection) -> Dict[str, Any]:
     from life_graph import NODE_TYPES, RELATION_TYPES, scaffold_as_tree
 
     nodes = graph_scaffold_nodes(conn)
-    counts = graph_filled_counts(conn)
+    members_by_parent = graph_members_by_parent(conn)
+
+    def _bucket_ids(node_id: str) -> List[str]:
+        ids = [node_id]
+        for n in nodes:
+            if n.get("parent_node_id") == node_id:
+                ids.extend(_bucket_ids(n["node_id"]))
+        return ids
+
+    def _count_under(node_id: str) -> int:
+        total = 0
+        for bid in _bucket_ids(node_id):
+            total += len(members_by_parent.get(bid, []))
+        return total
 
     def _attach_counts(node: Dict[str, Any]) -> Dict[str, Any]:
-        kind = str(node.get("node_kind") or "")
-        filled = counts.get(kind, 0) if kind != "scaffold" else 0
-        child_filled = 0
+        direct = members_by_parent.get(node["node_id"], [])
         children = [_attach_counts(c) for c in node.get("children") or []]
-        for c in children:
-            child_filled += int(c.get("filled_count") or 0)
-        total = filled + child_filled if kind == "scaffold" else filled
+        if str(node.get("node_kind")) == "scaffold":
+            filled = _count_under(node["node_id"])
+        else:
+            filled = len(direct)
         return {
             **node,
-            "filled_count": total,
+            "filled_count": filled,
+            "members": direct[:12],
             "children": children,
         }
 
@@ -2631,14 +2985,34 @@ def graph_scaffold_list(conn: sqlite3.Connection) -> Dict[str, Any]:
     tree = scaffold_as_tree(flat)
     tree = [_attach_counts(n) for n in tree]
 
-    # Legacy flat kinds for callers that expect a list
+    totals = graph_filled_counts(conn)
+    highlights: List[Dict[str, Any]] = []
+    title_by_id = {n["node_id"]: n["title"] for n in nodes}
+    for r in conn.execute(
+        "SELECT node_id, node_kind, title, parent_node_id, summary "
+        "FROM graph_nodes WHERE status NOT IN ('scaffold', 'stub') "
+        "ORDER BY updated_at DESC LIMIT 24"
+    ).fetchall():
+        pid = str(r["parent_node_id"] or "")
+        highlights.append(
+            {
+                "node_id": str(r["node_id"]),
+                "node_kind": str(r["node_kind"]),
+                "title": str(r["title"] or ""),
+                "bucket": title_by_id.get(pid, ""),
+                "summary_snippet": _graph_summary_snippet(r["summary"]),
+            }
+        )
+
     kinds = [
         {
             "kind": n["node_kind"],
             "label": n["title"],
             "hint": n.get("summary") or n.get("body_md") or "",
             "stub_node_id": n["node_id"],
-            "filled_count": int(n.get("filled_count") or 0),
+            "filled_count": _count_under(n["node_id"])
+            if n["node_kind"] == "scaffold"
+            else len(members_by_parent.get(n["node_id"], [])),
         }
         for n in flat
         if n["node_id"] != "scaffold-me"
@@ -2650,6 +3024,9 @@ def graph_scaffold_list(conn: sqlite3.Connection) -> Dict[str, Any]:
         "kinds": kinds,
         "node_types": list(NODE_TYPES),
         "relation_types": list(RELATION_TYPES),
+        "totals": totals,
+        "highlights": highlights,
+        "user_node_count": sum(totals.values()),
     }
 
 

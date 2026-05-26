@@ -3,39 +3,39 @@ import { API_BASE, seedButlerFixtures, waitForSidecar } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
-test.describe("Activity river UI", () => {
+test.describe("Minion stream UI", () => {
   test.beforeAll(async ({ request }) => {
     await waitForSidecar(request);
     await seedButlerFixtures(request);
   });
 
-  test("Activity feed loads with river heading", async ({ page }) => {
-    await page.goto("/activity");
-    await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
-    await expect(page.getByText("A river of context")).toBeVisible();
+  test("stream loads with Minion heading", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Minion" })).toBeVisible();
+    await expect(page.getByText("One stream")).toBeVisible();
   });
 
   test("Graph scaffold shows Me tree in sidebar", async ({ page }) => {
-    await page.goto("/activity");
-    await expect(page.getByText("Your graph")).toBeVisible();
+    await page.goto("/");
+    await expect(page.getByText("Life graph")).toBeVisible();
     await expect(page.getByText("Me", { exact: true })).toBeVisible();
     await expect(page.getByText("People", { exact: true })).toBeVisible();
     await expect(page.getByText("Projects", { exact: true })).toBeVisible();
   });
 
   test("Seeded wiki person fills graph count", async ({ page }) => {
-    await page.goto("/activity");
+    await page.goto("/");
     await expect(page.getByText("E2E Test Person")).toBeVisible({ timeout: 15_000 });
   });
 
   test("Inferred task appears as suggestion", async ({ page }) => {
-    await page.goto("/activity");
+    await page.goto("/");
     await expect(page.getByText("Review E2E fixture task")).toBeVisible({ timeout: 15_000 });
     await expect(page.getByText("Suggestion").first()).toBeVisible();
   });
 
   test("Dismiss suggestion removes inferred task from feed", async ({ page }) => {
-    await page.goto("/activity");
+    await page.goto("/");
     const card = page.getByText("Review E2E fixture task");
     await expect(card).toBeVisible();
     await page.getByRole("button", { name: "Dismiss" }).first().click();
@@ -60,13 +60,13 @@ test.describe("Activity river UI", () => {
     await expect(page.getByRole("button", { name: "Add to Claude" })).toBeVisible();
   });
 
-  test("Root redirects to Activity", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible({ timeout: 15_000 });
+  test("legacy /activity redirects home", async ({ page }) => {
+    await page.goto("/activity");
+    await expect(page.getByRole("heading", { name: "Minion" })).toBeVisible({ timeout: 15_000 });
   });
 
   test("Sidebar navigation covers routes", async ({ page }) => {
-    await page.goto("/activity");
+    await page.goto("/");
     for (const label of ["Sources", "Settings"]) {
       await page.getByRole("link", { name: label, exact: true }).click();
       await expect(page.getByRole("link", { name: label, exact: true })).toHaveClass(/active/);

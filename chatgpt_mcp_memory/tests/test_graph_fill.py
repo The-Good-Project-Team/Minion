@@ -99,5 +99,26 @@ def test_next_question_uses_graph_gap(conn) -> None:
     out = next_question(conn, None)
     assert out["created"] is True
     body = out["thread"]["messages"][0]["body_md"]
-    assert "42" in body
     assert "Casey" in body
+    # Template openings use "**42:**"; Gemini openings omit that prefix by design.
+    assert "42" in body.lower() or "casey" in body.lower()
+
+
+def test_bucket_rejects_greeting_as_name(conn) -> None:
+    conn.execute(
+        "DELETE FROM graph_nodes WHERE node_kind='person' AND status NOT IN ('scaffold', 'stub')"
+    )
+    conn.commit()
+    gap = pick_next_gap(conn, None)
+    assert gap is not None
+    assert gap["gap_type"] == "bucket"
+    out = open_thread_for_gap(conn, gap)
+    result = apply_answer(conn, out["thread"], body="hi there")
+    assert result["ok"] is True
+    assert result.get("resolved") is False
+    assert "doesn't look like a name" in " ".join(result.get("deltas") or [])
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM graph_nodes WHERE parent_node_id='scaffold-people-friends' "
+        "AND status NOT IN ('scaffold', 'stub')"
+    ).fetchone()
+    assert int(row["c"]) == 0

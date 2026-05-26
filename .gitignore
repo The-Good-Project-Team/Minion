@@ -24,6 +24,8 @@ agent/identity_profile.md
 
 # Secrets
 ssh/
+.secrets/
+**/.secrets/
 
 # Packaging build outputs
 chatgpt_mcp_memory/build/

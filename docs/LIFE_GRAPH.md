@@ -148,6 +148,8 @@ For every source item:
 6. Create tasks only when there is an actual action.
 7. Never overwrite durable memory without source evidence.
 
+Hard identifiers merge first: email, phone, handle, and iMessage identifiers are normalized before creating people. If the label matches but identifiers conflict, Minion creates a `person_merge` candidate with explicit reasoning instead of silently merging. Approval writes the incoming identifiers, source refs, aliases, and reasoning onto the existing person node; rejection leaves the graph unchanged.
+
 Markdown files remain the **canonical readable layer**. SQLite graph index supports traversal and retrieval.
 
 ## Retrieval rule
@@ -171,9 +173,17 @@ Canonical append-only stream: `<data_dir>/ambient/stream.jsonl` (legacy read fal
 | `process_snapshot` | ~60s `ps` sample (opt-in) | Foreground + top CPU apps |
 | `app_launched` | Focus change to new app | |
 | `browser_visit` | Browser app + page text | Host + URL when Automation allows |
-| `listening_*` | Mic / full listening | WAV → whisper → `ambient-audio` chunks |
+| `dom_snapshot` | Browser Automation + Playwright adapter | URL, page text sample, visible controls; highest trust tier for web UI |
+| `clipboard_event` | macOS clipboard watcher | Hash, capped excerpt, detected emails, foreground app/window; deny-list aware |
+| `mouse_event` / `keyboard_event` | macOS event tap | Aggregate-only click/key counts and last click point; no keystroke content |
+| `rolling_video_clip` | macOS `screencapture -v` | Bounded 10-30s clips under `<data_dir>/ambient/video` for temporal memory |
+| `marlin_event` | External Marlin adapter | Timestamped video scene/events; normalized into `time_range` |
+| `omniparser_parse` | External OmniParser adapter | Screenshot UI element detections when DOM/AX are weak |
+| `listening_*` | Mic / full listening | Opt-in only; WAV → whisper → `ambient-audio` chunks |
 
-Ingest: `ambient_pipeline.py` → `ambient_events`. Rollup: `GET /attention/summary`. Per-collector toggles: `settings.json` → `ambient_collectors`.
+Ingest: `ambient_pipeline.py` → `ambient_events`; `screen_memory.py` fuses screen rows into `screen_memory_events`, indexes `screen-event` chunks, extracts high-confidence graph candidates, and queues 42 graph inference. Rollup: `GET /attention/summary`. Per-collector toggles: `settings.json` → `ambient_collectors`.
+
+Voice/listening is **not** part of the default graph-fill loop. The default capture path is screen/DOM/Accessibility/OCR/clipboard/input/video, with voice re-enabled only by explicit opt-in (`MINION_ENABLE_VOICE` for backend ingest and settings for full listening).
 
 **Corpus-first counsel:** `corpus_context.prefetch_for_subject` runs before council proposals; ambient is routing/evidence only.
 
@@ -185,7 +195,8 @@ Ingest: `ambient_pipeline.py` → `ambient_events`. Rollup: `GET /attention/summ
 
 - Schema + seed: `chatgpt_mcp_memory/src/store.py`, `life_graph.py`
 - Activity river: `activity_feed.py`, `GET /feed`
-- Ambient: `ambient_pipeline.py`, `attention_rollup.py`, `listening_ingest.py`; desktop `ambient_collectors.rs`, `screen_reader.rs`, `listening_session.rs`
+- Ambient/screen memory: `ambient_pipeline.py`, `screen_memory.py`, `screen_adapters.py`, `attention_rollup.py`; desktop `ambient_collectors.rs`, `screen_reader.rs`, `screen_context.rs`
+- Optional listening: `listening_ingest.py`; desktop `listening_session.rs`
 
 ### Screen reader (all visible windows)
 

@@ -126,6 +126,7 @@ mod imp {
         let mut last_fp: Option<String> = None;
         let mut last_app: Option<String> = None;
         let mut last_ax_hash: Option<String> = None;
+        let mut last_dom_hash: Option<String> = None;
         let mut tick: u64 = 0;
 
         loop {
@@ -189,7 +190,7 @@ mod imp {
                 None
             };
 
-            let ax_text_sample = merge_visible_text(ax_only, browser_page_text);
+            let ax_text_sample = merge_visible_text(ax_only, browser_page_text.clone());
             let axh = ax_hash(&ax_text_sample);
             let ax_changed = last_ax_hash.as_ref() != Some(&axh)
                 && ax_text_sample.as_ref().map(|s| s.len()).unwrap_or(0) >= 40;
@@ -219,7 +220,7 @@ mod imp {
             {
                 let png_name = format!("{ts}_{window_id}.png");
                 let png_path = inbox.join("screen-memory").join(&png_name);
-                if crate::window_capture::try_capture_window_png(&window_id, &png_path) {
+                if crate::window_capture::try_capture_window_png(&data_dir, &window_id, &png_path) {
                     screenshot_rel = Some(format!("screen-memory/{png_name}"));
                 }
             }
@@ -276,6 +277,30 @@ mod imp {
                 }
             }
 
+            if is_browser
+                && !browser_page_text.trim().is_empty()
+                && crate::ambient_stream::collector_enabled(&data_dir, "dom_snapshot")
+            {
+                let dom_hash = ax_hash(&Some(browser_page_text.clone()));
+                let dom_changed = last_dom_hash.as_ref() != Some(&dom_hash);
+                if dom_changed || focus_changed {
+                    last_dom_hash = Some(dom_hash.clone());
+                    let dom = json!({
+                        "ts": ts,
+                        "kind": "dom_snapshot",
+                        "app_name": app_name,
+                        "window_title": title,
+                        "url": tab_url,
+                        "url_or_host": tab_host,
+                        "dom_text_sample": browser_page_text.chars().take(24_000).collect::<String>(),
+                        "dom_hash": dom_hash,
+                        "visible_elements": visible_elements_from_dom_text(&browser_page_text),
+                        "dedupe_key": format!("dom:{window_id}:{dom_hash}"),
+                    });
+                    crate::ambient_stream::append_ambient_record(&data_dir, &dom);
+                }
+            }
+
             if screenshot_rel.is_some()
                 && crate::ambient_stream::collector_enabled(&data_dir, "screenshot_fallback")
             {
@@ -298,6 +323,36 @@ mod imp {
                 }),
             );
         }
+    }
+
+    fn visible_elements_from_dom_text(text: &str) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for line in text.lines().take(200) {
+            let label = line.trim();
+            if label.len() < 2 || label.len() > 120 {
+                continue;
+            }
+            let lower = label.to_ascii_lowercase();
+            let role = if lower.contains("button")
+                || matches!(lower.as_str(), "export" | "save" | "submit" | "continue" | "cancel" | "copy")
+            {
+                "button"
+            } else if lower.contains('@') {
+                "text"
+            } else {
+                continue;
+            };
+            out.push(json!({
+                "role": role,
+                "label": label,
+                "source": "DOM",
+                "confidence": 0.78,
+            }));
+            if out.len() >= 40 {
+                break;
+            }
+        }
+        out
     }
 }
 

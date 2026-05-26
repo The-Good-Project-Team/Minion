@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { open as openDialog } from "@tauri-apps/plugin-dialog";
+  import { isWithoutTauri } from "$lib/tauri-bridge";
   import {
     copyIntoInbox,
     fetchSources,
@@ -29,6 +29,11 @@
   }
 
   async function browse() {
+    if (isWithoutTauri()) {
+      pushLog("File picker needs the desktop app — use ingest API or drop into inbox folder.");
+      return;
+    }
+    const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
     const picked = await openDialog({ multiple: true });
     if (!picked) return;
     const paths = Array.isArray(picked) ? picked : [picked];

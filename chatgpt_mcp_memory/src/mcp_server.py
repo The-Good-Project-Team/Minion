@@ -53,6 +53,15 @@ from second_brain import build_working_context
 from version import __version__
 from retrieval_bias import apply_identity_rerank, rrf_fuse
 import screen_context_store
+from screen_memory import (
+    create_task_from_recent_screen,
+    miyagi_guidance,
+    remember_screen,
+    screen_search,
+    screen_memory_status,
+    summarize_last,
+    what_was_i_doing,
+)
 from build_voice import (
     AUTO_DRAFT_SENTINEL,
     USER_EDITS_SENTINEL,
@@ -963,12 +972,115 @@ def _tool_search_screen_memory(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "error": "screen context MCP tools disabled in consent_policy.json",
         }
     query = str(arguments.get("query") or "").strip()
-    lim = int(arguments.get("limit") or 30)
-    lim = max(1, min(lim, 200))
+    lim = int(arguments.get("top_k") or arguments.get("limit") or 8)
+    lim = max(1, min(lim, 20))
     if not query:
         return {"status": "error", "error": "query is required"}
-    hits = screen_context_store.search_substring(_data_dir(), query, limit=lim)
-    return {"status": "ok", "matches": hits, "count": len(hits), "query": query}
+    out = screen_search(
+        _get_conn(),
+        query,
+        top_k=lim,
+        app=str(arguments.get("app") or ""),
+        after=arguments.get("after"),
+        before=arguments.get("before"),
+    )
+    out["status"] = "ok"
+    out["count"] = len(out.get("hits") or [])
+    return out
+
+
+def _tool_remember_screen(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    if not _screen_context_tools_allowed():
+        return {
+            "status": "error",
+            "error": "screen context MCP tools disabled in consent_policy.json",
+        }
+    out = remember_screen(
+        _get_conn(),
+        _data_dir(),
+        max_lines=int(arguments.get("max_lines") or 1200),
+        ingest_screenshots=bool(arguments.get("ingest_screenshots", True)),
+        run_adapters=bool(arguments.get("run_adapters", True)),
+    )
+    _get_conn().commit()
+    out["status"] = "ok"
+    return out
+
+
+def _minutes_arg(arguments: Dict[str, Any], default: int) -> int:
+    raw = arguments.get("duration") or arguments.get("minutes") or default
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s.endswith("m"):
+            return max(1, int(float(s[:-1])))
+        if s.endswith("h"):
+            return max(1, int(float(s[:-1]) * 60))
+    return max(1, int(raw))
+
+
+def _tool_summarize_last_screen(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    if not _screen_context_tools_allowed():
+        return {
+            "status": "error",
+            "error": "screen context MCP tools disabled in consent_policy.json",
+        }
+    out = summarize_last(_get_conn(), minutes=_minutes_arg(arguments, 30))
+    out["status"] = "ok"
+    return out
+
+
+def _tool_what_was_i_doing(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    if not _screen_context_tools_allowed():
+        return {
+            "status": "error",
+            "error": "screen context MCP tools disabled in consent_policy.json",
+        }
+    out = what_was_i_doing(_get_conn(), minutes=_minutes_arg(arguments, 20))
+    out["status"] = "ok"
+    return out
+
+
+def _tool_screen_guidance(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    if not _screen_context_tools_allowed():
+        return {
+            "status": "error",
+            "error": "screen context MCP tools disabled in consent_policy.json",
+        }
+    out = miyagi_guidance(_get_conn(), _data_dir(), minutes=_minutes_arg(arguments, 30))
+    out["status"] = "ok"
+    return out
+
+
+def _tool_screen_memory_status(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    if not _screen_context_tools_allowed():
+        return {
+            "status": "error",
+            "error": "screen context MCP tools disabled in consent_policy.json",
+        }
+    out = screen_memory_status(
+        _get_conn(),
+        _data_dir(),
+        minutes=_minutes_arg(arguments, 60),
+        run_probe=bool(arguments.get("probe", False)),
+    )
+    out["status"] = "ok"
+    return out
+
+
+def _tool_create_task_from_screen(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    if not _screen_context_tools_allowed():
+        return {
+            "status": "error",
+            "error": "screen context MCP tools disabled in consent_policy.json",
+        }
+    out = create_task_from_recent_screen(
+        _get_conn(),
+        minutes=_minutes_arg(arguments, 20),
+        title=str(arguments.get("title") or ""),
+    )
+    _get_conn().commit()
+    out["status"] = "ok"
+    return out
 
 
 def _tool_summarize_recent_activity(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -1336,18 +1448,118 @@ TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "search_screen_memory",
-        "title": "Search recent window-focus timeline",
+        "title": "Search semantic screen memory",
         "description": (
-            "Substring search over recent screen-context events (app/title/path and `ax_text_sample`). "
-            "Does not run semantic search; pair with `ask_minion` for OCR'd screen content."
+            "Semantic search over Minion's screen-derived memory: fused DOM/AX/clipboard/"
+            "mouse/keyboard/OCR/OmniParser/Marlin event chunks. Use for questions like "
+            "'where did I see the export button?', 'where did I copy that investor email?', "
+            "or 'what button did I click after opening the Sheet?'."
         ),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
             "required": ["query"],
             "properties": {
-                "query": {"type": "string", "description": "Case-insensitive substring."},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 30},
+                "query": {"type": "string", "description": "Natural-language screen-memory query."},
+                "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+                "app": {"type": "string", "description": "Optional app-name filter, e.g. Chrome or Slack."},
+                "after": {"type": ["number", "null"], "description": "Optional unix timestamp lower bound."},
+                "before": {"type": ["number", "null"], "description": "Optional unix timestamp upper bound."},
+            },
+        },
+    },
+    {
+        "name": "remember_screen",
+        "title": "Ingest and fuse current screen memory",
+        "description": (
+            "Run one screen-memory pass: ingest ambient stream rows, index Accessibility "
+            "text, OCR screenshot fallbacks, run configured Marlin/OmniParser adapters, "
+            "fuse semantic screen events, index searchable screen-event chunks, and queue graph fill."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "max_lines": {"type": "integer", "minimum": 1, "maximum": 50000, "default": 1200},
+                "ingest_screenshots": {"type": "boolean", "default": True},
+                "run_adapters": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    {
+        "name": "summarize_last_screen",
+        "title": "Summarize recent screen memory",
+        "description": "Summarize the last N minutes of fused screen-memory events without an LLM call.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "minutes": {"type": "integer", "minimum": 1, "maximum": 1440, "default": 30},
+                "duration": {"type": "string", "description": "Optional duration like '30m' or '2h'."},
+            },
+        },
+    },
+    {
+        "name": "what_was_i_doing",
+        "title": "Answer what the user was just doing",
+        "description": "Return a compact recent screen-memory summary shaped for 'what was I doing?'.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "minutes": {"type": "integer", "minimum": 1, "maximum": 1440, "default": 20},
+                "duration": {"type": "string", "description": "Optional duration like '20m' or '1h'."},
+            },
+        },
+    },
+    {
+        "name": "screen_guidance",
+        "title": "Graph-first Miyagi guidance from screen memory",
+        "description": (
+            "Return the next 'do this' suggestion: resolve graph candidates first, "
+            "then fill graph gaps, then convert recent screen activity into a task or update."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "minutes": {"type": "integer", "minimum": 1, "maximum": 1440, "default": 30},
+                "duration": {"type": "string", "description": "Optional duration like '30m' or '2h'."},
+            },
+        },
+    },
+    {
+        "name": "screen_memory_status",
+        "title": "Inspect screen-memory setup and recent evidence",
+        "description": (
+            "Return collector settings, adapter configuration, recent raw/fused events, "
+            "clip/screenshot presence, indexed screen-event count, and readiness warnings."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "minutes": {"type": "integer", "minimum": 1, "maximum": 1440, "default": 60},
+                "duration": {"type": "string", "description": "Optional duration like '60m' or '2h'."},
+                "probe": {"type": "boolean", "default": False, "description": "Run lightweight local capture/clipboard/frontmost-app probes."},
+            },
+        },
+    },
+    {
+        "name": "create_task_from_screen",
+        "title": "Create a task from recent screen memory",
+        "description": (
+            "Create one inferred work item from recent fused screen-memory events, preserving "
+            "refs back to the screen evidence."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "minutes": {"type": "integer", "minimum": 1, "maximum": 1440, "default": 20},
+                "duration": {"type": "string", "description": "Optional duration like '20m' or '1h'."},
+                "title": {"type": "string", "description": "Optional explicit task title."},
             },
         },
     },
@@ -1744,7 +1956,7 @@ def _handle_initialize(req: Dict[str, Any]) -> Dict[str, Any]:
         "When the Minion desktop app runs on macOS it logs focused-window metadata to "
         "`<MINION_DATA_DIR>/ambient/stream.jsonl` and indexes Accessibility text into memory.\n\n"
         "- **`what_am_i_working_on`** — latest app/window title (+ optional AX text).\n"
-        "- **`search_screen_memory`** — substring search over recent events.\n"
+        "- **`search_screen_memory`** — semantic search over screen events; supports app/time filters.\n"
         "- **`summarize_recent_activity`** — compact heuristic digest.\n"
         "`ask_minion` complements live context; it does not replace it.\n"
     )
@@ -1796,6 +2008,12 @@ _DISPATCH = {
     "get_identity_summary": _tool_get_identity_summary,
     "what_am_i_working_on": _tool_what_am_i_working_on,
     "search_screen_memory": _tool_search_screen_memory,
+    "remember_screen": _tool_remember_screen,
+    "summarize_last_screen": _tool_summarize_last_screen,
+    "what_was_i_doing": _tool_what_was_i_doing,
+    "screen_guidance": _tool_screen_guidance,
+    "screen_memory_status": _tool_screen_memory_status,
+    "create_task_from_screen": _tool_create_task_from_screen,
     "summarize_recent_activity": _tool_summarize_recent_activity,
     "get_working_context": _tool_get_working_context,
     "list_wiki_pages": _tool_list_wiki_pages,

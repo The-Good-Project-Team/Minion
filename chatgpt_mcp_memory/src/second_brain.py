@@ -24,6 +24,14 @@ from store import (
     task_list,
 )
 
+_DEADLINE_RE = re.compile(
+    r"\b("
+    r"due|deadline|tomorrow|tonight|today|morning|review call|ship|urgent|"
+    r"may\s+\d{1,2}|monday|tuesday|wednesday|thursday|friday"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _tokens_from_text(text: str) -> List[str]:
     words = re.findall(r"[a-z0-9]{3,}", (text or "").lower())
@@ -71,6 +79,140 @@ def _prefetch_memory_hits(
             }
         )
     return out
+
+
+def _clip(text: Any, limit: int = 220) -> str:
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    return s[:limit]
+
+
+def _task_priority_score(task: Dict[str, Any], now_ts: float) -> float:
+    score = 0.2
+    pri = str(task.get("priority") or "").lower()
+    if pri in ("urgent", "high"):
+        score += 0.4
+    elif pri in ("medium", "normal"):
+        score += 0.2
+    due = task.get("due_at")
+    if due is not None:
+        hours = (float(due) - now_ts) / 3600.0
+        if hours <= 0:
+            score += 0.45
+        elif hours <= 24:
+            score += 0.4
+        elif hours <= 72:
+            score += 0.25
+    if task.get("status") == "review":
+        score += 0.15
+    return min(score, 0.95)
+
+
+def _recent_deadline_signals(
+    ambient: List[Dict[str, Any]],
+    *,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    seen: set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for e in ambient:
+        payload = e.get("payload") or {}
+        title = _clip(payload.get("window_title"), 120)
+        text = _clip(payload.get("ax_text_sample"), 320)
+        haystack = " ".join([title, text])
+        if not haystack or not _DEADLINE_RE.search(haystack):
+            continue
+        key = re.sub(r"\W+", " ", haystack).casefold()[:180]
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "ts": e.get("captured_at"),
+                "app_name": payload.get("app_name"),
+                "window_title": title,
+                "snippet": text or title,
+                "event_id": e.get("event_id"),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def build_next_steps(
+    conn,
+    data_dir: Path,
+    *,
+    now_ts: Optional[float] = None,
+    limit: int = 5,
+) -> Dict[str, Any]:
+    """Rank near-term work from local screen context, tasks, and system health."""
+    _ = data_dir
+    now = float(now_ts or time.time())
+    since_36h = now - 36 * 3600.0
+    try:
+        ambient = ambient_events_since(conn, since_ts=since_36h, limit=500)
+    except Exception:
+        ambient = []
+
+    items: List[Dict[str, Any]] = []
+    for issue in system_issues_open(conn, limit=3):
+        items.append(
+            {
+                "kind": "system_issue",
+                "title": _clip(issue.get("body_md"), 140) or issue.get("issue_id"),
+                "why": f"{issue.get('severity', 'issue')} from {issue.get('source_key') or 'system'}",
+                "confidence": 0.9 if issue.get("severity") == "error" else 0.75,
+                "evidence": [{"issue_id": issue.get("issue_id")}],
+            }
+        )
+
+    tasks = task_list(conn, status="review", limit=10) + task_list(
+        conn, status="open", limit=25
+    )
+    for task in tasks:
+        score = _task_priority_score(task, now)
+        evidence = []
+        if task.get("due_at") is not None:
+            evidence.append({"due_at": task.get("due_at")})
+        if task.get("context_refs"):
+            evidence.append({"context_refs": task.get("context_refs")[:2]})
+        items.append(
+            {
+                "kind": "task",
+                "title": _clip(task.get("title"), 160),
+                "why": _clip(task.get("body_md"), 220)
+                or f"{task.get('status', 'open')} {task.get('origin', 'task')} task",
+                "confidence": round(score, 2),
+                "evidence": evidence,
+                "task_id": task.get("task_id"),
+                "status": task.get("status"),
+            }
+        )
+
+    deadline_signals = _recent_deadline_signals(ambient, limit=20)
+    for sig in deadline_signals[:3]:
+        title = sig.get("window_title") or sig.get("snippet") or "Recent deadline signal"
+        items.append(
+            {
+                "kind": "screen_signal",
+                "title": _clip(title, 160),
+                "why": "Recent screen text contains deadline or urgency language.",
+                "confidence": 0.68,
+                "evidence": [sig],
+            }
+        )
+
+    items.sort(key=lambda x: float(x.get("confidence") or 0), reverse=True)
+    return {
+        "items": items[: max(1, min(limit, 12))],
+        "signals": {
+            "ambient_events_scanned": len(ambient),
+            "deadline_signals": len(deadline_signals),
+            "task_candidates": len(tasks),
+        },
+        "generated_at": now,
+    }
 
 
 def build_working_context(
@@ -128,6 +270,20 @@ def build_working_context(
                 )
         except Exception:
             pass
+    graph_excerpt: Dict[str, Any] = {}
+    try:
+        from graph_context import build_graph_context
+
+        gc = build_graph_context(conn, data_dir, max_candidates=3)
+        graph_excerpt = {
+            "user_node_count": (gc.get("graph") or {}).get("user_node_count", 0),
+            "totals": (gc.get("graph") or {}).get("totals") or {},
+            "highlights": ((gc.get("graph") or {}).get("highlights") or [])[:5],
+            "open_candidates": (gc.get("open_candidates") or [])[:3],
+            "has_fill_gap": (gc.get("graph") or {}).get("has_fill_gap", False),
+        }
+    except Exception:
+        graph_excerpt = {}
 
     return {
         "status": "ok" if focus else "empty",
@@ -145,6 +301,7 @@ def build_working_context(
             ],
         },
         "related_memory": memory_hits,
+        "graph_context": graph_excerpt,
         "identity_excerpt": claim_excerpt,
         "open_council_proposals": council_excerpt,
         "composed_at": time.time(),
@@ -203,6 +360,7 @@ def build_today_bundle(conn, data_dir: Path) -> Dict[str, Any]:
             "review": work_review,
             "inferred_pending": work_proposed,
         },
+        "next_steps": build_next_steps(conn, data_dir, now_ts=time.time(), limit=5),
         "needs_attention": issues,
         "identity_excerpt_md": identity_md[:2000],
     }

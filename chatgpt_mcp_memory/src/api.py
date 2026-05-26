@@ -20,6 +20,16 @@ Endpoints:
   GET  /identity/summary            -> { "markdown": "..." }
   GET  /identity/clusters
   POST /identity/clusters/rebuild   -> run embedding clustering job
+  GET  /graph/context               -> graph-first compact context for local/LLM clients
+  GET  /graph/candidates            -> unresolved graph merge/fact candidates
+  POST /graph/candidates/{id}/resolve -> approve/reject/dismiss/merge a candidate
+  GET  /menu/status                  -> menu-bar badge/status payload
+  POST /screen-memory/remember       -> ingest screen stream, AX text, screenshot OCR fallbacks
+  GET  /screen-memory/search         -> semantic search over screen-derived memory
+  GET  /screen-memory/summarize-last -> compact recent screen summary
+  GET  /screen-memory/guidance       -> graph-first "do this" guidance
+  GET  /screen-memory/events         -> fused semantic screen event records
+  POST /screen-memory/create-task    -> create one inferred task from recent screen work
   POST /identity/export             -> write zip under data_dir/exports/
   GET  /chunks/{chunk_id}           -> one chunk for evidence drill-down
   GET  /capabilities                -> stable feature flags for local agent integrations
@@ -79,7 +89,19 @@ import identity
 from ambient_pipeline import ingest_screen_context_jsonl
 from ambient_index import index_ax_from_stream
 from ambient_scheduler import start_ambient_scheduler
+from forty_two_scheduler import start_forty_two_scheduler
 from second_brain import build_today_bundle, build_working_context
+from graph_context import build_graph_context, build_menu_status
+from graph_fill import apply_graph_candidate_resolution
+from screen_memory import (
+    create_task_from_recent_screen,
+    miyagi_guidance,
+    remember_screen,
+    screen_search,
+    screen_memory_status,
+    summarize_last,
+    what_was_i_doing,
+)
 from activity_feed import build_activity_feed
 from council_api import handle_council_approve
 import graph_clarify
@@ -104,7 +126,11 @@ from store import (
     identity_audit_log_append,
     identity_edges_for_claim,
     graph_scaffold_list,
+    graph_candidate_get,
+    graph_candidate_list,
+    graph_candidate_resolve,
     ambient_events_recent,
+    screen_memory_events_since,
     chunk_storage_tier_counts,
     sqlite_storage_fingerprint,
     count_chunks_stale_source_tier_promotion_candidates,
@@ -261,6 +287,14 @@ def _watcher_event_bridge(kind: str, payload: Dict[str, Any]) -> None:
                 State.active["skipped"] += 1
             elif payload.get("source_id"):
                 State.active["added"] += 1
+        if not skipped:
+            try:
+                from forty_two_queue import enqueue_graph_infer
+
+                enqueue_graph_infer(State.conn(), reason="source_updated")
+                State.conn().commit()
+            except Exception:
+                log.debug("graph infer enqueue skipped", exc_info=True)
         _schedule_broadcast({
             "type": "ingest_skipped" if skipped else "source_updated",
             "result": payload,
@@ -281,6 +315,14 @@ def _watcher_event_bridge(kind: str, payload: Dict[str, Any]) -> None:
         with State.active_lock:
             snap = dict(State.active)
             State.active = {"root": None, "total": 0, "done": 0, "added": 0, "skipped": 0}
+        if int(snap.get("added", 0)) > 0:
+            try:
+                from forty_two_queue import enqueue_graph_infer
+
+                enqueue_graph_infer(State.conn(), reason="batch_done")
+                State.conn().commit()
+            except Exception:
+                log.debug("graph infer enqueue on batch_done skipped", exc_info=True)
         _schedule_broadcast({
             "type": "tree_done",
             "root": "watcher",
@@ -438,6 +480,7 @@ async def _lifespan(app: FastAPI):
     _refresh_mcp_on_launch()
     if not os.environ.get("MINION_DISABLE_AMBIENT_SCHEDULER", "").strip():
         start_ambient_scheduler(State.data_dir, State.conn)
+    start_forty_two_scheduler(State.data_dir, State.conn)
     try:
         _surface_db_rotate_flag(State.data_dir, State.conn())
         State.conn().commit()
@@ -1474,6 +1517,22 @@ class AmbientIndexAxBody(BaseModel):
     dry_run: bool = False
 
 
+class ScreenRememberBody(BaseModel):
+    max_lines: int = Field(default=1200, ge=1, le=50_000)
+    ingest_screenshots: bool = True
+    run_adapters: bool = True
+
+
+class ScreenCreateTaskBody(BaseModel):
+    minutes: int = Field(default=20, ge=1, le=24 * 60)
+    title: str = ""
+
+
+class GraphCandidateResolveBody(BaseModel):
+    status: str = Field(pattern="^(approved|rejected|dismissed|merged)$")
+    payload: Optional[Dict[str, Any]] = None
+
+
 @app.get("/today")
 def today_bundle() -> Dict[str, Any]:
     return build_today_bundle(State.conn(), State.data_dir)
@@ -1487,6 +1546,17 @@ def activity_feed(limit: int = 80, since_hours: float = 48.0) -> Dict[str, Any]:
         limit=limit,
         since_hours=since_hours,
     )
+
+
+@app.post("/life-evidence/refresh")
+def life_evidence_refresh(force: bool = False) -> Dict[str, Any]:
+    """Refresh macOS Contacts snapshot into life_evidence/ (for 42 suggestions)."""
+    from life_evidence_snapshot import refresh_life_evidence_if_stale
+
+    max_age = 0.0 if force else 6 * 3600
+    out = refresh_life_evidence_if_stale(State.data_dir, max_age_sec=max_age)
+    State.conn().commit()
+    return out
 
 
 class CouncilApproveBody(BaseModel):
@@ -1509,7 +1579,61 @@ def council_approve(body: CouncilApproveBody) -> Dict[str, Any]:
 
 @app.get("/graph/scaffold")
 def graph_scaffold() -> Dict[str, Any]:
-    return graph_scaffold_list(State.conn())
+    conn = State.conn()
+    out = graph_scaffold_list(conn)
+    try:
+        from graph_fill import pick_next_gap
+
+        out["has_fill_gap"] = pick_next_gap(conn, State.data_dir) is not None
+        from forty_two import stream_state
+
+        fs = stream_state(conn, State.data_dir)
+        out["forty_two"] = {
+            "active_thread_id": fs.get("active_thread_id"),
+            "needs_question": fs.get("needs_question"),
+            "question_preview": (fs.get("question_body_md") or "")[:160],
+            "has_gap": fs.get("has_gap"),
+        }
+    except Exception:
+        out["has_fill_gap"] = False
+        out["forty_two"] = None
+    return out
+
+
+@app.get("/graph/context")
+def graph_context(subject: str = "") -> Dict[str, Any]:
+    return build_graph_context(State.conn(), State.data_dir, subject=subject)
+
+
+@app.get("/graph/candidates")
+def graph_candidates(status: str = "open", limit: int = 50) -> Dict[str, Any]:
+    rows = graph_candidate_list(State.conn(), status=status, limit=limit)
+    return {"candidates": rows, "count": len(rows)}
+
+
+@app.post("/graph/candidates/{candidate_id}/resolve")
+def graph_candidate_resolve_route(
+    candidate_id: str, body: GraphCandidateResolveBody
+) -> Dict[str, Any]:
+    conn = State.conn()
+    if graph_candidate_get(conn, candidate_id) is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    result = apply_graph_candidate_resolution(
+        conn,
+        candidate_id,
+        status=body.status,
+        payload=body.payload,
+        data_dir=State.data_dir,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "candidate resolve failed")
+    conn.commit()
+    return {"candidate": result.get("candidate"), "result": result}
+
+
+@app.get("/menu/status")
+def menu_status() -> Dict[str, Any]:
+    return build_menu_status(State.conn(), State.data_dir)
 
 
 @app.get("/chat/threads")
@@ -1570,8 +1694,7 @@ def chat_forty_two_next() -> Dict[str, Any]:
     return out
 
 
-@app.post("/chat/42/reply")
-def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
+def _resolve_forty_two_thread_id(body: FortyTwoReplyBody) -> str:
     import forty_two
 
     tid = body.thread_id
@@ -1580,6 +1703,51 @@ def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
         if not active:
             raise HTTPException(status_code=400, detail="no active thread; call /chat/42/next")
         tid = active["thread_id"]
+    return tid
+
+
+def _chat_sse_response(event_iter) -> StreamingResponse:
+    from chat_sse import sse_line
+
+    def gen():
+        tid = ""
+        try:
+            for payload in event_iter():
+                if payload.get("event") == "error":
+                    yield sse_line("error", payload.get("data") or {})
+                    return
+                tid = str((payload.get("data") or {}).get("thread_id") or tid)
+                yield sse_line(str(payload.get("event") or "message"), payload.get("data") or {})
+        except Exception as exc:
+            log.exception("chat stream failed")
+            yield sse_line("error", {"code": "stream_failed", "message": str(exc)})
+        finally:
+            try:
+                State.conn().commit()
+            except Exception:
+                log.exception("chat stream commit failed")
+            try:
+                from chat_store import chat_open_count
+
+                _schedule_broadcast(
+                    {
+                        "type": "chat_updated",
+                        "thread_id": tid or None,
+                        "open_count": chat_open_count(State.conn()),
+                    }
+                )
+            except Exception:
+                pass
+            yield sse_line("done", {})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/chat/42/reply")
+def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
+    import forty_two
+
+    tid = _resolve_forty_two_thread_id(body)
     out = forty_two.reply(
         State.conn(),
         tid,
@@ -1590,7 +1758,37 @@ def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
     State.conn().commit()
     if not out.get("ok"):
         raise HTTPException(status_code=400, detail=out.get("error") or "reply failed")
+    try:
+        from chat_store import chat_open_count
+
+        _schedule_broadcast(
+            {
+                "type": "chat_updated",
+                "thread_id": tid,
+                "open_count": chat_open_count(State.conn()),
+            }
+        )
+    except Exception:
+        pass
     return out
+
+
+@app.post("/chat/42/reply/stream")
+def chat_forty_two_reply_stream(body: FortyTwoReplyBody) -> StreamingResponse:
+    import forty_two
+
+    tid = _resolve_forty_two_thread_id(body)
+
+    def events():
+        yield from forty_two.stream_reply(
+            State.conn(),
+            tid,
+            body=body.message,
+            action=body.action,
+            data_dir=State.data_dir,
+        )
+
+    return _chat_sse_response(events)
 
 
 @app.post("/chat/42/dismiss")
@@ -1639,7 +1837,25 @@ def keys_unlink(cap_key: str) -> Dict[str, Any]:
 @app.get("/health")
 def health_summary() -> Dict[str, Any]:
     conn = State.conn()
+    database = _database_status()
+    watcher_running = (
+        _watcher_thread is not None and _watcher_thread.is_alive()
+        if _watcher_thread
+        else False
+    )
     return {
+        "service": "minion-api",
+        "product": "minion",
+        "version": __version__,
+        "status": "ok" if database.get("ok") else "degraded",
+        "data_dir": str(State.data_dir),
+        "db_path": str(State.db_path),
+        "database": database,
+        "watcher": {
+            "running": watcher_running,
+            "mode": _watcher_mode,
+        },
+        "counts": _counts(),
         "sync_sources": sync_sources_list(conn),
         "open_issues": system_issues_open(conn, limit=20),
     }
@@ -1825,6 +2041,79 @@ def ambient_index_ax(body: AmbientIndexAxBody = Body(default_factory=AmbientInde
     if not body.dry_run:
         conn.commit()
     return out
+
+
+@app.post("/screen-memory/remember")
+def screen_memory_remember(
+    body: ScreenRememberBody = Body(default_factory=ScreenRememberBody),
+) -> Dict[str, Any]:
+    return remember_screen(
+        State.conn(),
+        State.data_dir,
+        max_lines=body.max_lines,
+        ingest_screenshots=body.ingest_screenshots,
+        run_adapters=body.run_adapters,
+    )
+
+
+@app.get("/screen-memory/search")
+def screen_memory_search(
+    q: str,
+    top_k: int = 8,
+    app: str = "",
+    after: Optional[float] = None,
+    before: Optional[float] = None,
+) -> Dict[str, Any]:
+    return screen_search(
+        State.conn(),
+        q,
+        top_k=max(1, min(int(top_k), 20)),
+        app=app,
+        after=after,
+        before=before,
+    )
+
+
+@app.get("/screen-memory/summarize-last")
+def screen_memory_summarize_last(minutes: int = 30) -> Dict[str, Any]:
+    return summarize_last(State.conn(), minutes=minutes)
+
+
+@app.get("/screen-memory/what-was-i-doing")
+def screen_memory_what_was_i_doing(minutes: int = 20) -> Dict[str, Any]:
+    return what_was_i_doing(State.conn(), minutes=minutes)
+
+
+@app.get("/screen-memory/guidance")
+def screen_memory_guidance(minutes: int = 30) -> Dict[str, Any]:
+    return miyagi_guidance(State.conn(), State.data_dir, minutes=minutes)
+
+
+@app.get("/screen-memory/status")
+def screen_memory_status_route(minutes: int = 60, probe: bool = False) -> Dict[str, Any]:
+    return screen_memory_status(State.conn(), State.data_dir, minutes=minutes, run_probe=probe)
+
+
+@app.get("/screen-memory/events")
+def screen_memory_events(minutes: int = 30, limit: int = 80) -> Dict[str, Any]:
+    since = time.time() - max(1, min(int(minutes), 24 * 60)) * 60.0
+    rows = screen_memory_events_since(
+        State.conn(),
+        since_ts=since,
+        limit=max(1, min(int(limit), 500)),
+    )
+    return {"events": rows, "count": len(rows)}
+
+
+@app.post("/screen-memory/create-task")
+def screen_memory_create_task(
+    body: ScreenCreateTaskBody = Body(default_factory=ScreenCreateTaskBody),
+) -> Dict[str, Any]:
+    return create_task_from_recent_screen(
+        State.conn(),
+        minutes=body.minutes,
+        title=body.title,
+    )
 
 
 @app.post("/maintenance/storage-report")

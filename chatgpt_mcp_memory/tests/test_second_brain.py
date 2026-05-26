@@ -75,6 +75,7 @@ def test_today_bundle_empty(conn, tmp_path: Path) -> None:
     assert "working_context" in bundle
     assert "attention_24h" in bundle
     assert "work_items" in bundle
+    assert "next_steps" in bundle
 
 
 def test_system_issues(conn) -> None:
@@ -102,3 +103,33 @@ def test_ambient_events_since(conn) -> None:
 
     rows = ambient_events_since(conn, since_ts=now - 10)
     assert len(rows) >= 1
+
+
+def test_today_bundle_next_steps_from_tasks_and_screen(conn, tmp_path: Path) -> None:
+    now = time.time()
+    task_infer_insert(
+        conn,
+        title="Finish Kate Larson V1 fixes",
+        body_md="Thursday morning review call.",
+        origin="agent",
+        priority="high",
+    )
+    ambient_event_insert_ignore(
+        conn,
+        event_type="window_snapshot",
+        captured_at=now,
+        dedupe_key=f"ws:{now}:deadline",
+        payload={
+            "app_name": "Slack",
+            "window_title": "Practice of Life deadline",
+            "ax_text_sample": "V1 implementation due tomorrow morning for Kate Larson.",
+        },
+    )
+    conn.commit()
+
+    bundle = build_today_bundle(conn, tmp_path)
+    next_steps = bundle["next_steps"]
+    assert next_steps["items"]
+    assert next_steps["signals"]["deadline_signals"] >= 1
+    assert any(i["kind"] == "task" for i in next_steps["items"])
+    assert any(i["kind"] == "screen_signal" for i in next_steps["items"])

@@ -1,90 +1,90 @@
 <script lang="ts">
-  import type { GraphScaffoldNode } from "$lib/api";
+  import type { GraphScaffoldResponse } from "$lib/api";
 
-  let { root = null }: { root?: GraphScaffoldNode | null } = $props();
+  let { graph = null }: { graph?: GraphScaffoldResponse | null } = $props();
 
-  function branch(node: GraphScaffoldNode, depth = 0): GraphScaffoldNode[] {
-    const rows: GraphScaffoldNode[] = [{ ...node, depth }];
-    for (const ch of node.children ?? []) {
-      rows.push(...branch(ch, depth + 1));
-    }
-    return rows;
-  }
-
-  const rows = $derived(root ? branch(root) : []);
+  const highlights = $derived(graph?.highlights ?? []);
+  const total = $derived(graph?.user_node_count ?? 0);
+  const ft = $derived(graph?.forty_two);
 </script>
 
-<div class="graph-panel">
-  <h2 class="graph-title">Your graph</h2>
-  <p class="graph-sub muted">Pre-generated life map — sources fill it with evidence.</p>
-  {#if !root}
-    <p class="muted">Loading graph…</p>
-  {:else}
-    <ul class="graph-tree">
-      {#each rows as row (row.node_id)}
-        <li
-          class="graph-node"
-          class:filled={(row.filled_count ?? 0) > 0}
-          style="padding-left: {0.35 + (row.depth ?? 0) * 0.65}rem"
-        >
-          <span class="graph-label">{row.title}</span>
-          <span class="graph-count">{(row.filled_count ?? 0) > 0 ? row.filled_count : "—"}</span>
-          {#if row.summary && row.depth === 0}
-            <span class="graph-hint muted">{row.summary}</span>
-          {/if}
+<nav class="graph-panel" aria-label="Life graph">
+  <div class="graph-head">
+    <span class="graph-count">{total}</span>
+    <span class="graph-label">on your graph</span>
+  </div>
+
+  {#if ft?.active_thread_id && ft?.question_preview}
+    <a class="graph-cta" href="/">{ft.question_preview}</a>
+  {/if}
+
+  {#if highlights.length}
+    <ul class="graph-list">
+      {#each highlights.slice(0, 6) as h (h.node_id)}
+        <li>
+          <span class="k">{h.node_kind}</span>
+          <span class="t">{h.title}</span>
         </li>
       {/each}
     </ul>
   {/if}
-</div>
+</nav>
 
 <style>
   .graph-panel {
-    margin-top: 1.25rem;
-    padding-top: 1rem;
+    margin-top: 1rem;
+    padding-top: 0.85rem;
     border-top: 1px solid var(--border);
-    max-height: 52vh;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    max-height: 40vh;
     overflow-y: auto;
   }
-  .graph-title {
-    margin: 0 0 0.25rem;
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+  .graph-head {
+    font-size: 0.75rem;
     color: var(--muted);
   }
-  .graph-sub {
-    margin: 0 0 0.65rem;
-    font-size: 0.72rem;
+  .graph-count {
+    font-weight: 600;
+    color: var(--ink);
+    font-size: 0.95rem;
   }
-  .graph-tree {
+  .graph-cta {
+    font-size: 0.75rem;
+    line-height: 1.3;
+    padding: 0.35rem 0.45rem;
+    border-radius: var(--radius);
+    background: var(--accent-soft);
+    color: var(--accent);
+    text-decoration: none;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .graph-list {
     list-style: none;
     margin: 0;
     padding: 0;
-  }
-  .graph-node {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    grid-template-rows: auto auto;
-    gap: 0 0.5rem;
-    padding: 0.28rem 0.5rem;
-    border-radius: var(--radius);
-    font-size: 0.8rem;
-  }
-  .graph-node.filled {
-    background: var(--accent-soft);
-  }
-  .graph-label {
-    font-weight: 600;
-    color: var(--ink);
-  }
-  .graph-count {
-    font-variant-numeric: tabular-nums;
-    color: var(--muted);
     font-size: 0.72rem;
   }
-  .graph-hint {
-    grid-column: 1 / -1;
-    font-size: 0.68rem;
+  .graph-list li {
+    display: flex;
+    gap: 0.35rem;
+    padding: 0.2rem 0;
+    line-height: 1.3;
+  }
+  .k {
+    text-transform: uppercase;
+    font-size: 0.62rem;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .t {
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

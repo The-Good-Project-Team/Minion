@@ -91,7 +91,13 @@ def test_today_and_wiki_crud(sidecar) -> None:
 
     r5 = sidecar.get("/health")
     assert r5.status_code == 200
-    assert "sync_sources" in r5.json()
+    health = r5.json()
+    assert health["service"] == "minion-api"
+    assert health["status"] == "ok"
+    assert health["database"]["ok"] is True
+    assert health["db_path"].endswith("memory.db")
+    assert health["counts"] == {"sources": 0, "chunks": 0}
+    assert "sync_sources" in health
 
 
 def test_maintenance_storage_tier_promote_stale_dry_run(sidecar) -> None:
@@ -185,6 +191,84 @@ def test_search_returns_ingested_file(sidecar, staged_note: Path) -> None:
     assert top["path"].endswith("staged-note.md")
     assert top["score"] > 0.3, f"top score too low: {top['score']}"
     assert "Good Capital" in top["text"]
+
+
+def test_screen_memory_endpoints_fuse_search_and_create_task(sidecar) -> None:
+    stream = sidecar.data_dir / "ambient" / "stream.jsonl"
+    stream.parent.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    rows = [
+        {
+            "ts": now,
+            "kind": "dom_snapshot",
+            "app_name": "Chrome",
+            "window_title": "Stripe Dashboard",
+            "url": "https://stripe.com/dashboard/payouts",
+            "visible_elements": [
+                {"role": "button", "label": "Export", "bounds": [812, 210, 96, 38], "source": "DOM"}
+            ],
+            "dedupe_key": "api-dom-stripe-export",
+        },
+        {
+            "ts": now + 1,
+            "kind": "mouse_event",
+            "app_name": "Chrome",
+            "window_title": "Stripe Dashboard",
+            "click_count": 1,
+            "last_click": {"x": 830, "y": 220},
+            "summary": "User clicked once in Chrome: Stripe Dashboard.",
+            "dedupe_key": "api-mouse-stripe-export",
+        },
+        {
+            "ts": now + 2,
+            "kind": "clipboard_event",
+            "app_name": "Google Sheets",
+            "window_title": "Investor leads",
+            "summary": "User copied investor email alex@example.com",
+            "text_excerpt": "alex@example.com",
+            "detected_emails": ["alex@example.com"],
+            "dedupe_key": "api-clipboard-investor-email",
+        },
+    ]
+    stream.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    remembered = sidecar.post(
+        "/screen-memory/remember",
+        {"ingest_screenshots": False, "run_adapters": False},
+    )
+    assert remembered.status_code == 200, remembered.text
+    body = remembered.json()
+    assert body["ambient"]["ingested"] == 3
+    assert body["fused_events"]["upserted"] == 3
+    assert body["graph_candidates"]["created"] == 1
+    assert body["event_index"]["indexed"] >= 1
+    assert body["graph_infer_queued"] is True
+
+    events = sidecar.get("/screen-memory/events?minutes=30")
+    assert events.status_code == 200, events.text
+    assert events.json()["count"] >= 2
+
+    search = sidecar.get("/screen-memory/search", params={"q": "export button", "app": "Chrome"})
+    assert search.status_code == 200, search.text
+    hits = search.json()["hits"]
+    assert hits
+    assert "Export" in hits[0]["text"]
+
+    summary = sidecar.get("/screen-memory/summarize-last?minutes=30")
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["event_count"] >= 2
+
+    task = sidecar.post("/screen-memory/create-task", {"minutes": 30})
+    assert task.status_code == 200, task.text
+    assert task.json()["created"] is True
+
+    candidates = sidecar.get("/graph/candidates")
+    assert candidates.status_code == 200, candidates.text
+    assert candidates.json()["candidates"][0]["payload"]["email"] == "alex@example.com"
+
+    guidance = sidecar.get("/screen-memory/guidance?minutes=30")
+    assert guidance.status_code == 200, guidance.text
+    assert guidance.json()["mode"] == "graph_fill"
 
 
 # ---------------------------------------------------------------------------

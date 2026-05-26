@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from ollama_limits import acquire_ollama_inference, merged_ollama_options
 
@@ -55,4 +55,43 @@ def chat(
         raise RuntimeError("LLM returned empty response content.")
 
     return LlmResponse(content=content, raw=resp)
+
+
+def chat_stream(
+    *,
+    model: str,
+    system: str,
+    user: str,
+    options: Optional[Dict[str, Any]] = None,
+    timeout_seconds: Optional[float] = None,
+) -> Iterator[str]:
+    """Stream text deltas from Ollama (for SSE chat)."""
+    try:
+        import ollama  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "Missing dependency 'ollama'. Install deps:\n"
+            "  pip install -r requirements.txt"
+        ) from e
+
+    client_kwargs: Dict[str, Any] = {}
+    if timeout_seconds is not None:
+        client_kwargs["timeout"] = float(timeout_seconds)
+
+    opts = merged_ollama_options(options)
+    with acquire_ollama_inference():
+        stream = ollama.chat(  # type: ignore
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            options=opts,
+            stream=True,
+            **client_kwargs,
+        )
+        for chunk in stream:
+            part = (chunk.get("message") or {}).get("content")
+            if isinstance(part, str) and part:
+                yield part
 

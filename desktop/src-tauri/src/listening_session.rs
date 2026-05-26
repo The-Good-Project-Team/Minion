@@ -38,6 +38,9 @@ fn ts_unix_float() -> f64 {
 }
 
 pub fn full_listening_enabled(data_dir: &Path) -> bool {
+    if !crate::ambient_stream::voice_enabled_by_env() {
+        return false;
+    }
     let path = data_dir.join("settings.json");
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return false;

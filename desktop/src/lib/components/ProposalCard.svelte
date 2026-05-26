@@ -1,6 +1,6 @@
 <script lang="ts">
   import { councilApprove, type CouncilFeedItem } from "$lib/api";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke } from "$lib/tauri-bridge";
 
   let {
     item,

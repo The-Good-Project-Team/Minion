@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
@@ -19,9 +20,14 @@ DEFAULT_AMBIENT_COLLECTORS: Dict[str, bool] = {
     "process_snapshot": False,
     "app_launched": True,
     "browser_visit": True,
-    "listening": True,
+    "dom_snapshot": True,
+    "clipboard_event": True,
+    "mouse_event": True,
+    "keyboard_event": True,
+    "rolling_video_clip": False,
+    "listening": False,
     "full_listening": False,
-    "screenshot_fallback": True,
+    "screenshot_fallback": False,
     "screen_reader": True,
 }
 
@@ -29,6 +35,10 @@ DEFAULT_AMBIENT_DENY: Dict[str, List[str]] = {
     "app_names": ["1Password", "Keychain Access"],
     "title_substrings": ["password"],
 }
+
+
+def voice_enabled_by_env() -> bool:
+    return os.environ.get("MINION_ENABLE_VOICE", "").strip().lower() in ("1", "true", "on", "yes")
 
 
 def _settings_path(data_dir: Path) -> Path:
@@ -81,7 +91,7 @@ def capture_on_empty_ax_enabled(data: Dict[str, Any]) -> bool:
     collectors = data.get("ambient_collectors") or {}
     if isinstance(collectors, dict) and collectors.get("screen_reader") is False:
         return False
-    return True
+    return False
 
 
 def ambient_deny_lists(data: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -125,9 +135,13 @@ def _default() -> Dict[str, Any]:
         "telemetry_opt_out": False,
         "ambient_sensing_enabled": True,
         "full_listening_enabled": False,
-        "capture_on_empty_ax": True,
+        "capture_on_empty_ax": False,
         "ambient_deny": dict(DEFAULT_AMBIENT_DENY),
         "ambient_collectors": dict(DEFAULT_AMBIENT_COLLECTORS),
+        "forty_two_enabled": True,
+        "forty_two_interval_sec": 300,
+        "gemini_model": "gemini-2.5-pro",
+        "forty_two_gemini_model": "gemini-2.5-pro",
     }
 
 
@@ -158,14 +172,21 @@ def _normalize(data: Dict[str, Any]) -> Dict[str, Any]:
                 merged[k] = bool(v)
             elif k == "full_listening":
                 merged["full_listening"] = bool(v)
-    fl = bool(out.get("full_listening_enabled")) or merged.get("full_listening", False)
+    voice_allowed = voice_enabled_by_env()
+    if not voice_allowed:
+        merged["listening"] = False
+        merged["full_listening"] = False
+        out["full_listening_enabled"] = False
+    fl = voice_allowed and (bool(out.get("full_listening_enabled")) or merged.get("full_listening", False))
     out["full_listening_enabled"] = fl
     merged["full_listening"] = fl
     out["ambient_collectors"] = merged
-    out["capture_on_empty_ax"] = bool(out.get("capture_on_empty_ax", True))
+    out["capture_on_empty_ax"] = bool(out.get("capture_on_empty_ax", False))
     deny = out.get("ambient_deny") or {}
     if not isinstance(deny, dict):
         deny = {}
     out["ambient_deny"] = ambient_deny_lists({"ambient_deny": deny})
+    if "gemini_api_key" in out and out["gemini_api_key"] is not None:
+        out["gemini_api_key"] = str(out["gemini_api_key"]).strip()
     merged.pop("fs_event", None)
     return out

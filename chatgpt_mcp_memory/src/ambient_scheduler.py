@@ -25,12 +25,13 @@ def _run_once(data_dir, conn_factory) -> None:
         conn.commit()
         ax = index_ax_from_stream(data_dir=data_dir, conn=conn, dry_run=False)
         conn.commit()
-        try:
-            from listening_ingest import ingest_listening_segments
+        if os.environ.get("MINION_ENABLE_VOICE", "").strip().lower() in ("1", "true", "on"):
+            try:
+                from listening_ingest import ingest_listening_segments
 
-            ingest_listening_segments(data_dir=data_dir, conn=conn)
-        except Exception:
-            log.exception("listening ingest failed")
+                ingest_listening_segments(data_dir=data_dir, conn=conn)
+            except Exception:
+                log.exception("listening ingest failed")
         try:
             from memory_lifecycle import run_auto_maintenance, run_lightweight_cleanup
 
@@ -52,10 +53,12 @@ def _run_once(data_dir, conn_factory) -> None:
             items_count=int(amb.get("ingested", 0)) + int(ax.get("indexed", 0)),
         )
         if not os.environ.get("MINION_DISABLE_AMBIENT_SCHEDULER"):
+            graph_signal = int(ax.get("indexed", 0) or 0) > 0
             try:
                 from life_evidence_index import ingest_life_evidence
 
-                ingest_life_evidence(data_dir, conn)
+                ev = ingest_life_evidence(data_dir, conn)
+                graph_signal = graph_signal or int(ev.get("contacts", 0) or 0) > 0
             except Exception:
                 log.exception("life evidence ingest failed")
             try:
@@ -64,6 +67,13 @@ def _run_once(data_dir, conn_factory) -> None:
                 evaluate_patterns(conn, data_dir)
             except Exception:
                 log.exception("council evaluate_patterns failed")
+            if graph_signal:
+                try:
+                    from forty_two_queue import enqueue_graph_infer
+
+                    enqueue_graph_infer(conn, reason="ambient")
+                except Exception:
+                    log.exception("graph infer enqueue after ambient failed")
         conn.commit()
     except Exception:
         log.exception("ambient scheduler tick failed")

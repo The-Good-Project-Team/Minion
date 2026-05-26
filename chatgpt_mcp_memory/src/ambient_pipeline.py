@@ -99,6 +99,16 @@ INGEST_HANDLERS: Dict[str, Handler] = {
     "full_listening_end": _ingest_listening,
     "screenshot_fallback": _ingest_screenshot,
     "window_snapshot": _ingest_window_snapshot,
+    "dom_snapshot": _ingest_generic,
+    "mouse_event": _ingest_generic,
+    "keyboard_event": _ingest_generic,
+    "clipboard_event": _ingest_generic,
+    "rolling_video_clip": _ingest_generic,
+    "marlin_event": _ingest_generic,
+    "omniparser_parse": _ingest_generic,
+    "general_vlm": _ingest_generic,
+    "vlm_reasoning": _ingest_generic,
+    "vlm_parse": _ingest_generic,
 }
 
 
