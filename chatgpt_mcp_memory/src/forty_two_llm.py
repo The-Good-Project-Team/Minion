@@ -285,7 +285,7 @@ return ONLY valid JSON:
   "confidence": 0.0 to 1.0,
   "actions": [
     {
-      "type": "set_person_summary" | "add_edge" | "create_node" | "approve_claim" | "reject_claim",
+      "type": "set_person_summary" | "set_me_profile" | "add_edge" | "create_node" | "approve_claim" | "reject_claim",
       "node_id": "existing graph node_id when applicable",
       "to_node_id": "for add_edge",
       "from_node_id": "scaffold-me default",
@@ -314,6 +314,78 @@ Rules:
 - Never invent names not appearing in evidence.
 - If evidence is thin or conflicting, set unresolved_question and confidence < 0.75."""
 
+_SYSTEM_MINE_DURABLE = """You mine durable life-graph facts from EVIDENCE — family, birthplace, home, employers, biography.
+
+Same JSON schema as standard infer, plus action type set_me_profile for scaffold-me (user biography).
+
+Rules:
+- Prefer create_node under the GAP parent bucket for family members, home places, employers.
+- Use parent_of, child_of, married_to, lives_at, works_at when evidence supports structure.
+- set_me_profile: one consolidated biography paragraph for Me (where from, role, key facts).
+- stability is "core" — only facts likely true for years, not this week's task.
+- Every action MUST cite chunk: IDs. Never invent names.
+- Return ONE JSON object; never a bare JSON array."""
+
+_SYSTEM_MINE_ONGOING = """You maintain an ongoing life graph from EVIDENCE — people, projects, roles, updates.
+
+Same JSON schema. Focus on GAP: fill missing summaries, add nodes to empty buckets, enrich thin nodes.
+
+Rules:
+- create_node for friends, active projects, work contacts when names appear in evidence.
+- set_person_summary to enrich existing nodes (GAP.enrich or person gaps).
+- add_edge knows / works_at / participates_in / responsible_for when clear.
+- stability is "active" — current work and relationships; ok to update as context shifts.
+- Every action MUST cite chunk: IDs. Never invent names.
+- Return ONE JSON object with keys confidence, actions, unresolved_question, reasoning_notes.
+- Never return a bare JSON array. If no actions, use "actions": []."""
+
+
+MINING_RESPONSE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "confidence": {"type": "number"},
+        "actions": {
+            "type": "array",
+            "items": {"type": "object"},
+        },
+        "unresolved_question": {"type": "string"},
+        "reasoning_notes": {"type": "string"},
+    },
+    "required": ["confidence", "actions"],
+}
+
+
+def _parse_proposal_json(raw: str) -> Optional[Dict[str, Any]]:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if "```" in text:
+        text = text.split("```", 2)[1]
+        if text.lower().startswith("json"):
+            text = text[4:]
+    text = text.strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, list):
+        return {"confidence": 0.0, "actions": [], "unresolved_question": "", "reasoning_notes": ""}
+    if isinstance(parsed, dict):
+        parsed.setdefault("confidence", 0.0)
+        parsed.setdefault("actions", [])
+        parsed.setdefault("unresolved_question", "")
+        parsed.setdefault("reasoning_notes", "")
+        return parsed
+    return None
+
+
+def _infer_system(mining_kind: str) -> str:
+    if mining_kind == "durable":
+        return _SYSTEM_MINE_DURABLE
+    if mining_kind == "ongoing":
+        return _SYSTEM_MINE_ONGOING
+    return _SYSTEM_INFER
+
 
 def propose_graph_actions_from_evidence(
     conn,
@@ -321,27 +393,33 @@ def propose_graph_actions_from_evidence(
     evidence_pack: Dict[str, Any],
     *,
     data_dir: Optional[Path] = None,
+    mining_kind: str = "ongoing",
 ) -> Tuple[Optional[Dict[str, Any]], bool]:
     """LLM proposes structured graph actions from retrieval pack."""
-    from gemini_client import forty_two_gemini_model, gemini_chat, gemini_configured
-    from forty_two_context import build_minion_context, context_markdown
+    import os
+    from pathlib import Path as _Path
+
+    from gemini_client import gemini_chat, gemini_configured, graph_mine_gemini_model
+    from forty_two_context import build_mining_context, mining_context_markdown
 
     if not gemini_configured(data_dir):
         return None, False
 
-    label = str(gap.get("label") or gap.get("bucket_label") or "")
-    ctx = build_minion_context(conn, data_dir=data_dir, subject_label=label)
     hits = evidence_pack.get("hits") or []
+    if not hits:
+        return None, False
+
+    ctx = build_mining_context(conn, gap=gap)
     evidence_block = json.dumps(
         {
             "hits": [
                 {
                     "chunk_id": h.get("chunk_id"),
                     "score": h.get("score"),
-                    "path": h.get("path"),
+                    "path": os.path.basename(str(h.get("path") or "note")),
                     "text": (h.get("text") or "")[:400],
                 }
-                for h in hits[:12]
+                for h in hits[:10]
             ],
             "evidence_refs": evidence_pack.get("evidence_refs"),
         },
@@ -349,27 +427,34 @@ def propose_graph_actions_from_evidence(
         indent=2,
     )
     user = (
-        f"GRAPH_CONTEXT:\n{context_markdown(ctx)}\n\n"
+        f"GRAPH_CONTEXT:\n{mining_context_markdown(ctx)}\n\n"
+        f"MINING_KIND: {mining_kind}\n"
+        f"STABILITY: {gap.get('stability') or ('core' if mining_kind == 'durable' else 'active')}\n\n"
         f"GAP:\n{json.dumps(gap, ensure_ascii=False, indent=2)}\n\n"
         f"EVIDENCE:\n{evidence_block}\n\n"
-        "Propose graph actions to fill the gap. Return JSON only."
+        "Return one JSON object (never a bare array). Extract durable facts supported by EVIDENCE."
     )
     try:
         out = gemini_chat(
-            system=_SYSTEM_INFER,
+            system=_infer_system(mining_kind),
             messages=[{"role": "user", "content": user}],
-            data_dir=data_dir,
-            model=forty_two_gemini_model(data_dir),
+            data_dir=_Path(data_dir) if data_dir else None,
+            model=graph_mine_gemini_model(_Path(data_dir) if data_dir else None),
             temperature=0.15,
-            max_output_tokens=1024,
+            max_output_tokens=8192,
+            timeout_seconds=90.0,
+            response_mime_type="application/json",
+            response_schema=MINING_RESPONSE_SCHEMA,
         )
-        raw = out.strip()
-        if "```" in raw:
-            raw = raw.split("```", 2)[1]
-            if raw.lower().startswith("json"):
-                raw = raw[4:]
-        parsed = json.loads(raw.strip())
-        if not isinstance(parsed, dict):
+        parsed = _parse_proposal_json(out)
+        if not parsed:
+            log.warning("42 corpus infer returned unparsable JSON: %r", out[:200])
+            return None, True
+        if not parsed.get("actions"):
+            log.info(
+                "42 corpus infer found no cited actions for gap=%s",
+                gap.get("gap_type") or gap.get("label"),
+            )
             return None, True
         parsed["evidence_refs"] = list(evidence_pack.get("evidence_refs") or [])
         for act in parsed.get("actions") or []:

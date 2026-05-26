@@ -36,6 +36,13 @@ _BUCKET_GAPS: List[Tuple[str, str, str]] = [
 
 def pick_next_gap(conn, data_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Highest-priority unfilled graph slot, or None."""
+    try:
+        from graph_phantom import purge_phantom_graph_artifacts
+
+        purge_phantom_graph_artifacts(conn, commit=True)
+    except Exception:
+        log.debug("phantom graph purge skipped", exc_info=True)
+
     claims = identity_claim_list(conn, status="proposed", limit=1)
     if claims:
         c = claims[0]
@@ -47,34 +54,40 @@ def pick_next_gap(conn, data_dir: Optional[Path] = None) -> Optional[Dict[str, A
             "kind": c.get("kind"),
         }
 
-    row = conn.execute(
+    sparse_rows = conn.execute(
         "SELECT node_id, title, summary FROM graph_nodes "
         "WHERE node_kind='person' AND status NOT IN ('scaffold', 'stub') "
         "AND (summary IS NULL OR summary='' OR summary='{}') "
-        "ORDER BY updated_at ASC LIMIT 1"
-    ).fetchone()
-    if row:
+        "ORDER BY updated_at ASC LIMIT 8"
+    ).fetchall()
+    for row in sparse_rows:
+        title = str(row["title"] or "Someone")
+        if not _is_plausible_graph_title(title, node_kind="person"):
+            continue
         return {
             "gap_type": "person",
             "subject_id": str(row["node_id"]),
-            "label": str(row["title"] or "Someone"),
+            "label": title,
             "phase": 0,
         }
 
-    row = conn.execute(
+    relation_rows = conn.execute(
         "SELECT n.node_id, n.title FROM graph_nodes n "
         "WHERE n.node_kind='person' AND n.status NOT IN ('scaffold', 'stub') "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM graph_edges e WHERE e.from_node_id=? AND e.to_node_id=n.node_id "
         "  AND e.rel_kind IN ('knows', 'related_to')"
-        ") LIMIT 1",
+        ") LIMIT 8",
         (ME_NODE,),
-    ).fetchone()
-    if row:
+    ).fetchall()
+    for row in relation_rows:
+        title = str(row["title"] or "Someone")
+        if not _is_plausible_graph_title(title, node_kind="person"):
+            continue
         return {
             "gap_type": "person_relation",
             "subject_id": str(row["node_id"]),
-            "label": str(row["title"] or "Someone"),
+            "label": title,
             "phase": 0,
         }
 

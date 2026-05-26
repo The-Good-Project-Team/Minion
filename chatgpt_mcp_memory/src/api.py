@@ -482,6 +482,15 @@ async def _lifespan(app: FastAPI):
         start_ambient_scheduler(State.data_dir, State.conn)
     start_forty_two_scheduler(State.data_dir, State.conn)
     try:
+        from graph_corpus_mine import graph_mine_enabled, run_graph_mine_tick
+
+        if graph_mine_enabled(State.data_dir):
+            conn = State.conn()
+            run_graph_mine_tick(conn, State.data_dir, max_llm_calls=2, source="boot")
+            conn.commit()
+    except Exception:
+        log.debug("boot graph mine tick skipped", exc_info=True)
+    try:
         _surface_db_rotate_flag(State.data_dir, State.conn())
         State.conn().commit()
     except Exception:
@@ -1597,6 +1606,16 @@ def graph_scaffold() -> Dict[str, Any]:
     except Exception:
         out["has_fill_gap"] = False
         out["forty_two"] = None
+    try:
+        from graph_ambient import build_graph_spine
+
+        spine = build_graph_spine(conn, State.data_dir, max_active=6)
+        out["spine"] = {
+            "active_nodes": spine.get("active_nodes") or [],
+            "spine_md": spine.get("spine_md") or "",
+        }
+    except Exception:
+        out["spine"] = {"active_nodes": [], "spine_md": ""}
     return out
 
 

@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 from store import meta_get, meta_set
 
@@ -36,37 +36,51 @@ def drain_graph_infer_queue(
     max_gaps: int = 5,
 ) -> Dict[str, Any]:
     """
-    Try corpus-first fill on successive gaps without opening question threads.
-    Stops when a gap needs a user question or no gaps remain.
+    LLM graph mine tick: corpus evidence → validated graph writes.
+    Runs continuously when Gemini is configured (core product loop).
     """
-    from graph_fill import pick_next_gap
-    from forty_two_infer import try_fill_gap_from_corpus
-
     clear_graph_infer_pending(conn)
-    filled = 0
-    deltas: list[str] = []
-    last_status = "idle"
+    from graph_corpus_mine import graph_mine_enabled, mine_limits, run_graph_mine_tick
 
-    for _ in range(max_gaps):
-        gap = pick_next_gap(conn, data_dir)
-        if not gap:
-            last_status = "no_gaps"
-            break
-        result = try_fill_gap_from_corpus(conn, gap, data_dir=data_dir)
-        st = result.get("status")
-        last_status = st or "unknown"
-        if st == "filled":
-            filled += 1
-            deltas.extend(result.get("deltas") or [])
-            if result.get("gap_exhausted"):
+    if not graph_mine_enabled(data_dir):
+        from graph_fill import pick_next_gap
+        from forty_two_infer import try_fill_gap_from_corpus
+
+        filled = 0
+        deltas: list[str] = []
+        last_status = "no_gemini"
+        for _ in range(max_gaps):
+            gap = pick_next_gap(conn, data_dir)
+            if not gap:
+                last_status = "no_gaps"
+                break
+            result = try_fill_gap_from_corpus(conn, gap, data_dir=data_dir)
+            st = result.get("status")
+            last_status = st or "unknown"
+            if st == "filled":
+                filled += 1
+                deltas.extend(result.get("deltas") or [])
                 continue
             break
-        if st == "needs_question":
-            break
-        break
+        meta_set(conn, _META_LAST_DRAIN, str(time.time()))
+        return {"filled": filled, "deltas": deltas, "status": last_status}
 
+    limits = mine_limits(data_dir)
+    max_calls = max(max_gaps, limits.get("max_42_tick", 4))
+    out = run_graph_mine_tick(
+        conn,
+        data_dir,
+        max_llm_calls=max_calls,
+        source="42_scheduler",
+    )
     meta_set(conn, _META_LAST_DRAIN, str(time.time()))
-    return {"filled": filled, "deltas": deltas, "status": last_status}
+    return {
+        "filled": out.get("filled", 0),
+        "deltas": out.get("deltas") or [],
+        "status": out.get("status"),
+        "calls": out.get("calls"),
+        "remaining_day": out.get("remaining_day"),
+    }
 
 
 def maybe_enqueue_after_ingest(conn, *, skipped: bool) -> None:

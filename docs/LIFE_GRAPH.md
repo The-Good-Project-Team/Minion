@@ -156,9 +156,15 @@ Markdown files remain the **canonical readable layer**. SQLite graph index suppo
 
 When the user asks something:
 
-1. Locate the relevant **graph neighborhood**.
+1. Locate the relevant **graph neighborhood** (graph spine + active nodes from recent ambient touches).
 2. Read linked markdown / source files.
 3. Answer from evidence.
+
+**Graph spine:** `build_graph_spine()` in `graph_ambient.py` composes scaffold fill state, recently touched nodes, and compact markdown for LLM context. Wired into `GET /graph/context`, MCP `working_context`, and `/today`.
+
+**Ambient fill:** each scheduler tick runs `enrich_graph_from_ambient()` — clipboard emails → people, browser hosts → organizations, repeated window titles → active projects, token matches → evidence on existing nodes. Life fills the boxes; 42 only asks when corpus + ambient cannot resolve ambiguity.
+
+**LLM graph mine (core):** when Gemini is configured, `run_graph_mine_tick()` runs on every ambient tick (~2 calls) and 42 scheduler tick (~4 calls), up to ~96/day. The LLM reads embedded corpus evidence and proposes validated graph writes — durable **core** facts (family, birthplace, employers, Me profile) first, then **ongoing active** updates (friends, projects, enrich thin nodes). Python validates citations and confidence before any write. This is the product message: a few dollars of graph intelligence makes the graph the root of all context.
 
 UI surfaces: people I know, projects I'm on, things I owe, things others owe me, places and groups I belong to, recent updates to my world — via the **activity river** (`GET /feed`) and graph sidebar (`GET /graph/scaffold`).
 

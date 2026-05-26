@@ -1045,6 +1045,16 @@ export type GraphScaffoldResponse = {
     question_preview?: string;
     has_gap?: boolean;
   } | null;
+  spine?: {
+    active_nodes?: Array<{
+      node_id: string;
+      node_kind: string;
+      title: string;
+      attention_hint?: string;
+      ambient_refs?: number;
+    }>;
+    spine_md?: string;
+  };
 };
 
 export type GraphContextResponse = {

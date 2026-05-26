@@ -86,3 +86,29 @@ def test_activity_feed_merges_lanes(conn, tmp_path: Path) -> None:
     assert "parsed" in lanes
     assert "suggestion" in lanes
     assert feed["graph"]["root"]["title"] == "Me"
+
+
+def test_activity_feed_skips_ambient_loop_noise(conn, tmp_path: Path) -> None:
+    now = time.time()
+    sync_job_run_append(
+        conn,
+        source_key="ambient_loop",
+        status="ok",
+        started_at=now - 5,
+        finished_at=now,
+        items_count=0,
+    )
+    conn.commit()
+    feed = build_activity_feed(conn, tmp_path, limit=50, since_hours=24)
+    sync_titles = [
+        i.get("title")
+        for i in feed["items"]
+        if i.get("kind") == "sync_run"
+    ]
+    assert not any("ambient_loop" in str(t) for t in sync_titles)
+
+
+def test_activity_feed_includes_graph_status(conn, tmp_path: Path) -> None:
+    feed = build_activity_feed(conn, tmp_path, limit=50, since_hours=24)
+    kinds = {i.get("kind") for i in feed["items"]}
+    assert "graph_status" in kinds

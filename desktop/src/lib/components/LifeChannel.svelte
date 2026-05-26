@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    councilApprove,
     fortyTwoDismiss,
     fortyTwoReply,
     patchIdentityClaim,
@@ -9,7 +10,6 @@
     type FeedItem,
     type FeedRow,
   } from "$lib/api";
-  import ProposalCard from "$lib/components/ProposalCard.svelte";
 
   const CAPTURE_KINDS = new Set([
     "window_snapshot",
@@ -29,10 +29,10 @@
   };
 
   const SPEAKERS: Record<SpeakerId, Speaker> = {
-    minion: { id: "minion", name: "Minion", subtitle: "life context", initial: "M" },
-    forty_two: { id: "forty_two", name: "42", subtitle: "life graph", initial: "42" },
+    minion: { id: "minion", name: "Minion", subtitle: "", initial: "M" },
+    forty_two: { id: "forty_two", name: "42", subtitle: "", initial: "42" },
     you: { id: "you", name: "You", subtitle: "", initial: "Y" },
-    coach: { id: "coach", name: "Coach", subtitle: "wellbeing", initial: "C" },
+    coach: { id: "coach", name: "Coach", subtitle: "", initial: "C" },
   };
 
   let {
@@ -67,6 +67,7 @@
   }
 
   function speakerFor(item: FeedItem): Speaker {
+    if (item.kind === "graph_update" || item.kind === "graph_status") return SPEAKERS.forty_two;
     if (item.kind === "forty_two") return SPEAKERS.forty_two;
     if (item.kind === "you") return SPEAKERS.you;
     return SPEAKERS.minion;
@@ -81,11 +82,11 @@
     if (item.kind === "forty_two" || item.kind === "you") {
       return raw.replace(/^\*\*42:\*\*\s*/gm, "").trim();
     }
-    if (item.kind === "graph_update") {
-      return raw || item.title || "Saved to your graph.";
+    if (item.kind === "graph_update" || item.kind === "graph_status") {
+      return raw || item.title || "Graph update.";
     }
     if (CAPTURE_KINDS.has(item.kind)) {
-      return item.body ? `${item.title}\n${item.body}`.trim() : item.title;
+      return item.title || raw;
     }
     if (item.body && item.title) return `${item.title} — ${item.body}`;
     return item.title || item.body || "";
@@ -104,6 +105,29 @@
       minute: "2-digit",
       ...(sameDay ? {} : { month: "short", day: "numeric" }),
     });
+  }
+
+  function councilText(item: CouncilFeedItem): string {
+    const parts: string[] = [];
+    const title = String(item.proposal?.title ?? "").trim();
+    const summary = String(item.proposal?.summary ?? "").trim();
+    const body = String(item.proposal?.payload?.body ?? "").trim();
+    if (title) parts.push(title);
+    if (summary) parts.push(summary);
+    if (body) parts.push(body);
+    return parts.join("\n\n");
+  }
+
+  async function councilAct(item: CouncilFeedItem, actionId: string) {
+    const pid = item.proposal?.proposal_id;
+    if (!pid) return;
+    busy = `council-${pid}`;
+    try {
+      await councilApprove({ proposal_id: pid, action: actionId });
+      await onRefresh?.();
+    } finally {
+      busy = null;
+    }
   }
 
   async function act(item: FeedItem, actionId: string) {
@@ -138,9 +162,9 @@
   }
 </script>
 
-<div class="channel" aria-label="Life channel">
+<div class="channel" aria-label="Agent feed">
   {#if ordered.length === 0 && !streaming}
-    <p class="channel-empty muted">The channel is quiet. Minion will post activity here; 42 will ask graph questions.</p>
+    <p class="channel-empty muted">Agents are quiet. They'll post here as they observe and learn.</p>
   {:else}
     <ol class="message-list">
       {#each ordered as item (rowKey(item))}
@@ -155,14 +179,28 @@
                   {#if sp.subtitle}<span class="msg-sub">{sp.subtitle}</span>{/if}
                   <time class="msg-time">{formatTs(item.ts)}</time>
                 </header>
-                <div class="msg-body council-wrap">
-                  <ProposalCard {item} {onRefresh} />
-                </div>
+                {#if councilText(item)}
+                  <div class="msg-body">{councilText(item)}</div>
+                {/if}
+                {#if item.approval?.options?.length}
+                  <div class="msg-actions">
+                    {#each item.approval.options as action}
+                      <button
+                        type="button"
+                        class="msg-btn"
+                        disabled={busy === `council-${item.proposal?.proposal_id}`}
+                        onclick={() => void councilAct(item, action.id)}
+                      >
+                        {action.label}
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             </article>
           {:else}
             {@const sp = speakerFor(item)}
-            <article class="msg" class:msg-graph={item.kind === "graph_update"} data-speaker={sp.id}>
+            <article class="msg" data-speaker={sp.id}>
               <div class="avatar" data-speaker={sp.id} aria-hidden="true">{sp.initial}</div>
               <div class="msg-main">
                 <header class="msg-head">
@@ -218,9 +256,10 @@
     flex-direction: column;
   }
   .channel-empty {
-    padding: 2rem 0.5rem;
+    padding: 3rem 0.5rem;
     font-size: 0.88rem;
     text-align: center;
+    line-height: 1.5;
   }
   .message-list {
     list-style: none;
@@ -313,10 +352,6 @@
     word-break: break-word;
     color: var(--ink);
   }
-  .msg-graph .msg-body {
-    color: color-mix(in srgb, #3d8f62 85%, var(--ink));
-    font-size: 0.86rem;
-  }
   .msg-pending .msg-body {
     color: var(--muted);
   }
@@ -341,15 +376,5 @@
   }
   .msg-btn:disabled {
     opacity: 0.5;
-  }
-  .council-wrap :global(.feed-item) {
-    border: none;
-    box-shadow: none;
-    padding: 0;
-    background: transparent;
-  }
-  .council-wrap :global(.feed-item:hover) {
-    transform: none;
-    box-shadow: none;
   }
 </style>

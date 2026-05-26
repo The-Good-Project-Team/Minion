@@ -73,16 +73,19 @@ def tick(conn, data_dir) -> Optional[str]:
         pass
 
     from forty_two import active_thread
-    from forty_two_queue import drain_graph_infer_queue, has_graph_infer_pending
+    from forty_two_queue import drain_graph_infer_queue
     from graph_fill import pick_next_gap, open_thread_for_gap
 
     if active_thread(conn):
         return None
 
-    if has_graph_infer_pending(conn):
-        drain_graph_infer_queue(conn, data_dir, max_gaps=5)
-        if active_thread(conn):
-            return None
+    drain = drain_graph_infer_queue(conn, data_dir, max_gaps=5)
+    if drain.get("filled", 0):
+        conn.commit()
+        return None
+
+    if active_thread(conn):
+        return None
 
     gap = pick_next_gap(conn, data_dir)
     if not gap:

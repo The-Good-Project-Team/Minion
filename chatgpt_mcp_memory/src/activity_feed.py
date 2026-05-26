@@ -51,7 +51,139 @@ def _feed_item(
     }
 
 
-_AMBIENT_RIVER_SKIP = frozenset({"fs_event", "process_snapshot", "app_launched"})
+_AMBIENT_RIVER_SKIP = frozenset(
+    {"fs_event", "process_snapshot", "app_launched", "window_snapshot", "ax_content_changed"}
+)
+_FEED_SKIP_APPS = frozenset(
+    {
+        "",
+        "minion",
+        "minion-desktop",
+        "cursor",
+        "finder",
+        "iterm2",
+        "terminal",
+        "system settings",
+    }
+)
+_HIGH_SIGNAL_KINDS = frozenset(
+    {
+        "forty_two",
+        "you",
+        "graph_update",
+        "graph_status",
+        "inferred_task",
+        "identity_claim",
+        "health_issue",
+        "wiki_page",
+        "listening_wake",
+    }
+)
+
+
+def _skip_ambient_payload(payload: Dict[str, Any]) -> bool:
+    app = str(payload.get("app_name") or payload.get("app") or "").strip().lower()
+    title = str(payload.get("window_title") or payload.get("title") or "").strip().lower()
+    if app in _FEED_SKIP_APPS:
+        return True
+    if "minion" in title and any(x in title for x in ("open minion", "quit minion", "no graph")):
+        return True
+    return False
+
+
+def _is_noise_sync(item: Dict[str, Any]) -> bool:
+    title = str(item.get("title") or "")
+    body = str(item.get("body") or "")
+    if "ambient_loop" not in title:
+        return False
+    if "status=error" in body:
+        return False
+    return True
+
+
+def _dedupe_ambient(items: List[Dict[str, Any]], *, max_items: int) -> List[Dict[str, Any]]:
+    seen: set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for item in sorted(items, key=lambda x: float(x.get("ts") or 0), reverse=True):
+        title = str(item.get("title") or "")
+        key = title.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _curate_river(river: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    high: List[Dict[str, Any]] = []
+    low: List[Dict[str, Any]] = []
+    for item in river:
+        kind = str(item.get("kind") or "")
+        lane = str(item.get("lane") or "")
+        if kind == "sync_run" and _is_noise_sync(item):
+            continue
+        if kind in ("window_focus", "browser_visit", "focus"):
+            low.append(item)
+        elif kind in _HIGH_SIGNAL_KINDS or lane in ("conversation", "suggestion"):
+            high.append(item)
+        elif kind == "sync_run":
+            high.append(item)
+        else:
+            low.append(item)
+    high.sort(key=lambda x: float(x.get("ts") or 0), reverse=True)
+    low = _dedupe_ambient(low, max_items=min(5, max(0, limit - len(high))))
+    out = high + low
+    out.sort(key=lambda x: float(x.get("ts") or 0), reverse=True)
+    return out[:limit]
+
+
+def _graph_status_item(conn, data_dir: Path) -> Optional[Dict[str, Any]]:
+    try:
+        from graph_ambient import build_graph_spine
+        from graph_fill import pick_next_gap
+
+        spine = build_graph_spine(conn, data_dir, max_active=5)
+    except Exception:
+        log.debug("graph status item skipped", exc_info=True)
+        return None
+
+    totals = spine.get("totals") or {}
+    active = spine.get("active_nodes") or []
+    buckets = [b for b in (spine.get("buckets") or []) if int(b.get("filled_count") or 0) > 0]
+    lines: List[str] = []
+    if totals:
+        bits = ", ".join(f"{v} {k}" for k, v in sorted(totals.items(), key=lambda x: -x[1])[:5])
+        lines.append(f"Filled so far: {bits}.")
+    for bucket in buckets[:3]:
+        names = ", ".join(m.get("title") for m in bucket.get("members", [])[:4] if m.get("title"))
+        if names:
+            lines.append(f"{bucket.get('title')}: {names}.")
+    if active:
+        recent = ", ".join(n.get("title") for n in active[:4] if n.get("title"))
+        if recent:
+            lines.append(f"Recently active: {recent}.")
+    gap = pick_next_gap(conn, data_dir)
+    if gap:
+        prompt = str(gap.get("prompt") or gap.get("title") or gap.get("field") or "").strip()
+        if prompt:
+            lines.append(f"Still open: {prompt[:160]}.")
+    if not lines:
+        lines.append("Graph scaffold is ready — waiting for life to fill it in.")
+
+    ts = time.time()
+    for node in active:
+        ts = max(ts, float(node.get("updated_at") or 0))
+    return _feed_item(
+        feed_id="graph-status",
+        ts=ts,
+        lane="conversation",
+        kind="graph_status",
+        title="Graph status",
+        body="\n".join(lines),
+        graph_kinds=["person", "project", "organization"],
+    )
 
 
 def _ambient_to_items(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -61,6 +193,8 @@ def _ambient_to_items(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if et in _AMBIENT_RIVER_SKIP:
             continue
         payload = e.get("payload") or {}
+        if _skip_ambient_payload(payload):
+            continue
         ts = float(e.get("captured_at") or 0)
         app = str(payload.get("app_name") or "?")
         title = str(payload.get("window_title") or "")
@@ -72,22 +206,14 @@ def _ambient_to_items(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if et == "window_focus":
             url = str(payload.get("url") or "")
             host = str(payload.get("url_or_host") or "")
-            if ax:
-                parse = {
-                    "status": "indexed",
-                    "reason": f"Screen text ({len(str(ax))} chars) → searchable",
-                }
-            else:
-                parse = {"status": "stored", "reason": "focus logged"}
+            parse = {"status": "stored", "reason": "focus logged"}
             if host or url:
                 river_title = f"Browser · {host or title[:60] or app}"
-                body = (url[:200] if url else "") + (
-                    f"\n{(str(ax)[:280])}" if ax else ""
-                )
+                body = url[:200] if url else ""
             else:
                 label = f"{app}" + (f" — {title}" if title else "")
-                river_title = f"App switch · {label}"
-                body = (str(ax)[:320] if ax else str(payload.get("process_path") or ""))
+                river_title = f"Now · {label}"
+                body = ""
         elif et == "window_snapshot":
             label = f"{app}" + (f" — {title[:60]}" if title else "")
             river_title = f"Screen · {label}"
@@ -296,6 +422,13 @@ def build_activity_feed(
     since_ts = time.time() - since_hours * 3600.0
     lim = int(max(10, min(limit, 200)))
 
+    try:
+        from graph_phantom import purge_phantom_graph_artifacts
+
+        purge_phantom_graph_artifacts(conn, commit=True)
+    except Exception:
+        log.debug("phantom graph purge skipped", exc_info=True)
+
     working = build_working_context(conn, data_dir, for_mcp=False, memory_top_k=3)
     focus = working.get("focus")
     now_item: Optional[Dict[str, Any]] = None
@@ -356,8 +489,11 @@ def build_activity_feed(
     river.extend(_claim_suggestions(claims))
     river.extend(_issue_suggestions(issues))
 
-    river.sort(key=lambda x: float(x.get("ts") or 0), reverse=True)
-    river = river[:lim]
+    status = _graph_status_item(conn, data_dir)
+    if status:
+        river.insert(1 if pin else 0, status)
+
+    river = _curate_river(river, limit=lim)
 
     items: List[Dict[str, Any]] = []
     items.extend(council_items)

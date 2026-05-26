@@ -27,12 +27,29 @@ ALLOWED_REL_KINDS = frozenset(
         "participates_in",
         "owns",
         "manages",
+        "parent_of",
+        "child_of",
+        "married_to",
     }
 )
 
 
 def build_queries_for_gap(gap: Dict[str, Any]) -> List[str]:
     """3–6 targeted retrieval queries for a graph gap."""
+    custom = gap.get("mining_queries")
+    if isinstance(custom, list) and custom:
+        out: List[str] = []
+        seen: Set[str] = set()
+        for q in custom:
+            q = " ".join(str(q).split()).strip()
+            if q and q.lower() not in seen:
+                seen.add(q.lower())
+                out.append(q[:200])
+            if len(out) >= 6:
+                break
+        if out:
+            return out
+
     gtype = gap.get("gap_type") or ""
     label = str(gap.get("label") or gap.get("bucket_label") or "").strip()
     hint = str(gap.get("hint") or "").strip()
@@ -69,6 +86,21 @@ def build_queries_for_gap(gap: Dict[str, Any]) -> List[str]:
         app = str(gap.get("app_name") or "")
         title = str(gap.get("window_title") or "")
         queries = [title, f"{app} {title}", app, f"project {title}", f"person {title}"]
+    elif gtype == "me_profile":
+        queries = [
+            "about me biography background",
+            "where I was born grew up hometown",
+            "my role profession what I do",
+            "personal context about myself",
+        ]
+    elif gtype == "enrich":
+        kind = str(gap.get("node_kind") or "")
+        queries = [
+            label,
+            f"who is {label}",
+            f"{label} {kind} relationship context updates",
+            f"about {label}",
+        ]
     else:
         queries = [label or "life graph people projects"]
 
@@ -139,6 +171,10 @@ def retrieve_evidence_pack(
 
     hits = sorted(all_hits.values(), key=lambda x: float(x.get("score") or 0), reverse=True)
     hits = [h for h in hits if float(h.get("score") or 0) >= MIN_HIT_SCORE][:MAX_EVIDENCE_HITS]
+    hits.sort(
+        key=lambda h: float(h.get("score") or 0) * _evidence_quality(str(h.get("text") or "")),
+        reverse=True,
+    )
     evidence_refs = [f"chunk:{h['chunk_id']}" for h in hits[:8]]
     if subject_id:
         evidence_refs.append(f"graph:{subject_id}")
@@ -197,6 +233,10 @@ def validate_proposal(
 
             if not _is_plausible_graph_title(title, node_kind=kind):
                 return False, "implausible_title"
+        if atype == "set_me_profile":
+            text = str(act.get("summary") or act.get("user_note") or "").strip()
+            if not text:
+                return False, "empty_me_profile"
         if atype == "add_edge":
             rel = str(act.get("rel_kind") or "")
             if rel not in ALLOWED_REL_KINDS:
@@ -238,12 +278,18 @@ def apply_proposal(
     gtype = gap.get("gap_type")
     subject_id = gap.get("subject_id")
     evidence_refs = list(proposal.get("evidence_refs") or [])
+    stability = str(proposal.get("stability") or gap.get("stability") or "active")
 
     for act in proposal.get("actions") or []:
         atype = str(act.get("type") or "")
         act_refs = list(act.get("evidence_refs") or evidence_refs)
 
-        if atype == "approve_claim":
+        if atype == "set_me_profile":
+            text = str(act.get("summary") or act.get("user_note") or "").strip()
+            if text:
+                _me_profile(conn, text, act_refs, stability=stability)
+                deltas.append("Filled **your profile** from saved context.")
+        elif atype == "approve_claim":
             cid = str(act.get("claim_id") or gap.get("claim_id") or "")
             if cid:
                 identity_claim_set_status(conn, cid, "active")
@@ -259,6 +305,7 @@ def apply_proposal(
             if nid and text:
                 _person_summary(conn, nid, text)
                 _set_node_evidence(conn, nid, act_refs, float(act.get("confidence") or proposal.get("confidence") or 0.8))
+                _mark_stability(conn, nid, stability)
                 deltas.append(f"Filled **{_node_title(conn, nid)}** from your notes.")
         elif atype == "add_edge":
             fr = str(act.get("from_node_id") or ME_NODE)
@@ -281,7 +328,12 @@ def apply_proposal(
                 nid = ensure_person_node(
                     conn,
                     label=title,
-                    meta={"user_note": note[:500], "source": "corpus_infer", "evidence_refs": act_refs},
+                    meta={
+                        "user_note": note[:500],
+                        "source": "corpus_infer",
+                        "evidence_refs": act_refs,
+                        "stability": stability,
+                    },
                 )
             else:
                 nid = _create_graph_node(conn, parent, kind, title, user_note=note)
@@ -289,6 +341,7 @@ def apply_proposal(
                     link_belongs_to_scaffold(conn, nid, _people_root(parent))
                     _link_knows(conn, ME_NODE, nid, note)
             _set_node_evidence(conn, nid, act_refs, float(act.get("confidence") or 0.8))
+            _mark_stability(conn, nid, stability)
             deltas.append(f"Added **{title}** to your graph from saved context.")
 
     gap_exhausted = _gap_resolved(conn, gap, gtype)
@@ -310,6 +363,8 @@ def try_fill_gap_from_corpus(
     gap: Dict[str, Any],
     *,
     data_dir: Optional[Path] = None,
+    mining_kind: str = "ongoing",
+    stability: str = "active",
 ) -> Dict[str, Any]:
     """
     Attempt to fill a gap from embedded corpus before asking the user.
@@ -326,10 +381,16 @@ def try_fill_gap_from_corpus(
         return {"status": "skipped", "reason": "no_evidence"}
 
     proposal, used_llm = propose_graph_actions_from_evidence(
-        conn, gap, pack, data_dir=data_dir
+        conn,
+        gap,
+        pack,
+        data_dir=data_dir,
+        mining_kind=mining_kind,
     )
     if not used_llm or not proposal:
         return {"status": "skipped", "reason": "llm_unavailable"}
+
+    proposal["stability"] = stability
 
     ok, reason = validate_proposal(proposal, gap, pack)
     if not ok:
@@ -397,6 +458,15 @@ def _gap_resolved(conn, gap: Dict[str, Any], gtype: Optional[str]) -> bool:
         ).fetchone()
         if row and row["summary"] and str(row["summary"]).strip() not in ("", "{}"):
             return True
+    if gtype in ("enrich", "me_profile") and gap.get("subject_id"):
+        row = conn.execute(
+            "SELECT summary, confidence FROM graph_nodes WHERE node_id=?",
+            (gap["subject_id"],),
+        ).fetchone()
+        if row and float(row["confidence"] or 0) >= 0.72:
+            raw = str(row["summary"] or "")
+            if raw and raw not in ("{}", "") and len(raw) > 15:
+                return True
     if gtype == "person_relation" and gap.get("subject_id"):
         row = conn.execute(
             "SELECT 1 FROM graph_edges WHERE from_node_id=? AND to_node_id=? "
@@ -482,3 +552,66 @@ def _insert_edge(
             now,
         ),
     )
+
+
+def _me_profile(conn, text: str, refs: List[str], *, stability: str = "core") -> None:
+    row = conn.execute(
+        "SELECT summary, source_refs_json, confidence FROM graph_nodes WHERE node_id=?",
+        (ME_NODE,),
+    ).fetchone()
+    if not row:
+        return
+    summary = _parse_summary_row(row["summary"])
+    summary["user_profile"] = text[:2000]
+    summary["stability"] = stability
+    summary["source"] = "corpus_infer"
+    refs_merged = list(
+        dict.fromkeys([*_parse_json_list(row["source_refs_json"]), *refs])
+    )[:20]
+    conf = max(float(row["confidence"] or 0), 0.78)
+    conn.execute(
+        "UPDATE graph_nodes SET summary=?, source_refs_json=?, confidence=?, updated_at=? "
+        "WHERE node_id=?",
+        (
+            json.dumps(summary, ensure_ascii=False),
+            json.dumps(refs_merged, ensure_ascii=False),
+            conf,
+            time.time(),
+            ME_NODE,
+        ),
+    )
+
+
+def _mark_stability(conn, node_id: str, stability: str) -> None:
+    row = conn.execute(
+        "SELECT summary FROM graph_nodes WHERE node_id=?", (node_id,)
+    ).fetchone()
+    if not row:
+        return
+    summary = _parse_summary_row(row["summary"])
+    summary["stability"] = stability
+    conn.execute(
+        "UPDATE graph_nodes SET summary=?, updated_at=? WHERE node_id=?",
+        (json.dumps(summary, ensure_ascii=False), time.time(), node_id),
+    )
+
+
+def _parse_summary_row(raw: Any) -> Dict[str, Any]:
+    text = str(raw or "").strip()
+    if text.startswith("{"):
+        try:
+            val = json.loads(text)
+            return val if isinstance(val, dict) else {"user_note": text}
+        except json.JSONDecodeError:
+            pass
+    return {"user_note": text} if text else {}
+
+
+def _parse_json_list(raw: Any) -> List[str]:
+    if not raw:
+        return []
+    try:
+        val = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return []
+    return [str(x) for x in val] if isinstance(val, list) else []

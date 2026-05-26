@@ -28,7 +28,15 @@ def prefetch_for_subject(
         model = _get_model(os.environ.get("MINION_EMBED_MODEL", DEFAULT_MODEL))
         vecs = _embed(model, [query], on_progress=lambda *_: None)
         if vecs.size:
-            for h in store_search(conn, vecs[0], top_k=top_k):
+            search_fn = store_search
+            if subject_id:
+                try:
+                    from graph_retrieval import neighborhood_search
+
+                    search_fn = lambda c, v, **kw: neighborhood_search(c, v, query, **kw)
+                except Exception:
+                    search_fn = store_search
+            for h in search_fn(conn, vecs[0], top_k=top_k):
                 hits.append(
                     {
                         "chunk_id": h.chunk_id,
@@ -78,6 +86,7 @@ def corpus_summary_line(corpus: Dict[str, Any], *, max_hits: int = 2) -> str:
     parts = []
     for h in hits[:max_hits]:
         path = str(h.get("path") or "note")
+        label = os.path.basename(path) or path
         snippet = (h.get("text") or "")[:80].replace("\n", " ")
-        parts.append(f"{path}: {snippet}")
+        parts.append(f"{label}: {snippet}" if snippet else label)
     return "From your notes — " + "; ".join(parts)

@@ -45,6 +45,26 @@ a {
   min-height: 100vh;
 }
 
+.shell--home {
+  grid-template-columns: 1fr;
+  min-height: 100dvh;
+  height: 100dvh;
+  background:
+    radial-gradient(ellipse 120% 80% at 50% -20%, color-mix(in srgb, var(--accent) 8%, transparent), transparent),
+    radial-gradient(ellipse 80% 50% at 100% 100%, color-mix(in srgb, #3d8f62 6%, transparent), transparent),
+    var(--bg);
+}
+
+.shell-main--home {
+  height: 100%;
+}
+
+.shell-content--home {
+  padding: 0;
+  height: 100%;
+  max-height: 100%;
+}
+
 .shell-nav {
   background: var(--panel);
   border-right: 1px solid var(--border);

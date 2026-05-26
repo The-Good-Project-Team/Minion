@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 from ambient_index import index_ax_from_stream
@@ -52,6 +53,12 @@ def _run_once(data_dir, conn_factory) -> None:
             finished_at=time.time(),
             items_count=int(amb.get("ingested", 0)) + int(ax.get("indexed", 0)),
         )
+        try:
+            from store import system_issue_resolve
+
+            system_issue_resolve(conn, "ambient-loop-error")
+        except Exception:
+            log.exception("failed to clear ambient-loop-error issue")
         if not os.environ.get("MINION_DISABLE_AMBIENT_SCHEDULER"):
             graph_signal = int(ax.get("indexed", 0) or 0) > 0
             try:
@@ -61,6 +68,29 @@ def _run_once(data_dir, conn_factory) -> None:
                 graph_signal = graph_signal or int(ev.get("contacts", 0) or 0) > 0
             except Exception:
                 log.exception("life evidence ingest failed")
+            try:
+                from graph_ambient import enrich_graph_from_ambient
+
+                amb_graph = enrich_graph_from_ambient(conn, Path(data_dir))
+                graph_signal = graph_signal or int(amb_graph.get("touched", 0) or 0) > 0
+                graph_signal = graph_signal or int(amb_graph.get("created", 0) or 0) > 0
+                if int(amb_graph.get("touched", 0) or 0) or int(amb_graph.get("created", 0) or 0):
+                    try:
+                        from graph_events import log_graph_event
+
+                        touched_n = int(amb_graph.get("touched", 0) or 0)
+                        created_n = int(amb_graph.get("created", 0) or 0)
+                        log_graph_event(
+                            data_dir,
+                            f"Ambient pass linked **{touched_n}** node(s)"
+                            + (f", **{created_n}** new" if created_n else "")
+                            + ".",
+                            action="ambient",
+                        )
+                    except Exception:
+                        log.debug("ambient graph event log failed", exc_info=True)
+            except Exception:
+                log.exception("ambient graph enrich failed")
             try:
                 from council_engine import evaluate_patterns
 
@@ -74,6 +104,19 @@ def _run_once(data_dir, conn_factory) -> None:
                     enqueue_graph_infer(conn, reason="ambient")
                 except Exception:
                     log.exception("graph infer enqueue after ambient failed")
+            try:
+                from graph_corpus_mine import graph_mine_enabled, mine_limits, run_graph_mine_tick
+
+                if graph_mine_enabled(Path(data_dir)):
+                    limits = mine_limits(Path(data_dir))
+                    run_graph_mine_tick(
+                        conn,
+                        Path(data_dir),
+                        max_llm_calls=limits.get("max_ambient_tick", 2),
+                        source="ambient",
+                    )
+            except Exception:
+                log.exception("ambient graph mine tick failed")
         conn.commit()
     except Exception:
         log.exception("ambient scheduler tick failed")

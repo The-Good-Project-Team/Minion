@@ -105,6 +105,26 @@ def test_ambient_events_since(conn) -> None:
     assert len(rows) >= 1
 
 
+def test_today_bundle_next_steps_from_corpus(conn, tmp_path: Path, monkeypatch) -> None:
+    def fake_prefetch(_conn, _data_dir, *, query_text, top_k=5, for_mcp=False):
+        _ = (query_text, top_k, for_mcp)
+        return [
+            {
+                "chunk_id": "c-kate",
+                "score": 0.67,
+                "path": "exports/kate.md",
+                "kind": "chatgpt-export",
+                "text": "Kate Larson V1 due tomorrow morning — LinkedIn CTA and practiceoflife.com fixes.",
+            }
+        ]
+
+    monkeypatch.setattr("second_brain._prefetch_memory_hits", fake_prefetch)
+    bundle = build_today_bundle(conn, tmp_path)
+    kinds = {i["kind"] for i in bundle["next_steps"]["items"]}
+    assert "corpus_signal" in kinds
+    assert bundle["next_steps"]["signals"]["corpus_signals"] >= 1
+
+
 def test_today_bundle_next_steps_from_tasks_and_screen(conn, tmp_path: Path) -> None:
     now = time.time()
     task_infer_insert(

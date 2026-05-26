@@ -139,6 +139,83 @@ def _recent_deadline_signals(
     return out
 
 
+_CORPUS_STEP_QUERIES = (
+    "deadline tomorrow morning review call urgent due ship",
+    "client deliverable website LinkedIn marketing launch",
+    "pitch video fundraising investor deck",
+    "Next.js migration website deploy ship padding",
+)
+
+
+def _corpus_next_step_signals(
+    conn,
+    data_dir: Path,
+    ambient: List[Dict[str, Any]],
+    *,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    """Surface deadline/project hints from embedded memory, not just live screen text."""
+    queries: List[str] = list(_CORPUS_STEP_QUERIES)
+    apps = Counter(
+        str((e.get("payload") or {}).get("app_name") or "")
+        for e in ambient
+        if (e.get("payload") or {}).get("app_name")
+    )
+    noisy = frozenset(
+        {
+            "",
+            "?",
+            "process_snapshot",
+            "mouse_event",
+            "keyboard_event",
+            "app_launched",
+        }
+    )
+    top_apps = [a for a, _ in apps.most_common(4) if a not in noisy]
+    if top_apps:
+        queries.append(f"{' '.join(top_apps[:3])} active work project")
+
+    pooled: Dict[str, Dict[str, Any]] = {}
+    for query in queries[:6]:
+        for hit in _prefetch_memory_hits(conn, data_dir, query_text=query, top_k=3):
+            chunk_id = str(hit.get("chunk_id") or "")
+            if not chunk_id:
+                continue
+            score = float(hit.get("score") or 0.0)
+            text = str(hit.get("text") or "")
+            if score < 0.42:
+                continue
+            if not _DEADLINE_RE.search(text) and score < 0.52:
+                continue
+            prev = pooled.get(chunk_id)
+            if prev is None or score > float(prev.get("score") or 0):
+                pooled[chunk_id] = {**hit, "query": query, "score": score}
+
+    ranked = sorted(pooled.values(), key=lambda h: float(h.get("score") or 0), reverse=True)
+    out: List[Dict[str, Any]] = []
+    for hit in ranked[:limit]:
+        score = float(hit.get("score") or 0.0)
+        text = str(hit.get("text") or "")
+        out.append(
+            {
+                "kind": "corpus_signal",
+                "title": _clip(text, 160),
+                "why": f"Saved context matches “{str(hit.get('query') or '')[:48]}” (score {score:.2f}).",
+                "confidence": round(min(0.92, score + 0.08), 2),
+                "evidence": [
+                    {
+                        "chunk_id": hit.get("chunk_id"),
+                        "path": hit.get("path"),
+                        "kind": hit.get("kind"),
+                        "score": score,
+                        "snippet": _clip(text, 220),
+                    }
+                ],
+            }
+        )
+    return out
+
+
 def build_next_steps(
     conn,
     data_dir: Path,
@@ -146,8 +223,7 @@ def build_next_steps(
     now_ts: Optional[float] = None,
     limit: int = 5,
 ) -> Dict[str, Any]:
-    """Rank near-term work from local screen context, tasks, and system health."""
-    _ = data_dir
+    """Rank near-term work from local screen context, tasks, corpus, and system health."""
     now = float(now_ts or time.time())
     since_36h = now - 36 * 3600.0
     try:
@@ -203,6 +279,9 @@ def build_next_steps(
             }
         )
 
+    corpus_signals = _corpus_next_step_signals(conn, data_dir, ambient, limit=3)
+    items.extend(corpus_signals)
+
     items.sort(key=lambda x: float(x.get("confidence") or 0), reverse=True)
     return {
         "items": items[: max(1, min(limit, 12))],
@@ -210,6 +289,7 @@ def build_next_steps(
             "ambient_events_scanned": len(ambient),
             "deadline_signals": len(deadline_signals),
             "task_candidates": len(tasks),
+            "corpus_signals": len(corpus_signals),
         },
         "generated_at": now,
     }
@@ -271,8 +351,10 @@ def build_working_context(
         except Exception:
             pass
     graph_excerpt: Dict[str, Any] = {}
+    graph_spine_md = ""
     try:
         from graph_context import build_graph_context
+        from graph_ambient import build_graph_spine
 
         gc = build_graph_context(conn, data_dir, max_candidates=3)
         graph_excerpt = {
@@ -282,6 +364,7 @@ def build_working_context(
             "open_candidates": (gc.get("open_candidates") or [])[:3],
             "has_fill_gap": (gc.get("graph") or {}).get("has_fill_gap", False),
         }
+        graph_spine_md = (build_graph_spine(conn, data_dir).get("spine_md") or "")[:1200]
     except Exception:
         graph_excerpt = {}
 
@@ -302,6 +385,7 @@ def build_working_context(
         },
         "related_memory": memory_hits,
         "graph_context": graph_excerpt,
+        "graph_spine_md": graph_spine_md,
         "identity_excerpt": claim_excerpt,
         "open_council_proposals": council_excerpt,
         "composed_at": time.time(),

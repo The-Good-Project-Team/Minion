@@ -4,6 +4,7 @@
   let { graph = null }: { graph?: GraphScaffoldResponse | null } = $props();
 
   const highlights = $derived(graph?.highlights ?? []);
+  const active = $derived(graph?.spine?.active_nodes ?? []);
   const total = $derived(graph?.user_node_count ?? 0);
   const ft = $derived(graph?.forty_two);
 </script>
@@ -16,6 +17,18 @@
 
   {#if ft?.active_thread_id && ft?.question_preview}
     <a class="graph-cta" href="/">{ft.question_preview}</a>
+  {/if}
+
+  {#if active.length}
+    <p class="graph-sub">Recently active</p>
+    <ul class="graph-list">
+      {#each active.slice(0, 4) as n (n.node_id)}
+        <li>
+          <span class="k">{n.node_kind}</span>
+          <span class="t">{n.title}</span>
+        </li>
+      {/each}
+    </ul>
   {/if}
 
   {#if highlights.length}
@@ -62,6 +75,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .graph-sub {
+    margin: 0;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
   }
   .graph-list {
     list-style: none;

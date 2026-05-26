@@ -29,6 +29,10 @@ def ensure_person_node(
     meta: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Find or create a person under People scaffold."""
+    from graph_fill import _is_plausible_graph_title
+
+    if not _is_plausible_graph_title(label, node_kind="person"):
+        raise ValueError(f"implausible person label: {label!r}")
     parent_id = "scaffold-people-friends"
     meta_in = dict(meta or {})
     identifiers = _person_identifiers(external_id=external_id, meta=meta_in)

@@ -45,6 +45,13 @@ def build_graph_context(
             ]
         except Exception:
             related_memory = []
+    spine = {}
+    try:
+        from graph_ambient import build_graph_spine
+
+        spine = build_graph_spine(conn, data_dir)
+    except Exception:
+        spine = {}
     return {
         "graph": {
             "user_node_count": scaffold.get("user_node_count", 0),
@@ -53,6 +60,7 @@ def build_graph_context(
             "has_fill_gap": next_gap is not None,
             "next_gap": next_gap,
         },
+        "spine": spine,
         "open_candidates": candidates,
         "focus": focus,
         "recent_ambient": recent,

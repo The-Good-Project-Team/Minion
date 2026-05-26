@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 # Pro default: ~288 scheduler ticks/day + replies stays well under typical 1.5k RPD caps.
 DEFAULT_MODEL = "gemini-2.5-pro"
 FORTY_TWO_DEFAULT_MODEL = "gemini-2.5-pro"
+GRAPH_MINE_DEFAULT_MODEL = "gemini-2.5-flash"
 FALLBACK_MODEL = "gemini-2.5-flash"  # when Pro hits free-tier / quota limits
 _API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
@@ -71,6 +72,13 @@ def forty_two_gemini_model(data_dir: Optional[Path] = None) -> str:
     if env:
         return env
     return _model_from_settings(data_dir, "forty_two_gemini_model", FORTY_TWO_DEFAULT_MODEL)
+
+
+def graph_mine_gemini_model(data_dir: Optional[Path] = None) -> str:
+    env = (os.environ.get("MINION_MINE_GEMINI_MODEL") or "").strip()
+    if env:
+        return env
+    return _model_from_settings(data_dir, "graph_mine_gemini_model", GRAPH_MINE_DEFAULT_MODEL)
 
 
 def _post_json(url: str, payload: Dict[str, Any], *, timeout: float) -> Any:
@@ -144,42 +152,48 @@ def gemini_chat(
     temperature: float = 0.45,
     max_output_tokens: int = 700,
     timeout_seconds: float = 60.0,
+    response_mime_type: Optional[str] = None,
+    response_schema: Optional[Dict[str, Any]] = None,
 ) -> str:
     key = gemini_api_key(data_dir)
     if not key:
         raise RuntimeError("gemini_not_configured")
-    mdl = model or gemini_model(data_dir)
-    payload: Dict[str, Any] = {
-        "systemInstruction": {"parts": [{"text": system}]},
-        "contents": _build_contents(messages),
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_output_tokens,
-        },
-    }
-    try:
-        body = _generate(
-            key=key, mdl=mdl, payload=payload, timeout_seconds=timeout_seconds, stream=False
-        )
-    except (urllib.error.HTTPError, RuntimeError) as e:
-        if _should_fallback(e, mdl):
-            log.info("gemini %s unavailable, falling back to %s", mdl, FALLBACK_MODEL)
-            try:
-                body = _generate(
-                    key=key,
-                    mdl=FALLBACK_MODEL,
-                    payload=payload,
-                    timeout_seconds=timeout_seconds,
-                    stream=False,
-                )
-            except (urllib.error.HTTPError, RuntimeError) as e2:
-                raise _as_runtime_error(e2) from e2
-        else:
+    primary = model or gemini_model(data_dir)
+    attempts: List[tuple[str, int]] = [(primary, max_output_tokens)]
+    if primary != FALLBACK_MODEL:
+        attempts.append((FALLBACK_MODEL, max(max_output_tokens, 8192)))
+    last_body: Any = None
+    for mdl, tok in attempts:
+        payload: Dict[str, Any] = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": _build_contents(messages),
+            "generationConfig": _generation_config(
+                temperature=temperature,
+                max_output_tokens=tok,
+                response_mime_type=response_mime_type,
+                response_schema=response_schema,
+            ),
+        }
+        try:
+            body = _generate(
+                key=key, mdl=mdl, payload=payload, timeout_seconds=timeout_seconds, stream=False
+            )
+        except (urllib.error.HTTPError, RuntimeError) as e:
+            if _should_fallback(e, mdl) and mdl != FALLBACK_MODEL:
+                log.info("gemini %s unavailable, trying %s", mdl, FALLBACK_MODEL)
+                continue
             raise _as_runtime_error(e) from e
-    text = _extract_text(body)
-    if not text.strip():
-        raise RuntimeError("gemini_empty_response")
-    return text.strip()
+        last_body = body
+        text = _extract_text(body)
+        if text.strip():
+            return text.strip()
+        log.warning(
+            "gemini empty text model=%s finish=%s usage=%s",
+            mdl,
+            _finish_reason(body),
+            body.get("usageMetadata") if isinstance(body, dict) else None,
+        )
+    raise RuntimeError("gemini_empty_response")
 
 
 def gemini_chat_stream(
@@ -199,10 +213,10 @@ def gemini_chat_stream(
     payload: Dict[str, Any] = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": _build_contents(messages),
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_output_tokens,
-        },
+        "generationConfig": _generation_config(
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        ),
     }
     try:
         resp = _generate(
@@ -253,3 +267,30 @@ def _extract_text(body: Any) -> str:
         if isinstance(p, dict) and isinstance(p.get("text"), str):
             texts.append(p["text"])
     return "".join(texts)
+
+
+def _finish_reason(body: Any) -> str:
+    if not isinstance(body, dict):
+        return ""
+    candidates = body.get("candidates") or []
+    if not candidates:
+        return ""
+    return str((candidates[0] or {}).get("finishReason") or "")
+
+
+def _generation_config(
+    *,
+    temperature: float,
+    max_output_tokens: int,
+    response_mime_type: Optional[str] = None,
+    response_schema: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    gen: Dict[str, Any] = {
+        "temperature": temperature,
+        "maxOutputTokens": max_output_tokens,
+    }
+    if response_mime_type:
+        gen["responseMimeType"] = response_mime_type
+    if response_schema:
+        gen["responseSchema"] = response_schema
+    return gen

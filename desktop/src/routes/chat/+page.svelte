@@ -1,5 +1,5 @@
 <script lang="ts">
-  import ChatHome from "$lib/components/ChatHome.svelte";
+  import HomeFeed from "$lib/components/HomeFeed.svelte";
 </script>
 
-<ChatHome />
+<HomeFeed />

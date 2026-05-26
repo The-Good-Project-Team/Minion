@@ -100,7 +100,7 @@
     <textarea
       bind:value={draft}
       rows="2"
-      placeholder={activeThreadId ? "Message #life" : "Message #life"}
+      placeholder="Reply…"
       disabled={busy || streaming || !activeThreadId}
       onkeydown={onKeydown}
     ></textarea>
@@ -112,48 +112,68 @@
 
 <style>
   .composer {
-    position: sticky;
-    bottom: 0;
-    margin-top: 0.5rem;
-    padding-top: 0.5rem;
-    border-top: 1px solid var(--border);
-    background: var(--bg);
+    margin-top: 0;
+    padding: 0.65rem 0 0;
   }
   .chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.3rem;
-    margin-bottom: 0.4rem;
+    gap: 0.35rem;
+    margin-bottom: 0.5rem;
   }
   .chip {
     font-size: 0.75rem;
-    padding: 0.15rem 0.5rem;
+    padding: 0.22rem 0.62rem;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--panel);
     cursor: pointer;
+    transition:
+      border-color 0.12s ease,
+      background 0.12s ease;
+  }
+  .chip:hover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
   }
   .row {
     display: flex;
-    gap: 0.45rem;
+    gap: 0.5rem;
     align-items: flex-end;
+    padding: 0.45rem;
+    border-radius: calc(var(--radius) + 4px);
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--panel) 92%, white);
+    box-shadow: var(--shadow-s);
   }
   textarea {
     flex: 1;
     font: inherit;
-    font-size: 0.88rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 0.4rem 0.5rem;
+    font-size: 0.9rem;
+    border: none;
+    background: transparent;
+    padding: 0.35rem 0.25rem;
     resize: none;
+    outline: none;
+    min-height: 2.5rem;
+  }
+  textarea::placeholder {
+    color: var(--muted);
   }
   .btn-send {
     background: var(--accent);
     color: white;
     border: none;
     border-radius: var(--radius);
-    padding: 0.45rem 0.7rem;
-    font-size: 0.8rem;
+    padding: 0.5rem 0.85rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .btn-send:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .composer-err {
     color: var(--danger);

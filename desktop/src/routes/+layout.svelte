@@ -168,6 +168,8 @@
     return p === "/" || p === "/activity" || p === "/chat";
   }
 
+  const home = $derived(isHome());
+
   function isActive(href: string): boolean {
     return $page.url.pathname === href || $page.url.pathname.startsWith(href + "/");
   }
@@ -191,19 +193,21 @@
   </div>
 {/if}
 
-<div class="shell">
-  <aside class="shell-nav">
-    <a class="shell-brand" class:active={isHome()} href="/">
-      <img src="/minion.png" alt="" />
-      <span>Minion</span>
-    </a>
-    {#each nav as item}
-      <a class="nav-link" class:active={isActive(item.href)} href={item.href}>{item.label}</a>
-    {/each}
-    <GraphScaffold graph={graphData} />
-  </aside>
-  <div class="shell-main">
-    {#if menuStatus?.should_notify && menuStatus.next_question}
+<div class="shell" class:shell--home={home}>
+  {#if !home}
+    <aside class="shell-nav">
+      <a class="shell-brand" href="/">
+        <img src="/minion.png" alt="" />
+        <span>Minion</span>
+      </a>
+      {#each nav as item}
+        <a class="nav-link" class:active={isActive(item.href)} href={item.href}>{item.label}</a>
+      {/each}
+      <GraphScaffold graph={graphData} />
+    </aside>
+  {/if}
+  <div class="shell-main" class:shell-main--home={home}>
+    {#if !home && menuStatus?.should_notify && menuStatus.next_question}
       <div class="question-bar">
         <div class="question-copy">
           <strong>{menuStatus.next_question.title}</strong>
@@ -214,8 +218,10 @@
         <a class="question-link" href="/">Open</a>
       </div>
     {/if}
-    <FocusBanner {screenWatch} {status} livePulse={screenLive} {wakeHighlight} />
-    <div class="shell-content">
+    {#if !home}
+      <FocusBanner {screenWatch} {status} livePulse={screenLive} {wakeHighlight} />
+    {/if}
+    <div class="shell-content" class:shell-content--home={home}>
       <slot />
     </div>
   </div>

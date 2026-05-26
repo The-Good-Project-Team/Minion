@@ -142,6 +142,11 @@ def _default() -> Dict[str, Any]:
         "forty_two_interval_sec": 300,
         "gemini_model": "gemini-2.5-pro",
         "forty_two_gemini_model": "gemini-2.5-pro",
+        "graph_mine_gemini_model": "gemini-2.5-flash",
+        "graph_mine_enabled": True,
+        "graph_mine_max_calls_per_day": 96,
+        "graph_mine_max_calls_per_tick": 2,
+        "graph_mine_42_max_calls_per_tick": 4,
     }
 
 
