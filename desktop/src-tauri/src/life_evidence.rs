@@ -37,25 +37,24 @@ pub fn snapshot_life_evidence(data_dir: String) -> Result<serde_json::Value, Str
 
 #[cfg(target_os = "macos")]
 fn macos_contacts_snapshot() -> Vec<serde_json::Value> {
-    // v1: AppleScript bridge — avoids extra Rust deps; replace with Contacts framework later.
+    // v1: AppleScript bridge — fetch names in one call, then let Rust handle JSON escaping.
     let script = r#"
-        set out to "["
-        set sep to ""
-        tell application "Contacts"
-            repeat with p in people
-                set nm to ""
-                try
-                    set nm to name of p
-                end try
-                if nm is not "" then
-                    set out to out & sep & "{\"display_name\":\"" & nm & "\"}"
-                    set sep to ","
-                end if
-            end repeat
-        end tell
-        return out & "]"
+        set oldDelims to AppleScript's text item delimiters
+        set AppleScript's text item delimiters to (ASCII character 10)
+        tell application "Contacts" to set namesList to name of every person
+        set outText to namesList as text
+        set AppleScript's text item delimiters to oldDelims
+        return outText
     "#;
-    run_applescript_json_array(script).unwrap_or_default()
+    run_applescript_text(script)
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(|name| serde_json::json!({"display_name": name, "source": "macos_contacts"}))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "macos")]
@@ -90,4 +89,18 @@ fn run_applescript_json_array(script: &str) -> Option<Vec<serde_json::Value>> {
     }
     let s = String::from_utf8_lossy(&out.stdout);
     serde_json::from_str(s.trim()).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn run_applescript_text(script: &str) -> Option<String> {
+    use std::process::Command;
+    let out = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
 }

@@ -105,10 +105,10 @@ def _next_question_payload(
     if gap:
         label = gap.get("label") or gap.get("bucket_label") or gap.get("kind") or "graph gap"
         return {
-            "kind": "graph_gap",
-            "title": f"Fill graph: {label}",
-            "body": f"Answer one line about {label} so Minion can fill the graph.",
-            "action": "open_42",
+            "kind": "graph_candidate",
+            "title": f"Graph needs: {label}",
+            "body": f"Review or add {label} via graph candidates.",
+            "action": "resolve_graph_candidate",
             "gap": gap,
         }
     return None

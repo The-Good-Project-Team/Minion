@@ -6,7 +6,7 @@ process.env.E2E_API_PORT = E2E_API_PORT;
 
 /**
  * Browser UI QA: Vite + real Python sidecar (see scripts/run-e2e-stack.sh).
- * Exercises Svelte + HTTP; not a substitute for full native Tauri integration tests.
+ * Exercises React + HTTP; not a substitute for full native Tauri integration tests.
  */
 export default defineConfig({
   testDir: "e2e",

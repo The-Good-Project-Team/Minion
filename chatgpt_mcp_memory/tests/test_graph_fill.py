@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from forty_two import next_question, reply
-from graph_fill import apply_answer, open_thread_for_gap, pick_next_gap
+from graph_fill import _is_plausible_graph_title, apply_answer, open_thread_for_gap, pick_next_gap
 from store import _new_id, connect, seed_sync_sources
 
 
@@ -122,3 +122,9 @@ def test_bucket_rejects_greeting_as_name(conn) -> None:
         "AND status NOT IN ('scaffold', 'stub')"
     ).fetchone()
     assert int(row["c"]) == 0
+
+
+def test_person_title_filter_rejects_tool_and_markdown_labels() -> None:
+    assert _is_plausible_graph_title("A. Kim", node_kind="person")
+    assert not _is_plausible_graph_title("`reiftauati", node_kind="person")
+    assert not _is_plausible_graph_title("Openai Codex:reiftauati", node_kind="person")

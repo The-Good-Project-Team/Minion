@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Minion",
-  "version": "1.0.3",
+  "version": "2.0.0",
   "identifier": "dev.minion",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bash src-tauri/scripts/sync_sidecar.sh && bun run build",
+    "beforeBuildCommand": "bash src-tauri/scripts/sync_sidecar.sh && npm run build",
     "frontendDist": "../build"
   },
   "app": {

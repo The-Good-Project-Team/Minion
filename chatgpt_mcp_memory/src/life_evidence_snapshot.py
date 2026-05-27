@@ -81,26 +81,19 @@ def _macos_contacts_list() -> List[Dict[str, Any]]:
     if platform.system() != "Darwin":
         return []
     script = r'''
-        set out to ""
-        tell application "Contacts"
-            repeat with p in people
-                set nm to ""
-                try
-                    set nm to name of p
-                end try
-                if nm is not "" then
-                    set out to out & nm & (ASCII character 10)
-                end if
-            end repeat
-        end tell
-        return out
+        set oldDelims to AppleScript's text item delimiters
+        set AppleScript's text item delimiters to (ASCII character 10)
+        tell application "Contacts" to set namesList to name of every person
+        set outText to namesList as text
+        set AppleScript's text item delimiters to oldDelims
+        return outText
     '''
     try:
         proc = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True,
             text=True,
-            timeout=8,
+            timeout=30,
             check=False,
         )
     except Exception:

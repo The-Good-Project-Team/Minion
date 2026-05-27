@@ -35,6 +35,7 @@ Run what applies — **do not hand results back as finished without executing or
 | Desktop unit | `cd desktop && npm run test:unit` |
 
 Optional after risky UI changes: `cd desktop && npm run test:e2e` (Playwright stack).
+Optional live smoke: `cd desktop && npm run test:live` (status/feed/graph/screen-memory readiness; starts a quiet local sidecar if needed), or `npm run test:live -- --mutating` to also exercise live `remember-screen` without screenshots/adapters.
 
 Use **`chatgpt_mcp_memory/.venv/bin/python`**, not bare macOS `python3`, for pytest (SQLite extension preflight).
 

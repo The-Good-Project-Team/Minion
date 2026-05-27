@@ -77,9 +77,11 @@ def enrich_graph_from_ambient(
                 payload = json.loads(payload)
             except json.JSONDecodeError:
                 payload = {}
+        app = str(payload.get("app_name") or payload.get("app") or "").strip()
+        if _skip_payload(payload, app):
+            continue
         parsed.append((event, payload))
         title = _norm_title(payload.get("window_title") or payload.get("title") or "")
-        app = str(payload.get("app_name") or payload.get("app") or "").strip()
         if title and not _skip_title(title, app):
             title_counts[title] += 1
 
@@ -244,6 +246,16 @@ def build_graph_spine(
         for n in active[:5]:
             hint = n.get("attention_hint") or n.get("summary_snippet") or ""
             spine_lines.append(f"- {n.get('node_kind')} **{n.get('title')}** — {hint[:80]}")
+
+    if data_dir is not None:
+        try:
+            from graphify_adapter import graphify_spine_section
+
+            extra = graphify_spine_section(Path(data_dir))
+            if extra:
+                spine_lines.append(extra)
+        except Exception:
+            log.debug("graphify spine section skipped", exc_info=True)
 
     return {
         "totals": totals,
@@ -414,7 +426,7 @@ def _extract_emails(payload: Dict[str, Any]) -> List[str]:
         raw = payload.get(key)
         if isinstance(raw, list):
             found.extend(str(x).strip() for x in raw if x)
-    for key in ("excerpt", "ax_text_sample", "text", "page_text"):
+    for key in ("excerpt", "text_excerpt", "summary", "ax_text_sample", "text", "page_text"):
         text = str(payload.get(key) or "")
         found.extend(_EMAIL_RE.findall(text))
     return list(dict.fromkeys(e for e in found if "@" in e))[:5]
@@ -461,6 +473,26 @@ def _skip_title(title: str, app: str) -> bool:
     if app.lower() in _SKIP_APPS:
         return True
     return any(s in lower for s in _SKIP_TITLE_SUBSTR)
+
+
+def _skip_payload(payload: Dict[str, Any], app: str) -> bool:
+    if app.lower() in {"minion", "minion-desktop"}:
+        return True
+    text = "\n".join(
+        str(payload.get(k) or "")
+        for k in ("window_title", "title", "summary", "text_excerpt", "ax_text_sample", "dom_text_sample", "text")
+    ).lower()
+    if not text:
+        return False
+    markers = (
+        "linked recent attention",
+        "ambient pass linked",
+        "filled so far:",
+        "recently active:",
+        "no contact in",
+        "send?\nedit\nsnooze\ndismiss",
+    )
+    return any(m in text for m in markers)
 
 
 def _looks_like_project(title: str) -> bool:

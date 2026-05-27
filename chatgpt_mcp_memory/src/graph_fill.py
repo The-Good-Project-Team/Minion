@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -190,7 +191,10 @@ def apply_graph_candidate_resolution(
     deltas: List[str] = []
     node_id = ""
 
-    if status in ("approved", "merged") and candidate.get("candidate_type") == "screen_entity":
+    if status in ("approved", "merged") and candidate.get("candidate_type") in (
+        "screen_entity",
+        "evidence_person",
+    ):
         result = _apply_screen_entity_candidate(conn, candidate, merge)
         if not result.get("ok"):
             return result
@@ -990,6 +994,8 @@ _PHRASE_FILLER = frozenset(
     }
 )
 
+_PERSON_TOOL_WORDS = frozenset({"openai", "codex", "chatgpt", "claude", "cursor"})
+
 
 def _is_plausible_graph_title(text: str, *, node_kind: str = "person") -> bool:
     """Reject greetings and filler when 42 expects a real graph label."""
@@ -1004,6 +1010,10 @@ def _is_plausible_graph_title(text: str, *, node_kind: str = "person") -> bool:
     if all(t in _FILLER_WORDS for t in tokens):
         return False
     if node_kind == "person":
+        if re.search(r"[`:@/\\]", phrase) or re.match(r"^[^\w]+", phrase):
+            return False
+        if any(t in _PERSON_TOOL_WORDS for t in tokens):
+            return False
         nameish = [t for t in tokens if len(t) >= 2 and t not in _FILLER_WORDS]
         if not nameish:
             return False

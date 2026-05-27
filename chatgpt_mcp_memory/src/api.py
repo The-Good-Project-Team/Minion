@@ -23,6 +23,10 @@ Endpoints:
   GET  /graph/context               -> graph-first compact context for local/LLM clients
   GET  /graph/candidates            -> unresolved graph merge/fact candidates
   POST /graph/candidates/{id}/resolve -> approve/reject/dismiss/merge a candidate
+  GET  /graphify/status             -> Graphify CLI + shadow graph paths
+  POST /graphify/shadow-build       -> bundle, extract, import graph_candidates only
+  POST /graphify/reconcile          -> consistent scan + shadow/durable graph diff
+  GET  /context/bundle              -> unified context (graph, evidence, candidates, retrieval)
   GET  /menu/status                  -> menu-bar badge/status payload
   POST /screen-memory/remember       -> ingest screen stream, AX text, screenshot OCR fallbacks
   GET  /screen-memory/search         -> semantic search over screen-derived memory
@@ -979,6 +983,9 @@ def capabilities() -> Dict[str, Any]:
             "ambient_events": "GET /ambient/events",
             "feed": "GET /feed",
             "graph_scaffold": "GET /graph/scaffold",
+            "graphify_status": "GET /graphify/status",
+            "graphify_shadow_build": "POST /graphify/shadow-build",
+            "graphify_reconcile": "POST /graphify/reconcile",
             "storage_report": "POST /maintenance/storage-report",
             "storage_tier_promote_stale": "POST /maintenance/storage-tier-promote-stale",
             "diagnostics_about": "GET /diagnostics/about",
@@ -1559,13 +1566,27 @@ def activity_feed(limit: int = 80, since_hours: float = 48.0) -> Dict[str, Any]:
 
 @app.post("/life-evidence/refresh")
 def life_evidence_refresh(force: bool = False) -> Dict[str, Any]:
-    """Refresh macOS Contacts snapshot into life_evidence/ (for 42 suggestions)."""
+    """Refresh Contacts/Calendar snapshots, then index them into the graph."""
+    from life_evidence_index import ingest_life_evidence
     from life_evidence_snapshot import refresh_life_evidence_if_stale
 
     max_age = 0.0 if force else 6 * 3600
     out = refresh_life_evidence_if_stale(State.data_dir, max_age_sec=max_age)
+    indexed = ingest_life_evidence(State.data_dir, State.conn())
+    out["indexed_contacts"] = indexed.get("contacts", 0)
+    out["indexed_calendar"] = indexed.get("calendar", 0)
     State.conn().commit()
     return out
+
+
+@app.post("/life-evidence/ingest")
+def life_evidence_ingest() -> Dict[str, Any]:
+    """Index existing life_evidence JSON snapshots into the graph."""
+    from life_evidence_index import ingest_life_evidence
+
+    out = ingest_life_evidence(State.data_dir, State.conn())
+    State.conn().commit()
+    return {"indexed_contacts": out.get("contacts", 0), "indexed_calendar": out.get("calendar", 0)}
 
 
 class CouncilApproveBody(BaseModel):
@@ -1624,10 +1645,44 @@ def graph_context(subject: str = "") -> Dict[str, Any]:
     return build_graph_context(State.conn(), State.data_dir, subject=subject)
 
 
+@app.get("/context/bundle")
+def context_bundle_route(subject: str = "") -> Dict[str, Any]:
+    from context_core import context_bundle
+
+    return context_bundle(State.conn(), State.data_dir, subject=subject)
+
+
 @app.get("/graph/candidates")
 def graph_candidates(status: str = "open", limit: int = 50) -> Dict[str, Any]:
     rows = graph_candidate_list(State.conn(), status=status, limit=limit)
     return {"candidates": rows, "count": len(rows)}
+
+
+@app.get("/graphify/status")
+def graphify_status() -> Dict[str, Any]:
+    from graphify_adapter import status as graphify_status_fn
+
+    return graphify_status_fn(State.data_dir)
+
+
+@app.post("/graphify/shadow-build")
+def graphify_shadow_build() -> Dict[str, Any]:
+    from graphify_adapter import run_graphify_shadow
+
+    conn = State.conn()
+    result = run_graphify_shadow(conn, State.data_dir)
+    conn.commit()
+    return result
+
+
+@app.post("/graphify/reconcile")
+def graphify_reconcile() -> Dict[str, Any]:
+    from graphify_adapter import reconcile_graph_truth
+
+    conn = State.conn()
+    result = reconcile_graph_truth(conn, State.data_dir)
+    conn.commit()
+    return result
 
 
 @app.post("/graph/candidates/{candidate_id}/resolve")
@@ -1705,6 +1760,7 @@ class FortyTwoReplyBody(BaseModel):
 
 
 @app.post("/chat/42/next")
+@app.post("/chat/agent/next")
 def chat_forty_two_next() -> Dict[str, Any]:
     import forty_two
 
@@ -1720,7 +1776,7 @@ def _resolve_forty_two_thread_id(body: FortyTwoReplyBody) -> str:
     if not tid:
         active = forty_two.active_thread(State.conn())
         if not active:
-            raise HTTPException(status_code=400, detail="no active thread; call /chat/42/next")
+            raise HTTPException(status_code=400, detail="no active thread; call /chat/agent/next")
         tid = active["thread_id"]
     return tid
 
@@ -1763,6 +1819,7 @@ def _chat_sse_response(event_iter) -> StreamingResponse:
 
 
 @app.post("/chat/42/reply")
+@app.post("/chat/agent/reply")
 def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
     import forty_two
 
@@ -1793,6 +1850,7 @@ def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
 
 
 @app.post("/chat/42/reply/stream")
+@app.post("/chat/agent/reply/stream")
 def chat_forty_two_reply_stream(body: FortyTwoReplyBody) -> StreamingResponse:
     import forty_two
 
@@ -1811,6 +1869,7 @@ def chat_forty_two_reply_stream(body: FortyTwoReplyBody) -> StreamingResponse:
 
 
 @app.post("/chat/42/dismiss")
+@app.post("/chat/agent/dismiss")
 def chat_forty_two_dismiss(body: FortyTwoReplyBody) -> Dict[str, Any]:
     import forty_two
 

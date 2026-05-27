@@ -7,6 +7,7 @@ import json
 import pytest
 
 from entity_resolution import ensure_person_node, ingest_contacts_snapshot
+from life_evidence_index import ingest_life_evidence
 from graph_fill import apply_graph_candidate_resolution
 from store import connect, graph_candidate_list, seed_sync_sources
 
@@ -101,3 +102,27 @@ def test_approved_person_merge_writes_incoming_identifiers_to_graph(conn, tmp_pa
     assert "same Jordan from Messages" in summary["user_note"]
     assert "chunk:m1" in refs
     assert graph_candidate_list(conn) == []
+
+
+def test_life_evidence_ingest_writes_contacts_to_graph(conn, tmp_path: Path) -> None:
+    evidence = tmp_path / "life_evidence"
+    evidence.mkdir()
+    (evidence / "contacts_latest.json").write_text(
+        json.dumps(
+            [
+                {"display_name": "Meri Metcalf", "source": "macos_contacts"},
+                {"display_name": "roshan@biktrix.com", "source": "macos_contacts"},
+                {"display_name": "Ali Rashad", "source": "macos_contacts"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    out = ingest_life_evidence(tmp_path, conn)
+    conn.commit()
+
+    assert out["contacts"] == 2
+    rows = conn.execute(
+        "SELECT title FROM graph_nodes WHERE node_kind='person' AND title IN ('Meri Metcalf', 'Ali Rashad')"
+    ).fetchall()
+    assert {r["title"] for r in rows} == {"Meri Metcalf", "Ali Rashad"}

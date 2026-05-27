@@ -93,6 +93,36 @@ def test_enrich_graph_touches_existing_person(conn, tmp_path: Path) -> None:
     assert meta.get("recent_attention")
 
 
+def test_enrich_graph_skips_minion_activity_echo(conn, tmp_path: Path) -> None:
+    from entity_resolution import ensure_person_node, link_belongs_to_scaffold
+
+    pid = ensure_person_node(conn, label="Amy")
+    link_belongs_to_scaffold(conn, pid)
+    now = time.time()
+    ambient_event_insert_ignore(
+        conn,
+        event_type="clipboard_event",
+        captured_at=now,
+        dedupe_key=f"clip:minion-echo:{now}",
+        payload={
+            "app_name": "Cursor",
+            "window_title": "Cursor",
+            "text_excerpt": (
+                "42\nLinked recent attention to **Amy**.\n"
+                "Ambient pass linked **3** node(s).\n"
+                "Recently active: Amy, Openai Codex:reiftauati."
+            ),
+        },
+    )
+    conn.commit()
+    out = enrich_graph_from_ambient(conn, tmp_path, since_hours=1)
+    assert out["signals"] == 0
+    summary = conn.execute(
+        "SELECT summary FROM graph_nodes WHERE node_id=?", (pid,)
+    ).fetchone()["summary"]
+    assert "recent_attention" not in json.loads(summary)
+
+
 def test_build_graph_spine_lists_buckets(conn, tmp_path: Path) -> None:
     from entity_resolution import ensure_person_node, link_belongs_to_scaffold
 

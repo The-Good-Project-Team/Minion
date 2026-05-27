@@ -141,14 +141,25 @@ export async function screenContextStatus(): Promise<ScreenContextStatus> {
 export async function snapshotLifeEvidence(): Promise<{
   contacts: number;
   events: number;
+  indexed_contacts?: number;
+  indexed_calendar?: number;
   skipped?: string;
 }> {
   const cfg = await getConfig();
-  return (await invoke("snapshot_life_evidence", { dataDir: cfg.data_dir })) as {
+  const snap = (await invoke("snapshot_life_evidence", { dataDir: cfg.data_dir })) as {
     contacts: number;
     events: number;
     skipped?: string;
   };
+  try {
+    const indexed = await apiFetch<{ indexed_contacts: number; indexed_calendar: number }>(
+      "/life-evidence/ingest",
+      { method: "POST" }
+    );
+    return { ...snap, ...indexed };
+  } catch {
+    return snap;
+  }
 }
 
 async function assertSidecarHasNukeRoute(apiBase: string): Promise<void> {
@@ -1039,7 +1050,7 @@ export type GraphScaffoldResponse = {
   highlights?: GraphHighlight[];
   user_node_count?: number;
   has_fill_gap?: boolean;
-  forty_two?: {
+  agent?: {
     active_thread_id?: string | null;
     needs_question?: boolean;
     question_preview?: string;
@@ -1216,13 +1227,13 @@ export type CouncilFeedItem = {
 
 export type FeedRow = FeedItem | CouncilFeedItem;
 
-export type FortyTwoSuggestion = { name: string; source?: string };
+export type AgentSuggestion = { name: string; source?: string };
 
-export type FortyTwoStreamState = {
+export type AgentStreamState = {
   active_thread_id: string | null;
   needs_question: boolean;
   open_count: number;
-  suggestions?: FortyTwoSuggestion[];
+  suggestions?: AgentSuggestion[];
   question_body_md?: string;
   has_gap?: boolean;
 };
@@ -1233,7 +1244,7 @@ export type ActivityFeedBundle = {
   council_items?: CouncilFeedItem[];
   memory_prefetch: FeedItem[];
   graph: GraphScaffoldResponse;
-  forty_two?: FortyTwoStreamState;
+  agent?: AgentStreamState;
   composed_at: number;
   since_ts: number;
 };
@@ -1274,23 +1285,23 @@ export async function chatNextThread(): Promise<{ thread: ChatThread | null; cre
   return apiFetch("/chat/threads/next", { method: "POST", body: "{}" });
 }
 
-export async function fortyTwoNext(): Promise<{ thread: ChatThread | null; created: boolean }> {
-  return apiFetch("/chat/42/next", { method: "POST", body: "{}" });
+export async function agentNext(): Promise<{ thread: ChatThread | null; created: boolean }> {
+  return apiFetch("/chat/agent/next", { method: "POST", body: "{}" });
 }
 
-export async function fortyTwoReply(
+export async function agentReply(
   message: string,
   threadId?: string,
   action?: string,
 ): Promise<{ ok: boolean; thread?: ChatThread; llm?: boolean }> {
-  return apiFetch("/chat/42/reply", {
+  return apiFetch("/chat/agent/reply", {
     method: "POST",
     body: JSON.stringify({ message, thread_id: threadId ?? null, action: action ?? null }),
   });
 }
 
-/** Stream 42 reply over SSE (POST /chat/42/reply/stream). */
-export function openFortyTwoReplyStream(
+/** Stream Minion agent reply over SSE. */
+export function openAgentReplyStream(
   message: string,
   threadId?: string,
   action?: string,
@@ -1304,7 +1315,7 @@ export function openFortyTwoReplyStream(
   let cancelled = false;
   const finished = (async () => {
     const cfg = await getConfig();
-    const res = await fetch(`${cfg.api_base}/chat/42/reply/stream`, {
+    const res = await fetch(`${cfg.api_base}/chat/agent/reply/stream`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -1370,8 +1381,8 @@ export function openFortyTwoReplyStream(
   };
 }
 
-export async function fortyTwoDismiss(threadId: string): Promise<{ ok: boolean; thread_id: string }> {
-  return apiFetch("/chat/42/dismiss", {
+export async function agentDismiss(threadId: string): Promise<{ ok: boolean; thread_id: string }> {
+  return apiFetch("/chat/agent/dismiss", {
     method: "POST",
     body: JSON.stringify({ thread_id: threadId, message: "" }),
   });
@@ -1457,7 +1468,8 @@ export async function fetchFeed(params: { limit?: number; since_hours?: number }
   if (params.limit != null) q.set("limit", String(params.limit));
   if (params.since_hours != null) q.set("since_hours", String(params.since_hours));
   const qs = q.toString();
-  return apiFetch(`/feed${qs ? `?${qs}` : ""}`);
+  const raw = await apiFetch<ActivityFeedBundle & { forty_two?: AgentStreamState }>(`/feed${qs ? `?${qs}` : ""}`);
+  return { ...raw, agent: raw.agent ?? raw.forty_two };
 }
 
 export async function fetchGraphScaffold(): Promise<GraphScaffoldResponse> {

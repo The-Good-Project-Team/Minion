@@ -1,8 +1,8 @@
 # Minion Desktop
 
-A Tauri + SvelteKit shell around Minion. The whole app is one window: drop a
-file, see it in memory, ask it a question — then connect Claude Desktop (or
-anything else that speaks MCP) with one click.
+A Tauri + React/Tailwind shell around Minion. The app is chat-first: a live
+local agent backed by your private context graph, ambient collectors, and the
+same MCP memory that other assistants can read.
 
 ```
 ┌───────────────────────────────────────────────────┐
@@ -25,7 +25,7 @@ anything else that speaks MCP) with one click.
 
 ```
 ┌──────────────┐     HTTP/WS      ┌─────────────────┐
-│  SvelteKit   │ ◄──────────────► │  FastAPI        │
+│  React/Vite  │ ◄──────────────► │  FastAPI        │
 │  (webview)   │  127.0.0.1:8765  │  sidecar (py)   │
 └──────┬───────┘                  └────────┬────────┘
        │ invoke()                          │
@@ -46,8 +46,10 @@ anything else that speaks MCP) with one click.
 - **Sidecar** (`chatgpt_mcp_memory/src/api.py`): the same ingest + store
   modules the MCP uses, exposed as HTTP. WebSocket `/events` pushes live
   ingest progress and heartbeats.
-- **Frontend** (`src/`): SvelteKit SPA. Dropped files are copied into the
-  inbox; the watcher already running inside the sidecar picks them up.
+- **Frontend** (`src/`): React + Tailwind SPA using vendored ElevenLabs UI
+  registry components (`Orb`, `Conversation`, `Message`, `Button`, `Card`).
+  Dropped files are copied into the inbox; the watcher already running inside
+  the sidecar picks them up.
 
 ## Dev
 
@@ -76,6 +78,23 @@ Dev quirks:
   Override with `MINION_ANALYTICS_URL`, or disable entirely with
   `MINION_DISABLE_REMOTE_ANALYTICS=1`. Users turn off sending under **Settings → Support**.
   Payloads are coarse counters only (`chatgpt_mcp_memory/src/analytics_remote.py`).
+
+Live smoke testing:
+
+```bash
+# Verify live status; if no sidecar is running, start one from this checkout.
+npm run test:live
+
+# Also run a live remember-screen pass, without screenshots or external adapters.
+npm run test:live -- --mutating
+```
+
+If Tauri picked an ephemeral sidecar port, the script discovers it from the
+running `api.py --port ...` process. Override with `MINION_LIVE_API_URL` when
+testing a packaged app or a remote-forwarded sidecar. Mutating checks use
+`MINION_API_TOKEN` when set, otherwise they read the local vault's
+`.minion_api_token` file. Harness-started sidecars disable the watcher,
+ambient scheduler, and remote analytics.
 
 ## Release zips: Intel vs Apple Silicon
 
@@ -133,12 +152,12 @@ Signed updates use **`tauri-plugin-updater`**. The app reads
 
    ```bash
    python3 scripts/write_latest_json.py \
-     --version 1.0.2 \
+    --version 2.0.0 \
      --notes "…" \
-     --darwin-aarch64-url "https://github.com/…/Minion_1.0.2_aarch64.app.tar.gz" \
-     --darwin-aarch64-sig path/to/Minion_1.0.2_aarch64.app.tar.gz.sig \
-     --darwin-x86_64-url "https://github.com/…/Minion_1.0.2_x64.app.tar.gz" \
-     --darwin-x86_64-sig path/to/Minion_1.0.2_x64.app.tar.gz.sig \
+    --darwin-aarch64-url "https://github.com/…/Minion_2.0.0_aarch64.app.tar.gz" \
+    --darwin-aarch64-sig path/to/Minion_2.0.0_aarch64.app.tar.gz.sig \
+    --darwin-x86_64-url "https://github.com/…/Minion_2.0.0_x64.app.tar.gz" \
+    --darwin-x86_64-sig path/to/Minion_2.0.0_x64.app.tar.gz.sig \
      > latest.json
    ```
 
@@ -150,7 +169,7 @@ Client behaviour (production builds):
 - **Prompt installs** — default: shortly after the websocket connects, then about **every 45 minutes** while the app stays open, Minion compares its semver with `latest.json`. Automatic checks honour a **15 minute** minimum spacing so bursts stay calm; **Settings → Support → Check for updates** bypasses that delay.
 - **Fleet auto-install** — set **`MINION_AUTO_INSTALL_UPDATES=1`** (or `true` / `yes`) in the environment for the Minion process; signed updates download and install **without** the confirmation dialog (macOS may still prompt for elevation). GUI launches from Finder do not inherit shell exports unless you inject env via MDM, a LaunchAgent, or a wrapper script.
 
-After tagging **`v1.0.2`** on GitHub, attach both `.tar.gz` bundles plus **`latest.json`** so existing installs pull the new build.
+After tagging a release, attach both `.tar.gz` bundles plus **`latest.json`** so existing installs pull the new build.
 
 ## Connect any MCP client
 

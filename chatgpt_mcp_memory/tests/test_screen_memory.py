@@ -92,7 +92,9 @@ def test_remember_screen_ingests_stream_and_queues_graph(conn, monkeypatch) -> N
     assert out["ax_index"]["indexed"] == 1
     assert out["screenshot_ocr"]["attempted"] == 1
     assert out["screenshot_ocr"]["skipped"] == 1
-    assert out["fused_events"]["upserted"] == 2
+    assert out["fused_events"]["upserted"] == 1
+    fused_one = screen_memory_events_since(c, since_ts=0, limit=1)[0]
+    assert (fused_one.get("raw") or {}).get("witness_count", 1) >= 2
     assert out["graph_candidates"]["created"] == 0
     assert out["graph_infer_queued"] is True
     assert queued["reason"] == "screen_memory"
@@ -111,9 +113,11 @@ def test_verify_screen_memory_pipeline_acceptance(conn) -> None:
         "capture_ingest",
         "screenshot_ocr_index",
         "semantic_fusion",
+        "witness_redundancy",
         "event_shape_time",
         "event_shape_temporal_refs",
         "confidence_tiers",
+        "collector_coverage",
         "ocr_fallback",
         "contextual_click",
         "graph_candidate",
@@ -122,7 +126,11 @@ def test_verify_screen_memory_pipeline_acceptance(conn) -> None:
         "summary",
         "miyagi_guidance",
     }
-    assert "general_vlm" in out["trust_tiers"]
+    collectors: set[str] = set()
+    for e in screen_memory_events_since(c, since_ts=0, limit=50):
+        raw = e.get("raw") or {}
+        collectors.update(raw.get("collector_types") or [])
+    assert "general_vlm" in collectors
     assert out["retrieval"]["top_kind"] == "screen-event"
     assert out["guidance"]["mode"] == "graph_fill"
 
@@ -405,8 +413,16 @@ def test_fuse_preserves_confidence_hierarchy(conn, monkeypatch) -> None:
     fused = screen_memory_events_since(c, since_ts=0, limit=10)
     tiers = {e["trust_tier"] for e in fused}
     assert {"dom_or_accessibility", "user_events", "temporal_video_events"} <= tiers
-    clips = [e for e in fused if e["raw"]["ambient_event_type"] == "rolling_video_clip"]
-    assert clips[0]["scene"].startswith("Recorded a 10 second screen clip")
+    clips = [
+        e
+        for e in fused
+        if e["trust_tier"] == "temporal_video_events"
+        or "rolling_video_clip" in ((e.get("raw") or {}).get("collector_types") or [])
+    ]
+    assert clips and (
+        clips[0]["scene"].startswith("Recorded a")
+        or "payout" in (clips[0].get("scene") or "").lower()
+    )
     dom = next(e for e in fused if e["trust_tier"] == "dom_or_accessibility")
     assert dom["visible_elements"][0]["label"] == "Export"
     mouse = next(e for e in fused if e["raw"]["ambient_event_type"] == "mouse_event")

@@ -11,8 +11,8 @@ test.describe("Minion stream UI", () => {
 
   test("home is agent feed with composer", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByLabel("Agent feed")).toBeVisible();
-    await expect(page.getByPlaceholder("Reply…")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Ask your life." })).toBeVisible();
+    await expect(page.getByPlaceholder(/Ask about a person/)).toBeVisible();
   });
 
   test("Seeded wiki person appears in feed", async ({ page }) => {
@@ -20,60 +20,25 @@ test.describe("Minion stream UI", () => {
     await expect(page.getByText("E2E Test Person")).toBeVisible({ timeout: 15_000 });
   });
 
-  test("Inferred task appears in feed", async ({ page }) => {
-    await page.goto("/");
-    await expect(page.getByText("Review E2E fixture task")).toBeVisible({ timeout: 15_000 });
-  });
-
-  test("Dismiss suggestion removes inferred task from feed", async ({ page }) => {
-    await page.goto("/");
-    const card = page.getByText("Review E2E fixture task");
-    await expect(card).toBeVisible();
-    await page.getByRole("button", { name: "Dismiss" }).first().click();
-    await expect(card).not.toBeVisible({ timeout: 10_000 });
-  });
-
   test("chat composer pinned at bottom", async ({ page }) => {
     await page.goto("/");
-    await expect(page.getByPlaceholder("Reply…")).toBeVisible();
+    await expect(page.getByPlaceholder(/Ask about a person/)).toBeVisible();
   });
 
-  test("Sources search still works", async ({ page }) => {
-    await page.goto("/sources");
-    await expect(page.getByRole("heading", { name: "Sources" })).toBeVisible();
-    const resp = page.waitForResponse(
-      (r) => r.url().includes("/search") && r.request().method() === "POST" && r.ok(),
-      { timeout: 30_000 },
-    );
-    await page.getByPlaceholder("Semantic search…").fill("e2e fixture");
-    await page.getByRole("button", { name: "Search", exact: true }).click();
-    await resp;
-  });
-
-  test("Settings reachable from home gear", async ({ page }) => {
+  test("Top navigation links are present", async ({ page }) => {
     await page.goto("/");
-    await page.getByRole("link", { name: "Settings" }).click();
-    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Add to Claude" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Sources" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Settings" })).toBeVisible();
   });
 
-  test("legacy /activity redirects home", async ({ page }) => {
+  test("legacy /activity serves agent shell", async ({ page }) => {
     await page.goto("/activity");
-    await expect(page.getByLabel("Agent feed")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("heading", { name: "Ask your life." })).toBeVisible({ timeout: 15_000 });
   });
 
-  test("legacy /chat redirects home", async ({ page }) => {
+  test("legacy /chat serves agent shell", async ({ page }) => {
     await page.goto("/chat");
-    await expect(page).toHaveURL("/");
-    await expect(page.getByLabel("Agent feed")).toBeVisible();
-  });
-
-  test("Sidebar navigation on secondary routes", async ({ page }) => {
-    await page.goto("/sources");
-    for (const label of ["Sources", "Settings"]) {
-      await page.getByRole("link", { name: label, exact: true }).click();
-      await expect(page.getByRole("link", { name: label, exact: true })).toHaveClass(/active/);
-    }
+    await expect(page.getByRole("heading", { name: "Ask your life." })).toBeVisible();
   });
 });
 

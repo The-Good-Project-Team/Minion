@@ -350,23 +350,25 @@ def build_working_context(
                 )
         except Exception:
             pass
-    graph_excerpt: Dict[str, Any] = {}
-    graph_spine_md = ""
+    context_pack: Dict[str, Any] = {}
     try:
-        from graph_context import build_graph_context
-        from graph_ambient import build_graph_spine
+        from context_core import context_bundle
 
-        gc = build_graph_context(conn, data_dir, max_candidates=3)
-        graph_excerpt = {
-            "user_node_count": (gc.get("graph") or {}).get("user_node_count", 0),
-            "totals": (gc.get("graph") or {}).get("totals") or {},
-            "highlights": ((gc.get("graph") or {}).get("highlights") or [])[:5],
-            "open_candidates": (gc.get("open_candidates") or [])[:3],
-            "has_fill_gap": (gc.get("graph") or {}).get("has_fill_gap", False),
-        }
-        graph_spine_md = (build_graph_spine(conn, data_dir).get("spine_md") or "")[:1200]
+        subject = ""
+        if focus:
+            subject = str(focus.get("window_title") or focus.get("app_name") or "")[:120]
+        context_pack = context_bundle(
+            conn, data_dir, subject=subject, for_mcp=for_mcp, memory_top_k=memory_top_k
+        )
     except Exception:
-        graph_excerpt = {}
+        context_pack = {}
+
+    graph_excerpt = {
+        "user_node_count": (context_pack.get("graph") or {}).get("user_node_count", 0),
+        "totals": (context_pack.get("graph") or {}).get("totals") or {},
+        "open_candidates": (context_pack.get("open_candidates") or [])[:3],
+    }
+    graph_spine_md = (context_pack.get("spine_md") or "")[:1200]
 
     return {
         "status": "ok" if focus else "empty",
@@ -386,6 +388,9 @@ def build_working_context(
         "related_memory": memory_hits,
         "graph_context": graph_excerpt,
         "graph_spine_md": graph_spine_md,
+        "context_bundle": context_pack,
+        "context_md": (context_pack.get("context_md") or "")[:2000],
+        "why_this_context": context_pack.get("why_this_context") or [],
         "identity_excerpt": claim_excerpt,
         "open_council_proposals": council_excerpt,
         "composed_at": time.time(),

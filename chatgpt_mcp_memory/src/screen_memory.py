@@ -70,6 +70,10 @@ def remember_screen(
     fused = fuse_screen_events(conn)
     conn.commit()
     graph_candidates = create_graph_candidates_from_screen_events(conn)
+    from context_core import distill_evidence_candidates
+
+    evidence_candidates = distill_evidence_candidates(conn)
+    graph_candidates["evidence_created"] = evidence_candidates.get("created", 0)
     conn.commit()
     event_index = index_fused_screen_events(conn) if index_events else {
         "indexed": 0,
@@ -225,14 +229,40 @@ def verify_screen_memory_pipeline(conn, data_dir: Path) -> Dict[str, Any]:
     candidates = graph_candidate_list(conn, status="open", limit=5)
 
     tiers = {str(e.get("trust_tier") or "") for e in events}
+    collector_types: set[str] = set()
+    for e in events:
+        raw = e.get("raw") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                raw = {}
+        for k in raw.get("collector_types") or []:
+            collector_types.add(str(k))
+        if raw.get("ambient_event_type"):
+            collector_types.add(str(raw["ambient_event_type"]))
+    fused_meta = remember.get("fused_events") or {}
     checks = [
         ("capture_ingest", int(remember["ambient"].get("ingested") or 0) >= len(records)),
         ("screenshot_ocr_index", int(remember["screenshot_ocr"].get("indexed") or 0) >= 1),
-        ("semantic_fusion", int(remember["fused_events"].get("upserted") or 0) >= len(records)),
+        ("semantic_fusion", int(fused_meta.get("upserted") or 0) >= 3),
+        ("witness_redundancy", int(fused_meta.get("max_witness_count") or 0) >= 2),
         ("event_shape_time", any(str(e.get("time") or "").endswith("Z") and "T" in str(e.get("time") or "") for e in events)),
         ("event_shape_temporal_refs", any(e.get("time_range") == "00:02-00:08" and e.get("clip_path") == "ambient/video/verify.mov" for e in events)),
-        ("confidence_tiers", {"dom_or_accessibility", "user_events", "temporal_video_events", "visual_ui_parser", "ocr", "general_vlm"}.issubset(tiers)),
-        ("ocr_fallback", any(e.get("trust_tier") == "ocr" for e in events)),
+        ("confidence_tiers", {"dom_or_accessibility", "user_events", "temporal_video_events"}.issubset(tiers)),
+        (
+            "collector_coverage",
+            {
+                "dom_snapshot",
+                "mouse_event",
+                "clipboard_event",
+                "screenshot_fallback",
+                "marlin_event",
+                "omniparser_parse",
+                "general_vlm",
+            }.issubset(collector_types),
+        ),
+        ("ocr_fallback", "screenshot_fallback" in collector_types),
         ("contextual_click", any("DOM" in str(a.get("source") or "") for e in events for a in (e.get("events") or []))),
         ("graph_candidate", any((c.get("payload") or {}).get("email") == "alex@example.com" for c in candidates)),
         ("retrieval_index", bool(retrieval_hits) and retrieval_hits[0].kind == "screen-event"),
@@ -260,27 +290,10 @@ def verify_screen_memory_pipeline(conn, data_dir: Path) -> Dict[str, Any]:
 
 
 def fuse_screen_events(conn, *, since_hours: float = 6.0, limit: int = 500) -> Dict[str, Any]:
-    """Normalize raw ambient rows into semantic screen-memory records."""
-    since = time.time() - max(0.1, float(since_hours)) * 3600.0
-    rows = ambient_events_since(conn, since_ts=since, limit=limit)
-    upserted = 0
-    by_trust: Dict[str, int] = {}
-    contexts: Dict[tuple[str, str], Dict[str, Any]] = {}
-    for e in sorted(rows, key=lambda r: float(r.get("captured_at") or 0.0)):
-        fused = _fuse_ambient_event(e)
-        if not fused:
-            continue
-        raw_type = ((fused.get("raw") or {}).get("ambient_event_type") or "") if isinstance(fused.get("raw"), dict) else ""
-        if fused.get("trust_tier") == "user_events" and raw_type in ("mouse_event", "keyboard_event"):
-            ctx = _matching_screen_context(contexts, fused)
-            if ctx:
-                _merge_user_event_context(fused, ctx)
-        screen_memory_event_upsert(conn, **fused)
-        upserted += 1
-        tier = str(fused.get("trust_tier") or "unknown")
-        by_trust[tier] = by_trust.get(tier, 0) + 1
-        _remember_screen_context(contexts, fused)
-    return {"upserted": upserted, "scanned": len(rows), "by_trust": by_trust}
+    """Normalize raw ambient rows into semantic screen-memory records (witness-aware)."""
+    from context_core import fuse_screen_events_with_witnesses
+
+    return fuse_screen_events_with_witnesses(conn, since_hours=since_hours, limit=limit)
 
 
 def index_fused_screen_events(conn, *, since_hours: float = 6.0, limit: int = 300) -> Dict[str, Any]:
@@ -492,6 +505,12 @@ def screen_memory_status(
         },
     }
     status["probe"] = _live_screen_probe(data) if run_probe else {"ran": False}
+    try:
+        from context_core import ambient_coverage_status
+
+        status["coverage"] = ambient_coverage_status(conn, data, minutes=mins)
+    except Exception:
+        status["coverage"] = None
     status["readiness"] = _screen_memory_readiness(status)
     status["completion_gates"] = _screen_memory_completion_gates(status)
     return status

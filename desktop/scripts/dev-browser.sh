@@ -26,7 +26,7 @@ else
   export MINION_DISABLE_WATCHER="${MINION_DISABLE_WATCHER:-1}"
   # Keep ambient graph mining on in browser dev (screen capture still optional).
   export MINION_DISABLE_AMBIENT_SCHEDULER="${MINION_DISABLE_AMBIENT_SCHEDULER:-0}"
-  # Optional: export GEMINI_API_KEY=... (or set gemini_api_key in settings.json) for 42 dialogue
+  # Optional: export GEMINI_API_KEY=... (or set gemini_api_key in settings.json) for agent dialogue
   export PYTHONPATH="${ROOT}/chatgpt_mcp_memory/src"
   "$PYTHON" "${ROOT}/chatgpt_mcp_memory/src/api.py" --port "$PORT" &
   API_PID=$!

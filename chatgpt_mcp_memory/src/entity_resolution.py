@@ -149,7 +149,10 @@ def ingest_contacts_snapshot(conn, contacts: List[Dict[str, Any]]) -> int:
             meta["birthday"] = c["birthday"]
         if c.get("source"):
             meta["source"] = c["source"]
-        pid = ensure_person_node(conn, label=label, external_id=str(ext) if ext else None, meta=meta)
+        try:
+            pid = ensure_person_node(conn, label=label, external_id=str(ext) if ext else None, meta=meta)
+        except ValueError:
+            continue
         link_belongs_to_scaffold(conn, pid)
         count += 1
     return count

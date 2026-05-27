@@ -1190,6 +1190,87 @@ def cmd_verify_screen_memory(args: argparse.Namespace) -> int:
     return _screen_memory_cmd(args, "verify", [])
 
 
+def cmd_graphify_status(args: argparse.Namespace) -> int:
+    derived = Path(args.derived_dir or _derived_dir_default()).expanduser().resolve()
+    script = """
+import json, sys
+from pathlib import Path
+from graphify_adapter import status
+
+print(json.dumps(status(Path(sys.argv[1])), indent=2, ensure_ascii=False))
+"""
+    workspace_dir = (Path(args.workspace) if args.workspace else _default_workspace_dir()).expanduser().resolve()
+    vpy = _ensure_python_env(workspace_dir)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(_src("x").parent) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run([str(vpy), "-c", script, str(derived)], env=env)
+    return int(result.returncode)
+
+
+def cmd_graphify_shadow_build(args: argparse.Namespace) -> int:
+    derived = Path(args.derived_dir or _derived_dir_default()).expanduser().resolve()
+    script = """
+import json, sys
+from pathlib import Path
+from store import DB_FILENAME, connect
+from graphify_adapter import run_graphify_shadow
+
+data_dir = Path(sys.argv[1])
+conn = connect(data_dir / DB_FILENAME)
+out = run_graphify_shadow(
+    conn,
+    data_dir,
+    graphify_bin=(sys.argv[2] or None),
+    skip_extract=bool(int(sys.argv[3])),
+)
+conn.commit()
+print(json.dumps(out, indent=2, ensure_ascii=False))
+"""
+    workspace_dir = (Path(args.workspace) if args.workspace else _default_workspace_dir()).expanduser().resolve()
+    vpy = _ensure_python_env(workspace_dir)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(_src("x").parent) + os.pathsep + env.get("PYTHONPATH", "")
+    bin_arg = (args.graphify_bin or "").strip()
+    skip = "1" if args.import_only else "0"
+    result = subprocess.run(
+        [str(vpy), "-c", script, str(derived), bin_arg, skip],
+        env=env,
+    )
+    return int(result.returncode)
+
+
+def cmd_graphify_reconcile(args: argparse.Namespace) -> int:
+    derived = Path(args.derived_dir or _derived_dir_default()).expanduser().resolve()
+    script = """
+import json, sys
+from pathlib import Path
+from store import DB_FILENAME, connect
+from graphify_adapter import reconcile_graph_truth
+
+data_dir = Path(sys.argv[1])
+conn = connect(data_dir / DB_FILENAME)
+out = reconcile_graph_truth(
+    conn,
+    data_dir,
+    graphify_bin=(sys.argv[2] or None),
+    skip_extract=bool(int(sys.argv[3])),
+)
+conn.commit()
+print(json.dumps(out, indent=2, ensure_ascii=False))
+"""
+    workspace_dir = (Path(args.workspace) if args.workspace else _default_workspace_dir()).expanduser().resolve()
+    vpy = _ensure_python_env(workspace_dir)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(_src("x").parent) + os.pathsep + env.get("PYTHONPATH", "")
+    bin_arg = (args.graphify_bin or "").strip()
+    skip = "1" if args.import_only else "0"
+    result = subprocess.run(
+        [str(vpy), "-c", script, str(derived), bin_arg, skip],
+        env=env,
+    )
+    return int(result.returncode)
+
+
 def cmd_rm(args: argparse.Namespace) -> int:
     derived = Path(args.derived_dir or _derived_dir_default()).expanduser().resolve()
     script = """
@@ -1609,6 +1690,50 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_verify_screen.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
     p_verify_screen.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
     p_verify_screen.set_defaults(func=cmd_verify_screen_memory)
+
+    p_graphify_status = sub.add_parser(
+        "graphify-status",
+        help="Graphify shadow graph install paths and last build state.",
+    )
+    p_graphify_status.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_graphify_status.add_argument("--workspace", default=None, help="Workspace whose .venv runs the check")
+    p_graphify_status.set_defaults(func=cmd_graphify_status)
+
+    p_graphify_build = sub.add_parser(
+        "graphify-shadow-build",
+        help="Build life-shadow input bundle, run Graphify extract, import graph_candidates.",
+    )
+    p_graphify_build.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_graphify_build.add_argument("--workspace", default=None, help="Workspace whose .venv runs the build")
+    p_graphify_build.add_argument(
+        "--graphify-bin",
+        default=None,
+        help="Path to graphify CLI (default: PATH or GRAPHIFY_BIN)",
+    )
+    p_graphify_build.add_argument(
+        "--import-only",
+        action="store_true",
+        help="Skip extract; import candidates from existing graphify-out/graph.json",
+    )
+    p_graphify_build.set_defaults(func=cmd_graphify_shadow_build)
+
+    p_graphify_reconcile = sub.add_parser(
+        "graphify-reconcile",
+        help="Run consistent graph scan: bundle context, shadow graph, import review candidates.",
+    )
+    p_graphify_reconcile.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
+    p_graphify_reconcile.add_argument("--workspace", default=None, help="Workspace whose .venv runs the reconcile")
+    p_graphify_reconcile.add_argument(
+        "--graphify-bin",
+        default=None,
+        help="Path to graphify CLI (default: PATH or GRAPHIFY_BIN)",
+    )
+    p_graphify_reconcile.add_argument(
+        "--import-only",
+        action="store_true",
+        help="Skip extract; reconcile from existing graphify-out/graph.json",
+    )
+    p_graphify_reconcile.set_defaults(func=cmd_graphify_reconcile)
 
     p_rm = sub.add_parser(
         "rm",

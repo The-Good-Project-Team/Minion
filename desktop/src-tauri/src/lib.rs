@@ -87,7 +87,6 @@ const SKIP_DIRS: &[&str] = &[
     "build",
     "dist",
     "__pycache__",
-    ".svelte-kit",
     ".next",
     ".nuxt",
     ".cache",

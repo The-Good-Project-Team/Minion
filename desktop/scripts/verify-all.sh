@@ -13,7 +13,7 @@ echo "== Rust cargo test =="
 cd "$ROOT/desktop/src-tauri"
 cargo test
 
-echo "== Desktop svelte-check =="
+echo "== Desktop type-check =="
 cd "$ROOT/desktop"
 npm run check
 
