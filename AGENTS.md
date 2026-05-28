@@ -102,6 +102,8 @@ CI entrypoint: `.github/workflows/ci.yml`.
 
 ## Where things live
 
+- `docs/CONTEXT_PLATFORM.md` — four-layer product thesis (vault, context server, world model, live preferences).
+- `docs/PRIVACY_MATRIX.md` — reader scopes and privacy strata for MCP vs local UI.
 - `chatgpt_mcp_memory/src/` — Python core: parsers, store, ingest, mcp server.
 - `desktop/` — Tauri app (Rust shell + SvelteKit UI).
 - `chatgpt_mcp_memory/src/telemetry.py` — the feedback-loop log.

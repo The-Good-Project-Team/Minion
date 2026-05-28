@@ -1,6 +1,6 @@
 # Minion Desktop
 
-A Tauri + React/Tailwind shell around Minion. The app is chat-first: a live
+A Tauri + SvelteKit shell around Minion. The app is chat-first: a live
 local agent backed by your private context graph, ambient collectors, and the
 same MCP memory that other assistants can read.
 
@@ -25,7 +25,7 @@ same MCP memory that other assistants can read.
 
 ```
 ┌──────────────┐     HTTP/WS      ┌─────────────────┐
-│  React/Vite  │ ◄──────────────► │  FastAPI        │
+│  SvelteKit   │ ◄──────────────► │  FastAPI        │
 │  (webview)   │  127.0.0.1:8765  │  sidecar (py)   │
 └──────┬───────┘                  └────────┬────────┘
        │ invoke()                          │
@@ -46,8 +46,7 @@ same MCP memory that other assistants can read.
 - **Sidecar** (`chatgpt_mcp_memory/src/api.py`): the same ingest + store
   modules the MCP uses, exposed as HTTP. WebSocket `/events` pushes live
   ingest progress and heartbeats.
-- **Frontend** (`src/`): React + Tailwind SPA using vendored ElevenLabs UI
-  registry components (`Orb`, `Conversation`, `Message`, `Button`, `Card`).
+- **Frontend** (`src/`): SvelteKit app rendered inside the webview.
   Dropped files are copied into the inbox; the watcher already running inside
   the sidecar picks them up.
 
@@ -69,7 +68,8 @@ Dev quirks:
 
 - The Rust shell looks for `../chatgpt_mcp_memory/.venv/bin/python`; if absent
   it falls back to `python3` on `PATH`.
-- The sidecar binds `127.0.0.1:8765`. Override with `MINION_API_PORT`.
+- The sidecar binds `0.0.0.0:8765` by default for trusted LAN use. Override with
+  `MINION_API_HOST` and `MINION_API_PORT`.
 - Override data location with `MINION_DATA_DIR=/path`.
 - Disable the background watcher with `MINION_DISABLE_WATCHER=1` (useful
   when iterating on ingest logic).
@@ -125,6 +125,11 @@ build shells out to a repo-local Python; for a standalone `.app` we need to
 bundle the sidecar (PyInstaller) — see `TODO(sidecar-bundle)` in
 `src-tauri/src/lib.rs`. Until then, the packaged app still needs a repo
 checkout + venv.
+
+## Testing
+
+See [`docs/TESTING.md`](../docs/TESTING.md). The release bar is Playwright
+journeys in `e2e/journeys.spec.ts` plus the narrow type/unit checks.
 
 ## Automatic updates (Tauri updater)
 

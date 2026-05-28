@@ -1,10 +1,10 @@
 """
 Minion local HTTP API.
 
-Purpose: give the Tauri desktop app (or any local client) a small, typed
-surface over the same SQLite store + ingest pipeline the MCP uses. Binds to
-127.0.0.1 only; optional `MINION_API_TOKEN` enforces Bearer auth on mutating
-routes (see GET /capabilities).
+Purpose: give the Tauri desktop app (or any trusted client) a small, typed
+surface over the same SQLite store + ingest pipeline the MCP uses. The desktop
+sidecar serves the trusted LAN by default. `MINION_API_TOKEN` protects non-MCP
+LAN routes; `/mcp` requires the MCP password (see GET /capabilities).
 
 Endpoints:
   GET  /status                      -> counts, inbox path, db path, watcher
@@ -37,6 +37,7 @@ Endpoints:
   POST /identity/export             -> write zip under data_dir/exports/
   GET  /chunks/{chunk_id}           -> one chunk for evidence drill-down
   GET  /capabilities                -> stable feature flags for local agent integrations
+  POST /mcp                         -> MCP JSON-RPC over HTTP (password required)
   GET  /diagnostics/about           -> product blurb + privacy note (no secrets)
   GET  /diagnostics/log             -> JSON: redacted tail of ``MINION_LOG_FILE`` sidecar log
   GET  /diagnostics/log/text        -> plain text tail (paste into tickets)
@@ -50,6 +51,8 @@ Endpoints:
   WS   /events                      -> push ingest + heartbeat (see handler for `type` values)
 
 Optional env:
+  MINION_API_HOST — host for sidecar (default 0.0.0.0 for trusted LAN).
+  MINION_MCP_HTTP_TOKEN — password/token for POST /mcp (default: foofie).
   MINION_ANALYTICS_URL — HTTPS URL for anonymous analytics (overrides bundled default).
   MINION_DISABLE_REMOTE_ANALYTICS=1 — do not set a collector URL (fork / air-gapped builds).
 
@@ -518,17 +521,88 @@ app.add_middleware(
 
 @app.middleware("http")
 async def _mutation_bearer_auth(request: Request, call_next):
-    """Optional MINION_API_TOKEN: require Bearer on mutating routes (GET stays open)."""
+    """Optional MINION_API_TOKEN: protect LAN API routes; /mcp handles its own password."""
     tok = os.environ.get("MINION_API_TOKEN", "").strip()
+    path = request.url.path
+    if request.method == "POST" and path == "/mcp":
+        return await call_next(request)
+    if not _is_loopback_client(request):
+        auth = (request.headers.get("authorization") or "").strip()
+        if not tok or auth != f"Bearer {tok}":
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     if not tok or request.method in ("GET", "HEAD", "OPTIONS"):
         return await call_next(request)
-    path = request.url.path
     if request.method == "POST" and path in ("/search",):
         return await call_next(request)
     auth = (request.headers.get("authorization") or "").strip()
     if auth != f"Bearer {tok}":
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     return await call_next(request)
+
+
+def _is_loopback_client(request: Request) -> bool:
+    host = (request.client.host if request.client else "").strip().lower()
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def _mcp_http_token() -> str:
+    return os.environ.get("MINION_MCP_HTTP_TOKEN", "").strip() or "foofie"
+
+
+def _mcp_http_authorized(request: Request) -> bool:
+    token = _mcp_http_token()
+    auth = (request.headers.get("authorization") or "").strip()
+    password = (request.headers.get("x-minion-password") or "").strip()
+    return auth == f"Bearer {token}" or password == token
+
+
+def _mcp_jsonrpc_error(req_id: Any, code: int, message: str) -> Dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
+@app.post("/mcp")
+async def mcp_http_endpoint(request: Request) -> JSONResponse:
+    """MCP JSON-RPC over HTTP for trusted LAN clients.
+
+    The stdio MCP remains the default for same-machine clients. This bridge is
+    intentionally token-gated when reached off-loopback so a LAN bind does not
+    silently expose the user's context.
+    """
+    if not _mcp_http_authorized(request):
+        detail = "Password required for Minion MCP. Use password: foofie."
+        return JSONResponse(
+            {"detail": detail, "auth": {"type": "password", "password_hint": "foofie"}},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Bearer realm="Minion MCP", charset="UTF-8"'},
+        )
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(_mcp_jsonrpc_error(None, -32700, "Parse error"), status_code=400)
+
+    try:
+        from mcp_server import handle_jsonrpc
+    except Exception as exc:
+        return JSONResponse(_mcp_jsonrpc_error(None, -32603, f"MCP unavailable: {exc}"), status_code=500)
+
+    def one(req: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(req, dict):
+            return _mcp_jsonrpc_error(None, -32600, "Invalid Request")
+        return handle_jsonrpc(req)
+
+    if isinstance(payload, list):
+        if not payload:
+            return JSONResponse(_mcp_jsonrpc_error(None, -32600, "Invalid Request"), status_code=400)
+        responses = [resp for resp in (one(req) for req in payload) if resp is not None]
+        if not responses:
+            return JSONResponse({}, status_code=202)
+        return JSONResponse(responses)
+
+    resp = one(payload)
+    if resp is None:
+        return JSONResponse({}, status_code=202)
+    return JSONResponse(resp)
 
 
 class SearchBody(BaseModel):
@@ -545,6 +619,11 @@ class IngestBody(BaseModel):
     path: str
     move: bool = False  # if True, move into inbox; else copy
     recursive: bool = True  # used when `path` is a directory
+
+
+class IngestTextBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=500_000)
+    title: str = Field(default="Quick context", max_length=120)
 
 
 class WebhookChunk(BaseModel):
@@ -941,7 +1020,13 @@ def capabilities() -> Dict[str, Any]:
             "mutation_bearer": tok_on,
             "scheme": "Bearer",
             "header": "Authorization",
-            "policy": "GET and POST /search require no token; other POST/PUT/PATCH/DELETE require Authorization: Bearer <MINION_API_TOKEN> when set.",
+            "policy": "Loopback GET and POST /search require no token; LAN API routes require Authorization: Bearer <MINION_API_TOKEN> when set. POST /mcp uses the MCP password.",
+            "mcp_http": {
+                "endpoint": "POST /mcp",
+                "password_env": "MINION_MCP_HTTP_TOKEN",
+                "default_password": "foofie",
+                "policy": "Send Authorization: Bearer <password> or X-Minion-Password.",
+            },
         },
         "retrieval": {
             "identity_bias": True,
@@ -965,6 +1050,7 @@ def capabilities() -> Dict[str, Any]:
         },
         "endpoints": {
             "search": "POST /search",
+            "mcp": "POST /mcp",
             "search_stream": "GET /search/stream",
             "ingest": "POST /ingest",
             "delete_sources_bulk": "DELETE /sources body {kind, confirm_bulk:true}",
@@ -1646,10 +1732,30 @@ def graph_context(subject: str = "") -> Dict[str, Any]:
 
 
 @app.get("/context/bundle")
-def context_bundle_route(subject: str = "") -> Dict[str, Any]:
+def context_bundle_route(subject: str = "", for_mcp: bool = False) -> Dict[str, Any]:
     from context_core import context_bundle
 
-    return context_bundle(State.conn(), State.data_dir, subject=subject)
+    return context_bundle(State.conn(), State.data_dir, subject=subject, for_mcp=for_mcp)
+
+
+@app.get("/context/platform")
+def context_platform_meta() -> Dict[str, Any]:
+    from context_platform import CONTEXT_BUNDLE_SCHEMA_VERSION
+    from consent_policy import privacy_matrix
+
+    return {
+        "schema_version": CONTEXT_BUNDLE_SCHEMA_VERSION,
+        "layers": ["vault", "context_server", "world_model", "live_preferences"],
+        "doc": "docs/CONTEXT_PLATFORM.md",
+        "privacy_matrix": privacy_matrix(),
+    }
+
+
+@app.get("/privacy/matrix")
+def privacy_matrix_route() -> Dict[str, Any]:
+    from consent_policy import privacy_matrix
+
+    return privacy_matrix()
 
 
 @app.get("/graph/candidates")
@@ -1759,7 +1865,206 @@ class FortyTwoReplyBody(BaseModel):
     action: Optional[str] = None
 
 
-@app.post("/chat/42/next")
+class OnboardingChatBody(BaseModel):
+    step: str = "name"
+    display_name: str = ""
+    transcript: List[Dict[str, str]] = Field(default_factory=list)
+    permission_status: Dict[str, str] = Field(default_factory=dict)
+
+
+class OnboardingProfileBody(BaseModel):
+    display_name: str = ""
+
+
+class GeminiKeyBody(BaseModel):
+    api_key: str
+
+
+@app.put("/settings/gemini-key")
+def put_gemini_key(body: GeminiKeyBody) -> Dict[str, Any]:
+    key = (body.api_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="api_key required")
+    secret_dir = State.data_dir / ".secrets"
+    secret_dir.mkdir(parents=True, exist_ok=True)
+    path = secret_dir / "gemini_api_key"
+    path.write_text(key + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return {"ok": True, "configured": True}
+
+
+@app.post("/chat/agent/onboarding")
+def chat_agent_onboarding(body: OnboardingChatBody) -> Dict[str, Any]:
+    from onboarding_chat import onboarding_reply
+
+    text, used_llm = onboarding_reply(
+        step=body.step,
+        display_name=body.display_name,
+        transcript=body.transcript,
+        data_dir=State.data_dir,
+        permission_status=body.permission_status,
+    )
+    return {"message": text, "llm": used_llm}
+
+
+class SessionOpenBody(BaseModel):
+    display_name: str = ""
+
+
+@app.post("/session/open")
+def session_open_route(body: SessionOpenBody = SessionOpenBody()) -> Dict[str, Any]:
+    from session_open import open_session
+
+    out = open_session(
+        State.conn(),
+        State.data_dir,
+        display_name=(body.display_name or "").strip(),
+    )
+    State.conn().commit()
+    return out
+
+
+@app.post("/onboarding/profile")
+def onboarding_save_profile(body: OnboardingProfileBody) -> Dict[str, Any]:
+    from preference_promotion import record_display_name
+
+    name = (body.display_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="display_name required")
+    out = record_display_name(State.conn(), display_name=name, source="onboarding")
+    State.conn().commit()
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("error") or "profile_save_failed")
+    return out
+
+
+class ResourcePollBody(BaseModel):
+    resource_id: str
+    uses: bool
+    note: str = ""
+
+
+class ConnectorIntentBody(BaseModel):
+    source_text: str = ""
+    resource_id: str = ""
+
+
+@app.get("/onboarding/resource-poll/next")
+def onboarding_resource_poll_next() -> Dict[str, Any]:
+    from connector_intent import load_resource_poll, next_poll_question
+
+    q = next_poll_question(State.data_dir)
+    return {"question": q, "state": load_resource_poll(State.data_dir)}
+
+
+@app.post("/onboarding/resource-poll")
+def onboarding_resource_poll_answer(body: ResourcePollBody) -> Dict[str, Any]:
+    from connector_intent import record_poll_answer
+
+    out = record_poll_answer(
+        State.conn(),
+        State.data_dir,
+        resource_id=body.resource_id,
+        answer=body.uses,
+        free_text=body.note,
+    )
+    State.conn().commit()
+    return out
+
+
+@app.post("/onboarding/connector-intent")
+def onboarding_connector_intent(body: ConnectorIntentBody) -> Dict[str, Any]:
+    from connector_intent import create_connector_intent, record_freeform_connector_intent
+
+    conn = State.conn()
+    if body.source_text.strip():
+        out = record_freeform_connector_intent(conn, State.data_dir, source_text=body.source_text)
+    elif body.resource_id.strip():
+        out = {
+            "ok": True,
+            **create_connector_intent(conn, resource_id=body.resource_id.strip(), source="api"),
+        }
+    else:
+        raise HTTPException(status_code=400, detail="source_text or resource_id required")
+    conn.commit()
+    return out
+
+
+class E2eSeedGraphGapBody(BaseModel):
+    name: str = "E2E Journey Person"
+
+
+def _e2e_dev_tools_allowed() -> bool:
+    if os.environ.get("MINION_E2E") == "1":
+        return True
+    dd = str(State.data_dir).lower()
+    return "pytest-of" in dd or "/pytest-" in dd or "/var/folders/" in dd or "/tmp/" in dd
+
+
+@app.post("/dev/e2e/seed-graph-gap")
+def dev_e2e_seed_graph_gap(body: E2eSeedGraphGapBody) -> Dict[str, Any]:
+    """Playwright-only: insert a sparse person and open the next agent thread."""
+    if not _e2e_dev_tools_allowed():
+        raise HTTPException(status_code=404, detail="not available")
+    import forty_two
+    from chat_store import chat_threads_list
+    from store import _new_id
+
+    conn = State.conn()
+    for row in chat_threads_list(conn, status="open", limit=50):
+        forty_two.dismiss(conn, str(row["thread_id"]))
+    nid = _new_id("gn")
+    now = time.time()
+    name = (body.name or "E2E Journey Person").strip()[:120]
+    conn.execute(
+        "INSERT INTO graph_nodes(node_id, node_kind, title, status, body_md, wiki_page_id, "
+        "parent_node_id, aliases_json, summary, confidence, source_refs_json, privacy_level, "
+        "created_at, updated_at) VALUES(?, 'person', ?, 'active', '', NULL, "
+        "'scaffold-people-friends', '[]', '', 0.5, '[]', 'vault_local', ?, ?)",
+        (nid, name, now, now),
+    )
+    from graph_fill import compose_question, open_thread_for_gap, pick_next_gap
+
+    out = forty_two.next_question(conn, State.data_dir)
+    thread = out.get("thread") or {}
+    if not thread.get("thread_id"):
+        gap = pick_next_gap(conn, State.data_dir)
+        if gap:
+            opened = open_thread_for_gap(conn, gap, data_dir=State.data_dir)
+            thread = opened.get("thread") or {}
+    tid = thread.get("thread_id")
+    if tid:
+        from chat_store import chat_message_insert, chat_thread_get
+
+        full = chat_thread_get(conn, tid) or {}
+        msgs = full.get("messages") or []
+        has_q = any(
+            str(m.get("body_md") or "").strip() for m in msgs if m.get("role") == "assistant"
+        )
+        if not has_q:
+            gap = (full.get("meta") or {}).get("gap") or {"gap_type": "person", "label": name}
+            body = (compose_question(conn, gap, data_dir=State.data_dir) or "").strip()
+            if not body:
+                body = f"Who is **{name}** to you, and how do you know them?"
+            chat_message_insert(
+                conn,
+                thread_id=tid,
+                role="assistant",
+                body_md=body,
+                meta={"speaker": "Minion", "gap": gap},
+            )
+    conn.commit()
+    return {
+        "ok": True,
+        "node_id": nid,
+        "thread_id": tid,
+        "created": bool(out.get("created")),
+    }
+
+
 @app.post("/chat/agent/next")
 def chat_forty_two_next() -> Dict[str, Any]:
     import forty_two
@@ -1818,7 +2123,6 @@ def _chat_sse_response(event_iter) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-@app.post("/chat/42/reply")
 @app.post("/chat/agent/reply")
 def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
     import forty_two
@@ -1849,7 +2153,6 @@ def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
     return out
 
 
-@app.post("/chat/42/reply/stream")
 @app.post("/chat/agent/reply/stream")
 def chat_forty_two_reply_stream(body: FortyTwoReplyBody) -> StreamingResponse:
     import forty_two
@@ -1868,7 +2171,6 @@ def chat_forty_two_reply_stream(body: FortyTwoReplyBody) -> StreamingResponse:
     return _chat_sse_response(events)
 
 
-@app.post("/chat/42/dismiss")
 @app.post("/chat/agent/dismiss")
 def chat_forty_two_dismiss(body: FortyTwoReplyBody) -> Dict[str, Any]:
     import forty_two
@@ -2333,6 +2635,14 @@ def _resolve_dir_dest(src_dir: Path) -> Path:
         i += 1
 
 
+def _safe_context_filename(title: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in title.strip())
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    if not cleaned:
+        cleaned = "quick-context"
+    return cleaned[:80]
+
+
 def _copy_tree_into_inbox(src_dir: Path, dest_root: Path) -> List[Path]:
     """Mirror src_dir into dest_root under the inbox, skipping junk dirs.
 
@@ -2554,6 +2864,51 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
 
     asyncio.create_task(_run_ingest())
     return {"queued": str(dest), "kind": "file"}
+
+
+@app.post("/ingest/text")
+async def ingest_text_endpoint(body: IngestTextBody) -> Dict[str, Any]:
+    """Save pasted text as a Markdown file in the inbox, then ingest it."""
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+    title = body.title.strip() or "Quick context"
+    State.inbox.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = _resolve_file_dest(State.inbox / f"{stamp}-{_safe_context_filename(title)}.md")
+    dest.write_text(f"# {title}\n\n{text}\n", encoding="utf-8")
+
+    async def _run_ingest() -> None:
+        await _broadcast({"type": "ingest_started", "path": str(dest), "source": "quick-text"})
+        loop = asyncio.get_running_loop()
+
+        def _work() -> Dict[str, Any]:
+            conn = connect(State.db_path)
+            try:
+                res = ingest_file(conn, dest)
+                return {
+                    "path": res.path,
+                    "source_id": res.source_id,
+                    "kind": res.kind,
+                    "parser": res.parser,
+                    "chunk_count": res.chunk_count,
+                    "skipped": res.skipped,
+                    "reason": res.reason,
+                }
+            finally:
+                conn.close()
+
+        res = await loop.run_in_executor(None, _work)
+        await _broadcast(
+            {
+                "type": "source_updated" if res.get("source_id") else "ingest_skipped",
+                "result": res,
+                "counts": _counts(),
+            }
+        )
+
+    asyncio.create_task(_run_ingest())
+    return {"queued": str(dest), "kind": "text"}
 
 
 @app.post("/ingest/webhook")
@@ -2841,7 +3196,7 @@ async def events_ws(ws: WebSocket) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--host", default=os.environ.get("MINION_API_HOST", "0.0.0.0"))
     p.add_argument("--port", type=int, default=int(os.environ.get("MINION_API_PORT", "8765")))
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args()

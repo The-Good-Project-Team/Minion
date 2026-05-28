@@ -2026,6 +2026,23 @@ _DISPATCH = {
 }
 
 
+def handle_jsonrpc(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Handle one MCP JSON-RPC request for stdio and HTTP transports."""
+    method = req.get("method")
+    if req.get("id") is None:
+        return None
+
+    if method == "initialize":
+        return _handle_initialize(req)
+    if method == "tools/list":
+        return _handle_tools_list(req)
+    if method == "tools/call":
+        return _handle_tools_call(req)
+    if method == "ping":
+        return _jsonrpc_result(req.get("id"), {})
+    return _jsonrpc_error(req.get("id"), -32601, f"Method not found: {method}")
+
+
 def _handle_tools_call(req: Dict[str, Any]) -> Dict[str, Any]:
     req_id = req.get("id")
     params = req.get("params") or {}
@@ -2056,20 +2073,9 @@ def main() -> None:
             sys.stdout.flush()
             continue
 
-        method = req.get("method")
-        if req.get("id") is None:
+        resp = handle_jsonrpc(req)
+        if resp is None:
             continue
-
-        if method == "initialize":
-            resp = _handle_initialize(req)
-        elif method == "tools/list":
-            resp = _handle_tools_list(req)
-        elif method == "tools/call":
-            resp = _handle_tools_call(req)
-        elif method == "ping":
-            resp = _jsonrpc_result(req.get("id"), {})
-        else:
-            resp = _jsonrpc_error(req.get("id"), -32601, f"Method not found: {method}")
 
         sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
         sys.stdout.flush()

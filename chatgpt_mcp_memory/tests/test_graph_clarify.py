@@ -38,7 +38,7 @@ def test_next_clarification_sparse_person(conn) -> None:
     assert thread is not None
     body = thread["messages"][0]["body_md"] or ""
     assert "Alex" in body
-    assert (thread["messages"][0].get("meta") or {}).get("speaker") == "42"
+    assert (thread["messages"][0].get("meta") or {}).get("speaker") in ("42", "Minion")
 
 
 def test_reply_resolves_person_summary(conn) -> None:

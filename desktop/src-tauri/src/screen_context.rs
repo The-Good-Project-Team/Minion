@@ -132,12 +132,6 @@ mod imp {
         loop {
             thread::sleep(poll_interval());
             tick = tick.wrapping_add(1);
-            if tick % 12 == 0 {
-                let _ = crate::life_evidence::snapshot_life_evidence(
-                    data_dir.to_string_lossy().into_owned(),
-                );
-            }
-
             let win = match get_active_window() {
                 Ok(w) => w,
                 Err(_) => continue,

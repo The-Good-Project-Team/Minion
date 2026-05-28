@@ -64,7 +64,7 @@ def test_stream_reply_emits_sse_events(conn) -> None:
 
 
 def test_forty_two_reply_stream_http(sidecar) -> None:
-    """E2E: POST /chat/42/reply/stream returns SSE frames."""
+    """User objective: agent reply stream returns assistant SSE frames."""
     conn = connect(sidecar.data_dir / "memory.db")
     try:
         _sparse_person(conn, "Morgan")
@@ -75,7 +75,7 @@ def test_forty_two_reply_stream_http(sidecar) -> None:
         conn.close()
 
     r = sidecar.post(
-        "/chat/42/reply/stream",
+        "/chat/agent/reply/stream",
         json_body={"message": "Coworker on the design team.", "thread_id": tid},
     )
     assert r.status_code == 200

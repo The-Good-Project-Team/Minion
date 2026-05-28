@@ -9,6 +9,8 @@ export MINION_DATA_DIR="$TMP/data"
 export MINION_INBOX="$TMP/inbox"
 mkdir -p "$MINION_DATA_DIR" "$MINION_INBOX"
 export MINION_DISABLE_WATCHER=1
+export MINION_E2E=1
+unset GEMINI_API_KEY MINION_GEMINI_API_KEY GOOGLE_API_KEY
 PYTHON="${ROOT}/chatgpt_mcp_memory/.venv/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
   echo "run-e2e-stack: need ${PYTHON} (create chatgpt_mcp_memory/.venv per README)" >&2

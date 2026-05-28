@@ -1,4 +1,4 @@
-"""42 — asks the questions; you answer; the life graph gets filled in."""
+"""Minion graph-fill agent — asks questions; you answer; the life graph fills in."""
 from __future__ import annotations
 
 import json
@@ -97,16 +97,24 @@ def _complete_reply(
         return (result, user_mid, "")
 
     thread = chat_thread_get(conn, thread_id) or thread
-    guidance, used_llm = compose_42_reply(
-        conn, thread, result, user_text=text, data_dir=data_dir
-    )
+    try:
+        guidance, used_llm = compose_42_reply(
+            conn, thread, result, user_text=text, data_dir=data_dir
+        )
+    except Exception as exc:
+        log.warning("compose_42_reply failed: %s", exc)
+        guidance = "Thanks — I've saved that for your graph."
+        used_llm = False
+    if not (guidance or "").strip():
+        guidance = "Thanks — I've saved that for your graph."
+        used_llm = False
     chat_message_insert(
         conn,
         thread_id=thread_id,
         role="assistant",
         body_md=guidance,
         meta={
-            "speaker": "42",
+            "speaker": "Minion",
             "graph_fill": True,
             "resolved": result.get("resolved"),
             "llm": used_llm,
@@ -220,7 +228,7 @@ def stream_reply(
         role="assistant",
         body_md=guidance,
         meta={
-            "speaker": "42",
+            "speaker": "Minion",
             "graph_fill": True,
             "resolved": result.get("resolved"),
             "llm": used_llm,
@@ -284,7 +292,7 @@ def conversation_feed_items(
                     ts=ts,
                     lane="conversation",
                     kind="forty_two" if is_42 else "you",
-                    title="42" if is_42 else "You",
+                    title="Minion" if is_42 else "You",
                     body=body,
                     parse=None,
                     actions=_conversation_actions(m, full) if is_42 else [],
@@ -375,7 +383,7 @@ def pinned_conversation_item(conn) -> Optional[Dict[str, Any]]:
             ts=float(m.get("created_at") or time.time()),
             lane="conversation",
             kind="forty_two",
-            title="42",
+            title="Minion",
             body=body,
             parse=None,
             actions=_conversation_actions(m, active),

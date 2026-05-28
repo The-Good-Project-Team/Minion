@@ -19,6 +19,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,6 +114,9 @@ class SidecarClient:
     def post(self, path: str, json_body: Optional[Dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:
         return httpx.post(self.base + path, json=json_body, timeout=30.0, **kwargs)
 
+    def put(self, path: str, json_body: Optional[Dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:
+        return httpx.put(self.base + path, json=json_body, timeout=30.0, **kwargs)
+
     def delete(self, path: str, json_body: Optional[Dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:
         return httpx.request(
             "DELETE", self.base + path, json=json_body, timeout=15.0, **kwargs
@@ -152,7 +156,7 @@ def _spawn_sidecar(
     env["CLAUDE_DESKTOP_CONFIG"] = str(claude_cfg_path)
     env["PYTHONPATH"] = str(API_SCRIPT.parent) + os.pathsep + env.get("PYTHONPATH", "")
 
-    return subprocess.Popen(
+    process = subprocess.Popen(
         [sys.executable, str(API_SCRIPT), "--port", str(port)],
         env=env,
         stdout=subprocess.PIPE,
@@ -160,6 +164,22 @@ def _spawn_sidecar(
         text=True,
         bufsize=1,
     )
+    # Drain stdout continuously so the child cannot block on a full pipe.
+    # Keep a bounded tail for debugging when startup fails.
+    output_tail: List[str] = []
+
+    def _drain() -> None:
+        if not process.stdout:
+            return
+        for line in iter(process.stdout.readline, ""):
+            output_tail.append(line)
+            if len(output_tail) > 2000:
+                del output_tail[:500]
+
+    t = threading.Thread(target=_drain, name="minion-sidecar-stdout", daemon=True)
+    t.start()
+    setattr(process, "_minion_output_tail", output_tail)
+    return process
 
 
 def _wait_ready(base: str, process: subprocess.Popen, timeout: float = 20.0) -> None:
@@ -168,7 +188,12 @@ def _wait_ready(base: str, process: subprocess.Popen, timeout: float = 20.0) -> 
     while time.monotonic() < deadline:
         if process.poll() is not None:
             # The sidecar died -- dump whatever it emitted before giving up.
-            out = process.stdout.read() if process.stdout else ""
+            out = ""
+            tail = getattr(process, "_minion_output_tail", None)
+            if tail:
+                out = "".join(tail)
+            elif process.stdout:
+                out = process.stdout.read()
             raise RuntimeError(
                 f"sidecar exited early (code={process.returncode}) before /status was ready.\n--- output ---\n{out}"
             )

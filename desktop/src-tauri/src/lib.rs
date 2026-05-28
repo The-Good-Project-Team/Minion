@@ -926,6 +926,9 @@ fn resolve_initial_sidecar_port() -> u16 {
             return resolve_sidecar_port(preferred);
         }
     }
+    if resolve_sidecar_host() != "127.0.0.1" {
+        return resolve_sidecar_port(8765);
+    }
     if let Some(port) = allocate_sidecar_port_ephemeral() {
         return port;
     }
@@ -934,6 +937,22 @@ fn resolve_initial_sidecar_port() -> u16 {
         serde_json::json!({"reason": "ephemeral_exhausted_fallback_scan"}),
     );
     resolve_sidecar_port(8765)
+}
+
+/// Host interface for the Python API sidecar. Default serves the trusted LAN;
+/// set `MINION_API_HOST=127.0.0.1` to force loopback-only mode.
+fn resolve_sidecar_host() -> String {
+    match std::env::var("MINION_API_HOST") {
+        Ok(raw) => {
+            let host = raw.trim();
+            if host.is_empty() {
+                "0.0.0.0".to_string()
+            } else {
+                host.to_string()
+            }
+        }
+        Err(_) => "0.0.0.0".to_string(),
+    }
 }
 
 /// Pick a localhost port for the sidecar: prefer `preferred`, but if something
@@ -1045,12 +1064,16 @@ fn spawn_sidecar(
     let logs_dir = data_dir.join("logs");
     let _ = fs::create_dir_all(&logs_dir);
     let sidecar_log = logs_dir.join("sidecar.log");
+    let api_host = resolve_sidecar_host();
     cmd.current_dir(src_dir)
         .arg(api.file_name().unwrap_or_else(|| std::ffi::OsStr::new("api.py")))
+        .arg("--host")
+        .arg(&api_host)
         .arg("--port")
         .arg(api_port.to_string())
         .env("MINION_DATA_DIR", data_dir)
         .env("MINION_INBOX", inbox)
+        .env("MINION_API_HOST", &api_host)
         .env("MINION_API_PORT", api_port.to_string())
         .env("MINION_LOG_FILE", sidecar_log.to_string_lossy().to_string())
         .env("PYTHONUNBUFFERED", "1")
@@ -2029,6 +2052,27 @@ fn reveal_in_finder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn open_macos_privacy_settings(pane: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = match pane.as_str() {
+            "contacts" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Contacts",
+            "calendar" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
+            "accessibility" => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "screen-recording" => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            other => return Err(format!("unknown privacy pane: {other}")),
+        };
+        Command::new("open").arg(url).spawn().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pane;
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
@@ -2282,11 +2326,13 @@ pub fn run() {
             app_config,
             copy_into_inbox,
             reveal_in_finder,
+            open_macos_privacy_settings,
             restart_sidecar,
             vision_status,
             ensure_vision_model,
             screen_context_status,
             life_evidence::snapshot_life_evidence,
+            life_evidence::snapshot_contacts_evidence,
             council_bridges::council_bridge_open,
             keychain::keychain_search,
             keychain::keychain_add,

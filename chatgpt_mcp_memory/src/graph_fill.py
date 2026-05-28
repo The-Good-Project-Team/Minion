@@ -550,7 +550,7 @@ def open_thread_for_gap(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] =
                 body = llm_body
         except Exception:
             log.debug("42 llm opening skipped", exc_info=True)
-    msg_meta: Dict[str, Any] = {"gap": gap, "speaker": "42"}
+    msg_meta: Dict[str, Any] = {"gap": gap, "speaker": "Minion"}
     if gap.get("suggestions"):
         msg_meta["suggestions"] = gap["suggestions"]
     chat_message_insert(

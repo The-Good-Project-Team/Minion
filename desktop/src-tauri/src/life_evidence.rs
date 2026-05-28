@@ -5,26 +5,41 @@ use std::path::PathBuf;
 
 #[tauri::command]
 pub fn snapshot_life_evidence(data_dir: String) -> Result<serde_json::Value, String> {
+    snapshot_life_evidence_inner(data_dir, true)
+}
+
+#[tauri::command]
+pub fn snapshot_contacts_evidence(data_dir: String) -> Result<serde_json::Value, String> {
+    snapshot_life_evidence_inner(data_dir, false)
+}
+
+fn snapshot_life_evidence_inner(data_dir: String, include_calendar: bool) -> Result<serde_json::Value, String> {
     let root = PathBuf::from(&data_dir).join("life_evidence");
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "macos")]
     {
         let contacts = macos_contacts_snapshot();
-        let calendar = macos_calendar_snapshot();
         fs::write(
             root.join("contacts_latest.json"),
             serde_json::to_string_pretty(&contacts).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
-        fs::write(
-            root.join("calendar_latest.json"),
-            serde_json::to_string_pretty(&calendar).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        let calendar_events = if include_calendar {
+            let calendar = macos_calendar_snapshot();
+            fs::write(
+                root.join("calendar_latest.json"),
+                serde_json::to_string_pretty(&calendar).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            calendar.get("events").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
+        } else {
+            0
+        };
         return Ok(serde_json::json!({
             "contacts": contacts.len(),
-            "events": calendar.get("events").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+            "events": calendar_events,
+            "calendar_skipped": !include_calendar,
         }));
     }
 

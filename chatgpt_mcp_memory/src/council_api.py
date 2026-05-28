@@ -53,6 +53,19 @@ def handle_council_approve(
         proposal_created_at=prop.get("created_at"),
     )
 
+    try:
+        from preference_promotion import record_council_feedback
+
+        record_council_feedback(
+            conn,
+            proposal_type=str(prop.get("proposal_type") or ""),
+            action=action,
+            title=str(prop.get("title") or ""),
+            summary=str(prop.get("summary") or ""),
+        )
+    except Exception:
+        pass
+
     execute_result: Optional[Dict[str, Any]] = None
     if action == "approve":
         skill = get_skill(prop["required_skill"])

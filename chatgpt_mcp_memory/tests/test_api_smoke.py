@@ -46,6 +46,90 @@ def test_status_ready(sidecar) -> None:
     assert body["watcher"]["mode"] == "disabled"
 
 
+def test_onboarding_and_gemini_key_endpoints(sidecar) -> None:
+    r = sidecar.post("/chat/agent/onboarding", {"step": "name", "transcript": []})
+    assert r.status_code == 200, r.text
+    assert "message" in r.json()
+
+    prof = sidecar.post("/onboarding/profile", {"display_name": "Smoke User"})
+    assert prof.status_code == 200, prof.text
+    assert prof.json().get("ok") is True
+
+    key = sidecar.put("/settings/gemini-key", {"api_key": "test-key-not-used"})
+    assert key.status_code == 200, key.text
+    assert key.json()["configured"] is True
+    assert (sidecar.data_dir / ".secrets" / "gemini_api_key").read_text().strip() == "test-key-not-used"
+
+
+def test_mcp_http_bridge_handles_jsonrpc(sidecar) -> None:
+    denied = sidecar.post("/mcp", {"jsonrpc": "2.0", "id": 0, "method": "ping"})
+    assert denied.status_code == 401
+    assert "Password required" in denied.json()["detail"]
+
+    headers = {"Authorization": "Bearer foofie"}
+    init = sidecar.post(
+        "/mcp",
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {},
+        },
+        headers=headers,
+    )
+    assert init.status_code == 200, init.text
+    body = init.json()
+    assert body["id"] == 1
+    assert body["result"]["serverInfo"]["name"] == "minion"
+
+    tools = sidecar.post(
+        "/mcp",
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        headers=headers,
+    )
+    assert tools.status_code == 200, tools.text
+    names = {tool["name"] for tool in tools.json()["result"]["tools"]}
+    assert "ask_minion" in names
+
+
+def test_ingest_text_endpoint_queues_markdown_context(sidecar) -> None:
+    r = sidecar.post("/ingest/text", {"title": "Build note", "text": "Foofie context goes here."})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["kind"] == "text"
+    queued = Path(body["queued"])
+    assert queued.name.endswith(".md")
+    assert queued.exists()
+    assert "Foofie context goes here." in queued.read_text(encoding="utf-8")
+
+
+def test_e2e_seed_graph_gap_when_enabled(sidecar) -> None:
+    r = sidecar.post("/dev/e2e/seed-graph-gap", {"name": "Smoke Gap Person"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("ok") is True
+    assert body.get("thread_id")
+
+
+def test_context_platform_and_onboarding_routes(sidecar) -> None:
+    plat = sidecar.get("/context/platform")
+    assert plat.status_code == 200
+    assert plat.json()["schema_version"] >= 1
+
+    nxt = sidecar.get("/onboarding/resource-poll/next")
+    assert nxt.status_code == 200
+    assert nxt.json()["question"]["resource_id"] == "gmail"
+
+    ans = sidecar.post("/onboarding/resource-poll", {"resource_id": "gmail", "uses": True})
+    assert ans.status_code == 200
+    assert ans.json().get("candidate_id")
+
+    bundle = sidecar.get("/context/bundle")
+    assert bundle.status_code == 200
+    assert bundle.json().get("schema_version") >= 1
+    assert "privacy_scope" in bundle.json()
+
+
 def test_maintenance_storage_report(sidecar) -> None:
     r = sidecar.post("/maintenance/storage-report", {})
     assert r.status_code == 200, r.text

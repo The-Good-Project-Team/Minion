@@ -1,6 +1,6 @@
 # Minion
 
-**Minion** is a **capture-first macOS second brain**: it watches what you work on (window focus, accessibility text, selective screenshots when text is thin), ingests files you drop in, and stores everything in a **local vault** at `~/Library/Application Support/Minion/data`. The app opens to **Activity**—one Slack-like stream of capture, sync, parsing, council proposals, and **42** conversation—not a search box you have to remember to use. **42** is the proactive guide that asks questions and offers guidance; you answer in short bursts. **Claude Desktop** (and other MCP clients) can read the same vault over stdio when you want an assistant in the loop.
+**Minion** is a **capture-first macOS second brain**: it watches what you work on (window focus, accessibility text, selective screenshots when text is thin), ingests files you drop in, and stores everything in a **local vault** at `~/Library/Application Support/Minion/data`. The app is **chat-first**: on first run it introduces itself in plain language, asks what to call you, and only then requests optional permissions (Contacts sync happens in the background). You can paste text or add files to context in a couple clicks, and your assistants can read the same vault over **MCP**—either via **stdio** (Claude Desktop) or **LAN HTTP** (other clients on your network).
 
 ---
 
@@ -8,11 +8,13 @@
 
 | Surface | Role |
 |--------|------|
-| **Activity** | Home: chronological river of context—ambient capture, ingest/sync jobs, health issues, council suggestions, and **42** threads. |
-| **42** | Proactive guide embedded in Activity. Surfaces questions and nudges so you do not have to invent good prompts; reply or dismiss. |
+| **Chat (onboarding + daily loop)** | A conversation-first UI that keeps setup human: intro → name → optional permissions → connector choices. |
+| **Activity** | Chronological river of context—ambient capture, ingest/sync jobs, health issues, council suggestions, and threads. |
+| **42** | Proactive guide inside the stream. Surfaces questions and nudges so you do not have to invent good prompts; reply or dismiss. |
 | **Sources** | Drop zone, inbox watcher, ingest toggles, and search over your indexed corpus. |
+| **Add context** | Paste text to ingest immediately, or pick files/folders and copy them into the inbox for indexing. |
 | **Mirror / graph** | Life-graph scaffold (people, projects, obligations, …) with evidence attached; identity mirror and wiki routes where enabled. |
-| **MCP** | Memory tools for Claude (`ask_minion`, working context, voice helpers, wiki/work proposals)—local index only, no hosted memory service. |
+| **MCP** | Memory tools (`ask_minion`, working context, wiki/work proposals). Works over stdio (Claude Desktop) and also over LAN HTTP (`POST /mcp`, password protected). |
 
 Under the hood: one **`memory.db`** (plus vectors) in the vault; override the data directory with `MINION_DATA_DIR`. macOS capture respects deny lists and keeps screenshots sparse (OCR when accessibility text is thin). Settings cover sidecar paths, Claude one-click MCP setup, and per-format ingest.
 
@@ -28,6 +30,10 @@ Under the hood: one **`memory.db`** (plus vectors) in the vault; override the da
 | [`docs/SCREEN_ADAPTERS.md`](docs/SCREEN_ADAPTERS.md) | Playwright, Marlin, and OmniParser adapter command setup |
 | [`docs/SCREEN_MEMORY_AUDIT.md`](docs/SCREEN_MEMORY_AUDIT.md) | Requirement-to-evidence checklist for the screen-memory MVP |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Product direction and phased themes |
+| [`docs/CONTEXT_PLATFORM.md`](docs/CONTEXT_PLATFORM.md) | Product spine: vault → context server → world model → live preferences |
+| [`docs/PRIVACY_MATRIX.md`](docs/PRIVACY_MATRIX.md) | Reader scopes and privacy strata (desktop vs MCP vs LAN) |
+| [`docs/PRODUCT_SPINE_DECISIONS.md`](docs/PRODUCT_SPINE_DECISIONS.md) | Decisions and invariants for the product backbone |
+| [`docs/TESTING.md`](docs/TESTING.md) | Tests that reflect user journeys (release bar) |
 | [`chatgpt_mcp_memory/README.md`](chatgpt_mcp_memory/README.md) | Tool tables, parsers, env flags, CLI |
 | [`desktop/README.md`](desktop/README.md) | Tauri architecture, `tauri dev` / release bundles |
 | [`AGENTS.md`](AGENTS.md) · [`PROCESS.md`](PROCESS.md) | Agent playbook and delivery loop (contributors) |
@@ -90,7 +96,9 @@ If you pick the wrong one, macOS may refuse to open the app or show an architect
 1. Download the matching zip from [**GitHub Releases**](https://github.com/reif-is-a-foofie/Minion/releases) (or build from source — below).
 2. Unzip, then move **Minion.app** to **Applications** when prompted (avoid running forever from the disk image or a translocated copy).
 3. **First launch** can take a few minutes while Minion prepares its embedded Python environment and starts the sidecar. Later launches are quick.
-4. Open **Activity** to see capture and ingest; engage **42** when it surfaces a thread. Optional: open **Settings → Claude (MCP)** and click **Add to Claude**, then **fully quit and reopen Claude Desktop**.
+4. Follow the chat onboarding (name, optional permissions). You can paste text or add files to context from the main window.
+5. Optional: open **Settings → Claude (MCP)** and click **Add to Claude**, then **fully quit and reopen Claude Desktop**.
+6. Optional (LAN MCP for other clients): point an MCP client at `http://<this-mac-lan-ip>:8765/mcp` and set `Authorization: Bearer foofie` (or override with `MINION_MCP_HTTP_TOKEN`).
 5. Optional: import a **ChatGPT export** (zip or folder) via the drop zone so the index has history on day one.
 
 **Ollama (image captions):** If you do not already have Ollama installed, Minion can download the **official macOS Ollama app** into your Minion data folder on first launch and start it locally. To skip that behavior, set **`MINION_SKIP_MANAGED_OLLAMA=1`** before opening the app.
@@ -140,6 +148,8 @@ When run from this checkout, screen-memory commands use the repo-local `chatgpt_
 ## Privacy
 
 Indexing, capture, and search run **on your machine**. MCP speaks **stdio** to Claude Desktop by default—no cloud “memory service” for your chunks. Optional components (for example **Ollama** for voice or captions, or **HF Hub** for some embedding downloads) only touch the network if you configure them. Keep exports and large corpora **outside** the git tree if you prefer.
+
+If you use LAN MCP, the sidecar can bind to `0.0.0.0` (see `MINION_API_HOST`) so other machines on your network can reach `POST /mcp`. `POST /mcp` is password-protected (default `foofie`, override with `MINION_MCP_HTTP_TOKEN`). Other HTTP API routes may require `MINION_API_TOKEN` depending on route and configuration.
 
 ---
 

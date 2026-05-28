@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from collections import defaultdict
@@ -10,6 +11,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from settings import DEFAULT_AMBIENT_COLLECTORS, ambient_collector_enabled, load_settings
 from store import ambient_events_since, graph_candidate_list, graph_scaffold_list
+
+log = logging.getLogger(__name__)
 
 # Collector catalog: settings key -> raw stream kinds / aliases
 COLLECTOR_CATALOG: Dict[str, Dict[str, Any]] = {
@@ -479,7 +482,11 @@ def context_bundle(
         candidates=high_conf,
     )
 
-    return {
+    reader_id = "mcp" if for_mcp else "local_ui"
+    if for_mcp:
+        recent_evidence = recent_evidence[:3]
+
+    base = {
         "subject": subject,
         "why_this_context": why,
         "context_md": bundle_md,
@@ -498,6 +505,13 @@ def context_bundle(
         "freshness": {"generated_at": ts, "evidence_window_hours": 1},
         "for_mcp": for_mcp,
     }
+    try:
+        from context_platform import enrich_context_bundle
+
+        return enrich_context_bundle(conn, data_dir, base, reader_id=reader_id)
+    except Exception:
+        log.debug("context_platform enrich skipped", exc_info=True)
+        return base
 
 
 def _context_bundle_md(

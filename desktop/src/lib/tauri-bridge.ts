@@ -74,16 +74,13 @@ export async function invoke(cmd: string, args?: Record<string, unknown>): Promi
     case "copy_into_inbox":
       return { drops: [], inbox: "" };
     case "reveal_in_finder":
+    case "open_macos_privacy_settings":
       return undefined;
     case "screen_context_status":
       return SCREEN_BROWSER;
-    case "snapshot_life_evidence": {
-      const api_base = sidecarApiBase();
-      const res = await fetch(`${api_base}/life-evidence/refresh?force=true`, { method: "POST" });
-      if (!res.ok) {
-        return { contacts: 0, events: 0, skipped: `sidecar ${res.status}` };
-      }
-      return (await res.json()) as Record<string, unknown>;
+    case "snapshot_life_evidence":
+    case "snapshot_contacts_evidence": {
+      return { contacts: 0, events: 0, skipped: "browser dev" };
     }
     case "listening_start":
     case "listening_stop":

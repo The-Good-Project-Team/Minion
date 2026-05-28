@@ -137,7 +137,7 @@ export async function screenContextStatus(): Promise<ScreenContextStatus> {
   return (await invoke("screen_context_status")) as ScreenContextStatus;
 }
 
-/** macOS: snapshot Contacts + Calendar into life_evidence/ (needs Automation access). */
+/** macOS: snapshot Contacts into life_evidence/ (does not request Calendar). */
 export async function snapshotLifeEvidence(): Promise<{
   contacts: number;
   events: number;
@@ -146,7 +146,7 @@ export async function snapshotLifeEvidence(): Promise<{
   skipped?: string;
 }> {
   const cfg = await getConfig();
-  const snap = (await invoke("snapshot_life_evidence", { dataDir: cfg.data_dir })) as {
+  const snap = (await invoke("snapshot_contacts_evidence", { dataDir: cfg.data_dir })) as {
     contacts: number;
     events: number;
     skipped?: string;
@@ -160,6 +160,13 @@ export async function snapshotLifeEvidence(): Promise<{
   } catch {
     return snap;
   }
+}
+
+/** macOS: open a Privacy & Security permission pane for guided onboarding. */
+export async function openMacosPrivacySettings(
+  pane: "contacts" | "calendar" | "accessibility" | "screen-recording",
+): Promise<void> {
+  await invoke("open_macos_privacy_settings", { pane });
 }
 
 async function assertSidecarHasNukeRoute(apiBase: string): Promise<void> {
@@ -562,6 +569,13 @@ export async function ingestPath(path: string, move = false): Promise<{ queued: 
   });
 }
 
+export async function ingestText(body: { title?: string; text: string }): Promise<{ queued: string; kind: string }> {
+  return apiFetch("/ingest/text", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 export async function connectClaudeDesktop(body: { server_name?: string; config_path?: string } = {}): Promise<{
   config_path: string;
   backup_path: string | null;
@@ -813,6 +827,13 @@ export async function updateSettings(body: Partial<Settings>): Promise<SettingsR
   return apiFetch<SettingsResponse>("/settings", {
     method: "PUT",
     body: JSON.stringify(body),
+  });
+}
+
+export async function saveGeminiApiKey(apiKey: string): Promise<{ ok: boolean; configured: boolean }> {
+  return apiFetch("/settings/gemini-key", {
+    method: "PUT",
+    body: JSON.stringify({ api_key: apiKey }),
   });
 }
 
@@ -1238,6 +1259,18 @@ export type AgentStreamState = {
   has_gap?: boolean;
 };
 
+export type SessionOpenResponse = {
+  ok: boolean;
+  briefing_md: string;
+  request_md: string;
+  request_kind?: string;
+  thread_id?: string | null;
+  created_thread?: boolean;
+  delta_summary?: Record<string, unknown>;
+  last_open_at?: number;
+  opened_at?: number;
+};
+
 export type ActivityFeedBundle = {
   now: FeedItem | null;
   items: FeedRow[];
@@ -1245,6 +1278,13 @@ export type ActivityFeedBundle = {
   memory_prefetch: FeedItem[];
   graph: GraphScaffoldResponse;
   agent?: AgentStreamState;
+  session?: {
+    briefing_summary?: string;
+    request_kind?: string;
+    request_preview?: string;
+    thread_id?: string | null;
+    opened_at?: number;
+  } | null;
   composed_at: number;
   since_ts: number;
 };
@@ -1287,6 +1327,85 @@ export async function chatNextThread(): Promise<{ thread: ChatThread | null; cre
 
 export async function agentNext(): Promise<{ thread: ChatThread | null; created: boolean }> {
   return apiFetch("/chat/agent/next", { method: "POST", body: "{}" });
+}
+
+export type OnboardingTurn = { role: "assistant" | "user"; content: string };
+
+export async function agentOnboardingReply(body: {
+  step: string;
+  display_name?: string;
+  transcript?: OnboardingTurn[];
+  permission_status?: Record<string, string>;
+}): Promise<{ message: string; llm: boolean }> {
+  return apiFetch("/chat/agent/onboarding", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function saveOnboardingProfile(displayName: string): Promise<{ ok: boolean }> {
+  return apiFetch("/onboarding/profile", {
+    method: "POST",
+    body: JSON.stringify({ display_name: displayName }),
+  });
+}
+
+export async function openSession(body: { display_name?: string } = {}): Promise<SessionOpenResponse> {
+  return apiFetch("/session/open", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export type ResourcePollQuestion = {
+  resource_id: string;
+  label: string;
+  question: string;
+};
+
+export async function fetchResourcePollNext(): Promise<{
+  question: ResourcePollQuestion | null;
+  state: { answers: Record<string, unknown> };
+}> {
+  return apiFetch("/onboarding/resource-poll/next");
+}
+
+export async function answerResourcePoll(body: {
+  resource_id: string;
+  uses: boolean;
+  note?: string;
+}): Promise<{
+  ok: boolean;
+  poll_complete: boolean;
+  next_question?: ResourcePollQuestion;
+  candidate_id?: string;
+  task_id?: string;
+}> {
+  return apiFetch("/onboarding/resource-poll", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function recordConnectorIntent(body: {
+  source_text?: string;
+  resource_id?: string;
+}): Promise<{ ok: boolean; candidate_id?: string; task_id?: string }> {
+  return apiFetch("/onboarding/connector-intent", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export type ContextPlatformMeta = {
+  schema_version: number;
+  layers: string[];
+  doc: string;
+  privacy_matrix: Record<string, unknown>;
+};
+
+export async function fetchContextPlatform(): Promise<ContextPlatformMeta> {
+  return apiFetch("/context/platform");
 }
 
 export async function agentReply(

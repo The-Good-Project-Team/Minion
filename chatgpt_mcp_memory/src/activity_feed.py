@@ -499,6 +499,14 @@ def build_activity_feed(
     items.extend(council_items)
     items.extend(river)
 
+    session_hint = None
+    try:
+        from session_open import get_session_hint, session_hint_from_disk
+
+        session_hint = get_session_hint() or session_hint_from_disk(Path(data_dir))
+    except Exception:
+        log.debug("session hint for feed skipped", exc_info=True)
+
     return {
         "now": now_item,
         "items": items,
@@ -506,6 +514,7 @@ def build_activity_feed(
         "memory_prefetch": [],
         "graph": graph_scaffold_list(conn),
         "forty_two": forty_two_state,
+        "session": session_hint,
         "composed_at": time.time(),
         "since_ts": since_ts,
     }
