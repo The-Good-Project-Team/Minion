@@ -10,6 +10,7 @@ CONTEXT_BUNDLE_SCHEMA_VERSION = 1
 STRATUM_RAW_EVIDENCE = "raw_evidence"
 STRATUM_SUMMARIES = "summaries"
 STRATUM_GRAPH_FACTS = "graph_facts"
+STRATUM_WORK_CONTEXT = "work_context"
 STRATUM_PREFERENCES = "preferences"
 STRATUM_PROJECTIONS = "projections"
 
@@ -17,6 +18,7 @@ ALL_STRATA = (
     STRATUM_RAW_EVIDENCE,
     STRATUM_SUMMARIES,
     STRATUM_GRAPH_FACTS,
+    STRATUM_WORK_CONTEXT,
     STRATUM_PREFERENCES,
     STRATUM_PROJECTIONS,
 )
@@ -35,10 +37,17 @@ def reader_allowed_strata(reader_id: str, data_dir: Path | str) -> List[str]:
 
 def privacy_scope_payload(reader_id: str, data_dir: Path | str) -> Dict[str, Any]:
     allowed = reader_allowed_strata(reader_id, data_dir)
+    from consent_policy import load_policy
+
+    reader = (load_policy(data_dir).get("readers") or {}).get(reader_id) or {}
     return {
         "reader": reader_id,
         "allowed_strata": allowed,
         "denied_strata": [s for s in ALL_STRATA if s not in allowed],
+        "max_release_level": int(reader.get("max_release_level", 3 if reader_id == READER_MCP else 5)),
+        "release_notice": "Level 3/5 personal work context may be shared with this reader."
+        if reader_id == READER_MCP and int(reader.get("max_release_level", 3)) >= 3
+        else "",
     }
 
 

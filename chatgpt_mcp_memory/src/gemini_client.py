@@ -14,9 +14,13 @@ log = logging.getLogger(__name__)
 # Pro default: ~288 scheduler ticks/day + replies stays well under typical 1.5k RPD caps.
 DEFAULT_MODEL = "gemini-2.5-pro"
 FORTY_TWO_DEFAULT_MODEL = "gemini-2.5-pro"
-GRAPH_MINE_DEFAULT_MODEL = "gemini-2.5-flash"
+GRAPH_MINE_DEFAULT_MODEL = "gemini-2.0-flash-lite"
 FALLBACK_MODEL = "gemini-2.5-flash"  # when Pro hits free-tier / quota limits
-_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+_DEFAULT_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
+def _api_base() -> str:
+    return (os.environ.get("MINION_GEMINI_API_BASE") or _DEFAULT_API_BASE).rstrip("/")
 
 
 def gemini_api_key(data_dir: Optional[Path] = None) -> Optional[str]:
@@ -24,14 +28,20 @@ def gemini_api_key(data_dir: Optional[Path] = None) -> Optional[str]:
         v = (os.environ.get(name) or "").strip()
         if v:
             return v
-    try:
-        from secrets_paths import read_gemini_api_key_file
+    if os.environ.get("MINION_GEMINI_DISABLE_SECRET_FILES", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        try:
+            from secrets_paths import read_gemini_api_key_file
 
-        v = read_gemini_api_key_file(data_dir)
-        if v:
-            return v
-    except Exception:
-        log.debug("secrets file gemini key load failed", exc_info=True)
+            v = read_gemini_api_key_file(data_dir)
+            if v:
+                return v
+        except Exception:
+            log.debug("secrets file gemini key load failed", exc_info=True)
     if data_dir:
         try:
             from settings import load_settings
@@ -114,7 +124,7 @@ def _generate(
     stream: bool,
 ) -> Any:
     path = "streamGenerateContent?alt=sse" if stream else "generateContent"
-    url = f"{_API_BASE}/{mdl}:{path}?key={key}"
+    url = f"{_api_base()}/{mdl}:{path}?key={key}"
     if stream:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(

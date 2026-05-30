@@ -1,5 +1,4 @@
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -17,25 +16,13 @@ def conn(tmp_path: Path):
     c.close()
 
 
-def test_tick_opens_thread_when_gemini_and_gap(conn, tmp_path: Path) -> None:
-    sec = tmp_path / ".secrets"
-    sec.mkdir()
-    (sec / "gemini_api_key").write_text("fake", encoding="utf-8")
+def test_tick_opens_thread_when_gemini_and_gap(conn, tmp_path: Path, fake_gemini) -> None:
+    fake_gemini('{"confidence":0.8,"actions":[],"unresolved_question":""}')
     conn.execute(
         "DELETE FROM graph_nodes WHERE node_kind='person' AND status NOT IN ('scaffold', 'stub')"
     )
     conn.commit()
-    fake_tid = "thr-scheduler-test"
-    with (
-        patch("forty_two_scheduler._notify_chat_updated"),
-        patch(
-            "graph_fill.open_thread_for_gap",
-            return_value={
-                "thread": {"thread_id": fake_tid},
-                "created": True,
-                "gap": {"gap_type": "bucket"},
-            },
-        ),
-    ):
-        tid = tick(conn, tmp_path)
-    assert tid == fake_tid
+    tid = tick(conn, tmp_path)
+    assert tid
+    row = conn.execute("SELECT thread_id FROM chat_threads WHERE thread_id=?", (tid,)).fetchone()
+    assert row is not None

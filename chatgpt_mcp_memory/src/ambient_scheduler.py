@@ -105,16 +105,15 @@ def _run_once(data_dir, conn_factory) -> None:
                 except Exception:
                     log.exception("graph infer enqueue after ambient failed")
             try:
-                from graph_corpus_mine import graph_mine_enabled, mine_limits, run_graph_mine_tick
+                from graph_corpus_mine import mine_limits, run_periodic_graph_mine_tick
 
-                if graph_mine_enabled(Path(data_dir)):
-                    limits = mine_limits(Path(data_dir))
-                    run_graph_mine_tick(
-                        conn,
-                        Path(data_dir),
-                        max_llm_calls=limits.get("max_ambient_tick", 2),
-                        source="ambient",
-                    )
+                limits = mine_limits(Path(data_dir))
+                run_periodic_graph_mine_tick(
+                    conn,
+                    Path(data_dir),
+                    max_llm_calls=limits.get("max_ambient_tick", 2),
+                    source="ambient_periodic",
+                )
             except Exception:
                 log.exception("ambient graph mine tick failed")
         conn.commit()
@@ -145,8 +144,10 @@ def _run_once(data_dir, conn_factory) -> None:
 
 
 def _loop(data_dir, conn_factory) -> None:
-    while not _stop.wait(_INTERVAL_SEC):
+    while not _stop.is_set():
         _run_once(data_dir, conn_factory)
+        if _stop.wait(_INTERVAL_SEC):
+            break
 
 
 def start_ambient_scheduler(data_dir, conn_factory) -> None:

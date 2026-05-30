@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Smoke-test a running Minion sidecar, or start one from this checkout."""
+"""Smoke-test a running Minion sidecar, or start one from this checkout.
+
+This is the lower-level sidecar probe. For installed-app production smoke against
+real user data, use `bin/minion prod-smoke` or `npm run test:prod-smoke`.
+"""
 from __future__ import annotations
 
 import argparse

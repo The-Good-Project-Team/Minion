@@ -1190,6 +1190,36 @@ def cmd_verify_screen_memory(args: argparse.Namespace) -> int:
     return _screen_memory_cmd(args, "verify", [])
 
 
+def cmd_prod_smoke(args: argparse.Namespace) -> int:
+    script = _repo_root() / "desktop" / "scripts" / "prod_smoke.py"
+    if not script.is_file():
+        raise SystemExit(f"missing production smoke script: {script}")
+    cmd = [sys.executable, str(script)]
+    if args.data_dir:
+        cmd.extend(["--data-dir", args.data_dir])
+    if args.install_path:
+        cmd.extend(["--install-path", args.install_path])
+    if args.inbox:
+        cmd.extend(["--inbox", args.inbox])
+    if args.target:
+        cmd.extend(["--target", args.target])
+    if args.wait_sec is not None:
+        cmd.extend(["--wait-sec", str(args.wait_sec)])
+    if args.mutating:
+        cmd.append("--mutating")
+    if args.include_mcp:
+        cmd.append("--include-mcp")
+    if args.no_build:
+        cmd.append("--no-build")
+    if args.no_install:
+        cmd.append("--no-install")
+    if args.no_launch:
+        cmd.append("--no-launch")
+    if args.json:
+        cmd.append("--json")
+    return int(subprocess.run(cmd).returncode)
+
+
 def cmd_graphify_status(args: argparse.Namespace) -> int:
     derived = Path(args.derived_dir or _derived_dir_default()).expanduser().resolve()
     script = """
@@ -1690,6 +1720,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_verify_screen.add_argument("--derived-dir", default=None, help="Directory holding memory.db")
     p_verify_screen.add_argument("--workspace", default=None, help="Workspace whose .venv runs screen memory")
     p_verify_screen.set_defaults(func=cmd_verify_screen_memory)
+
+    p_prod_smoke = sub.add_parser(
+        "prod-smoke",
+        help="Build/install/launch Minion.app and run production smoke against real data.",
+    )
+    p_prod_smoke.add_argument(
+        "--data-dir",
+        default=str(Path.home() / "Library/Application Support/Minion/data"),
+        help="Production data dir (default: ~/Library/Application Support/Minion/data)",
+    )
+    p_prod_smoke.add_argument(
+        "--install-path",
+        default=str(Path.home() / "Applications/Minion-smoke.app"),
+        help="Install path for smoke copy of Minion.app",
+    )
+    p_prod_smoke.add_argument("--inbox", default="", help="Optional MINION_INBOX for launchctl")
+    p_prod_smoke.add_argument("--target", default="", help="Optional tauri build target triple")
+    p_prod_smoke.add_argument("--wait-sec", type=float, default=180.0, help="Seconds to wait for harness")
+    p_prod_smoke.add_argument("--mutating", action="store_true", help="Append dogfood event and verify recall/search")
+    p_prod_smoke.add_argument("--include-mcp", action="store_true", help="Verify MCP auth gate during probe")
+    p_prod_smoke.add_argument("--no-build", action="store_true", help="Use existing release build")
+    p_prod_smoke.add_argument("--no-install", action="store_true", help="Run built .app in place")
+    p_prod_smoke.add_argument("--no-launch", action="store_true", help="Assume Minion.app is already running")
+    p_prod_smoke.add_argument("--json", action="store_true", help="Emit machine-readable JSON report")
+    p_prod_smoke.set_defaults(func=cmd_prod_smoke)
 
     p_graphify_status = sub.add_parser(
         "graphify-status",

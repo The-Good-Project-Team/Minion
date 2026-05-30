@@ -41,6 +41,7 @@ mod listening_session;
 mod screen_context;
 mod screen_reader;
 mod window_capture;
+mod smoke_harness;
 
 // ---------------------------------------------------------------------------
 // Debug NDJSON instrumentation (active until post-release verification).
@@ -699,7 +700,7 @@ fn http_get_body(port: u16, path: &str, timeout_ms: u64) -> Option<String> {
 }
 
 /// True when `GET /status` returns a JSON body that looks like Minion's status.
-fn sidecar_status_responds(port: u16, per_try_timeout_ms: u64) -> bool {
+pub(crate) fn sidecar_status_responds(port: u16, per_try_timeout_ms: u64) -> bool {
     let Some(body) = http_get_body(port, "/status", per_try_timeout_ms) else {
         return false;
     };
@@ -1434,8 +1435,7 @@ fn macos_watch_env_snapshot() -> serde_json::Value {
     serde_json::Value::Null
 }
 
-#[tauri::command]
-fn screen_context_status(state: tauri::State<AppState>) -> serde_json::Value {
+pub(crate) fn screen_context_payload(state: &AppState) -> serde_json::Value {
     let path = state
         .data_dir
         .join("ambient")
@@ -1487,6 +1487,11 @@ fn screen_context_status(state: tauri::State<AppState>) -> serde_json::Value {
         "listening_active": listening_session::is_active(),
         "full_listening_active": listening_session::is_full_active(),
     })
+}
+
+#[tauri::command]
+fn screen_context_status(state: tauri::State<AppState>) -> serde_json::Value {
+    screen_context_payload(&state)
 }
 
 /// Strip a trailing ` (N)` suffix from a file stem, e.g. `foo (3)` -> `foo`.
@@ -2276,6 +2281,11 @@ pub fn run() {
                     let _ = handle.emit(
                         "sidecar://status",
                         serde_json::json!({"state": "ready"}),
+                    );
+                    smoke_harness::spawn_smoke_harness(
+                        handle.clone(),
+                        data_dir_bg.clone(),
+                        api_token_bg.clone(),
                     );
                     spawn_menu_status_watcher(handle.clone(), port_bg);
                     if needs_pull_local {

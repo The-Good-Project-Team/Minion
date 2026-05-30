@@ -167,6 +167,7 @@ ALL_KINDS: Tuple[str, ...] = (
     "video",
     "code",
     "chatgpt-export",
+    "claude-export",
     "external",
 )
 

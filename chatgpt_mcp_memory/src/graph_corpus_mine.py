@@ -1,18 +1,23 @@
 """LLM-powered corpus graph mining — ongoing graph intelligence when Gemini is configured."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from store import meta_get, meta_set
 
 log = logging.getLogger(__name__)
 
 _META_STATS = "graph_mine_stats"
+_META_LAST_PERIODIC = "graph_mine_last_periodic"
+_META_LAST_QUERY = "graph_mine_last_query"
+_META_QUERY_PREFIX = "graph_mine_query:"
 
 # One-time-ish scaffold buckets (family, birthplace, employers) — mined first when empty.
 DURABLE_TARGETS: Tuple[Dict[str, Any], ...] = (
@@ -54,9 +59,14 @@ DURABLE_TARGETS: Tuple[Dict[str, Any], ...] = (
     },
 )
 
-DEFAULT_MAX_CALLS_PER_DAY = 96
-DEFAULT_MAX_CALLS_AMBIENT_TICK = 2
-DEFAULT_MAX_CALLS_42_TICK = 4
+DEFAULT_MAX_CALLS_PER_DAY = 48
+DEFAULT_MAX_CALLS_AMBIENT_TICK = 6
+DEFAULT_MAX_CALLS_42_TICK = 6
+DEFAULT_MAX_OUTPUT_TOKENS = 2048
+DEFAULT_PERIODIC_INTERVAL_SEC = 6 * 60 * 60
+DEFAULT_QUERY_MIN_INTERVAL_SEC = 15 * 60
+DEFAULT_QUERY_SAME_INTERVAL_SEC = 6 * 60 * 60
+DEFAULT_QUERY_MAX_CALLS = 1
 
 
 def graph_mine_enabled(data_dir: Optional[Path]) -> bool:
@@ -123,15 +133,228 @@ def mine_limits(data_dir: Optional[Path]) -> Dict[str, int]:
         }
 
 
+def _setting_value(data_dir: Optional[Path], key: str, default: Any) -> Any:
+    if not data_dir:
+        return default
+    try:
+        from settings import load_settings
+
+        return load_settings(Path(data_dir)).get(key, default)
+    except Exception:
+        return default
+
+
+def _setting_int(
+    data_dir: Optional[Path],
+    key: str,
+    default: int,
+    *,
+    minimum: int = 0,
+) -> int:
+    try:
+        return max(minimum, int(_setting_value(data_dir, key, default)))
+    except Exception:
+        return max(minimum, int(default))
+
+
+def graph_mine_periodic_interval_sec(data_dir: Optional[Path]) -> int:
+    raw = ""
+    try:
+        import os
+
+        raw = os.environ.get("MINION_GRAPH_MINE_INTERVAL_SEC", "").strip()
+    except Exception:
+        raw = ""
+    if raw:
+        try:
+            return max(60, int(float(raw)))
+        except ValueError:
+            pass
+    return _setting_int(
+        data_dir,
+        "graph_mine_interval_sec",
+        DEFAULT_PERIODIC_INTERVAL_SEC,
+        minimum=60,
+    )
+
+
+def _query_mine_options(data_dir: Optional[Path]) -> Dict[str, Any]:
+    return {
+        "enabled": bool(_setting_value(data_dir, "graph_mine_on_query_enabled", True)),
+        "min_interval_sec": _setting_int(
+            data_dir,
+            "graph_mine_query_min_interval_sec",
+            DEFAULT_QUERY_MIN_INTERVAL_SEC,
+            minimum=60,
+        ),
+        "same_query_interval_sec": _setting_int(
+            data_dir,
+            "graph_mine_query_same_query_interval_sec",
+            DEFAULT_QUERY_SAME_INTERVAL_SEC,
+            minimum=60,
+        ),
+        "max_calls": _setting_int(
+            data_dir,
+            "graph_mine_query_max_calls_per_tick",
+            DEFAULT_QUERY_MAX_CALLS,
+            minimum=0,
+        ),
+    }
+
+
+def _meta_float(conn, key: str) -> float:
+    try:
+        return float(meta_get(conn, key) or 0)
+    except Exception:
+        return 0.0
+
+
+def _query_key(query: str) -> str:
+    words = [w for w in "".join(ch.lower() if ch.isalnum() else " " for ch in query).split() if len(w) > 1]
+    normalized = " ".join(words[:12])
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"{_META_QUERY_PREFIX}{digest}"
+
+
+def run_periodic_graph_mine_tick(
+    conn,
+    data_dir: Optional[Path],
+    *,
+    max_llm_calls: Optional[int] = None,
+    source: str = "periodic",
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Run graph mining at most once per configured periodic interval."""
+    now_f = float(now or time.time())
+    interval = graph_mine_periodic_interval_sec(data_dir)
+    last = _meta_float(conn, _META_LAST_PERIODIC)
+    if last and now_f - last < interval:
+        return {
+            "status": "deferred",
+            "calls": 0,
+            "filled": 0,
+            "next_due_at": last + interval,
+        }
+    if max_llm_calls is None:
+        max_llm_calls = mine_limits(data_dir).get("max_ambient_tick", DEFAULT_MAX_CALLS_AMBIENT_TICK)
+    out = run_graph_mine_tick(conn, data_dir, max_llm_calls=max_llm_calls, source=source)
+    meta_set(conn, _META_LAST_PERIODIC, str(now_f))
+    return out
+
+
+def maybe_run_query_graph_mine(
+    conn,
+    data_dir: Optional[Path],
+    query: str,
+    *,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Tiny query-triggered graph mine with global and same-query debounces."""
+    q = " ".join((query or "").split()).strip()
+    opts = _query_mine_options(data_dir)
+    if not opts["enabled"]:
+        return {"status": "disabled", "calls": 0, "filled": 0}
+    if len(q) < 3 or int(opts["max_calls"]) <= 0:
+        return {"status": "skipped", "reason": "query_not_actionable", "calls": 0, "filled": 0}
+    now_f = float(now or time.time())
+    last_any = _meta_float(conn, _META_LAST_QUERY)
+    if last_any and now_f - last_any < float(opts["min_interval_sec"]):
+        return {"status": "deferred", "reason": "query_global_debounce", "calls": 0, "filled": 0}
+    key = _query_key(q)
+    last_same = _meta_float(conn, key)
+    if last_same and now_f - last_same < float(opts["same_query_interval_sec"]):
+        return {"status": "deferred", "reason": "same_query_debounce", "calls": 0, "filled": 0}
+
+    out = run_graph_mine_tick(
+        conn,
+        data_dir,
+        max_llm_calls=int(opts["max_calls"]),
+        source="query",
+    )
+    meta_set(conn, _META_LAST_QUERY, str(now_f))
+    meta_set(conn, key, str(now_f))
+    return out
+
+
+_bg_lock = threading.Lock()
+_bg_running = False
+
+
+def graph_mine_max_output_tokens(data_dir: Optional[Path]) -> int:
+    return _setting_int(
+        data_dir,
+        "graph_mine_max_output_tokens",
+        DEFAULT_MAX_OUTPUT_TOKENS,
+        minimum=256,
+    )
+
+
+def schedule_background_graph_mine(
+    data_dir: Path,
+    *,
+    query: str = "",
+    conn_factory: Optional[Callable[[], Any]] = None,
+) -> Dict[str, Any]:
+    """Fire-and-forget graph mine on a daemon thread (cheap Flash model, never blocks search)."""
+    global _bg_running
+    data = Path(data_dir).expanduser().resolve()
+    q = " ".join((query or "").split()).strip()
+    if q:
+        opts = _query_mine_options(data)
+        if not opts["enabled"] or int(opts["max_calls"]) <= 0:
+            return {"status": "disabled", "reason": "query_mine_off"}
+        if len(q) < 3:
+            return {"status": "skipped", "reason": "query_not_actionable"}
+
+    with _bg_lock:
+        if _bg_running:
+            return {"status": "skipped", "reason": "already_running"}
+        _bg_running = True
+
+    def _worker() -> None:
+        global _bg_running
+        try:
+            if conn_factory is not None:
+                conn = conn_factory()
+            else:
+                from store import DB_FILENAME, connect
+
+                conn = connect(data / DB_FILENAME)
+            try:
+                if q:
+                    maybe_run_query_graph_mine(conn, data, q)
+                else:
+                    run_periodic_graph_mine_tick(conn, data)
+                conn.commit()
+            finally:
+                if conn_factory is None:
+                    conn.close()
+        except Exception:
+            log.exception("background graph mine failed")
+        finally:
+            with _bg_lock:
+                _bg_running = False
+
+    threading.Thread(
+        target=_worker,
+        name="minion-graph-mine",
+        daemon=True,
+    ).start()
+    return {"status": "scheduled", "mode": "query" if q else "periodic"}
+
+
 def graph_mine_status(conn, data_dir: Optional[Path] = None) -> Dict[str, Any]:
     stats = _load_stats(conn)
     limits = mine_limits(data_dir)
     configured = False
+    model = ""
     if data_dir:
         try:
-            from gemini_client import gemini_configured
+            from gemini_client import gemini_configured, graph_mine_gemini_model
 
             configured = gemini_configured(data_dir)
+            if configured:
+                model = graph_mine_gemini_model(data_dir)
         except Exception:
             configured = False
     return {
@@ -141,6 +364,13 @@ def graph_mine_status(conn, data_dir: Optional[Path] = None) -> Dict[str, Any]:
         "filled_today": int(stats.get("filled") or 0),
         "max_calls_per_day": limits["max_per_day"],
         "last_tick": float(stats.get("last_tick") or 0),
+        "periodic_interval_sec": graph_mine_periodic_interval_sec(data_dir),
+        "last_periodic_tick": _meta_float(conn, _META_LAST_PERIODIC),
+        "last_query_tick": _meta_float(conn, _META_LAST_QUERY),
+        "on_query_enabled": bool(_query_mine_options(data_dir).get("enabled")),
+        "max_output_tokens": graph_mine_max_output_tokens(data_dir),
+        "model": model,
+        "background_running": _bg_running,
     }
 
 
@@ -313,7 +543,10 @@ def run_graph_mine_tick(
             deltas.extend(result.get("deltas") or [])
             continue
         if st == "needs_question":
-            break
+            # One ambiguous gap should not stall the rest of the tick — record the
+            # open question (already persisted by try_fill_gap_from_corpus) and move
+            # on so other durable gaps still get a chance to fill this tick.
+            continue
         if st == "skipped" and result.get("reason") == "no_evidence":
             continue
 

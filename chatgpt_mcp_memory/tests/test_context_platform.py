@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from consent_policy import privacy_matrix, reader_allowed_strata
+from consent_policy import filter_hits_for_mcp, privacy_matrix, reader_allowed_strata
 from context_platform import CONTEXT_BUNDLE_SCHEMA_VERSION, enrich_context_bundle
-from store import connect, seed_sync_sources
+from store import Hit, connect, seed_sync_sources
 
 
 @pytest.fixture()
@@ -28,6 +28,36 @@ def test_reader_allowed_strata_defaults(tmp_path: Path) -> None:
     mcp = reader_allowed_strata("mcp", tmp_path)
     assert "raw_evidence" in local
     assert "raw_evidence" not in mcp
+    assert "work_context" in mcp
+
+
+def test_mcp_release_request_before_level_three_context(tmp_path: Path) -> None:
+    hit = Hit(
+        chunk_id="screen-1",
+        score=0.9,
+        text="User is debugging The Good Project investor update.",
+        role="ambient",
+        source_id="src-screen-1",
+        path="ambient/screen-events/today/screen-1.md",
+        kind="screen-event",
+        mtime=1.0,
+        meta={},
+        source_meta={},
+    )
+
+    filtered = filter_hits_for_mcp([hit], tmp_path)
+    assert filtered[0].kind == "release-request"
+    assert filtered[0].meta["release_level"] == 3
+    assert "The Good Project" not in filtered[0].text
+
+    approved = filter_hits_for_mcp(
+        [hit],
+        tmp_path,
+        release_ok=True,
+        approved_release_level=3,
+    )
+    assert approved[0].kind == "screen-event"
+    assert "The Good Project" in approved[0].text
 
 
 def test_enrich_context_bundle(conn, tmp_path: Path) -> None:

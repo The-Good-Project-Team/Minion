@@ -340,18 +340,75 @@ Rules:
 - Never return a bare JSON array. If no actions, use "actions": []."""
 
 
+# Gemini structured output emits ONLY properties declared in the schema. The
+# action item object must therefore enumerate every field apply_proposal() reads;
+# an underspecified `{"type": "object"}` yields content-free actions (the model
+# can't surface type/title/node_kind), so no graph write ever lands.
+_ACTION_ITEM_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "type": {
+            "type": "string",
+            "enum": [
+                "create_node",
+                "add_edge",
+                "set_person_summary",
+                "set_me_profile",
+                "approve_claim",
+                "reject_claim",
+            ],
+        },
+        "node_kind": {"type": "string"},
+        "title": {"type": "string"},
+        "node_id": {"type": "string"},
+        "parent_node_id": {"type": "string"},
+        "from_node_id": {"type": "string"},
+        "to_node_id": {"type": "string"},
+        "rel_kind": {"type": "string"},
+        "summary": {"type": "string"},
+        "relation_note": {"type": "string"},
+        "user_note": {"type": "string"},
+        "claim_id": {"type": "string"},
+        "confidence": {"type": "number"},
+        "evidence_refs": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["type"],
+    "propertyOrdering": [
+        "type",
+        "node_kind",
+        "title",
+        "node_id",
+        "parent_node_id",
+        "from_node_id",
+        "to_node_id",
+        "rel_kind",
+        "summary",
+        "relation_note",
+        "user_note",
+        "claim_id",
+        "confidence",
+        "evidence_refs",
+    ],
+}
+
 MINING_RESPONSE_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
         "confidence": {"type": "number"},
         "actions": {
             "type": "array",
-            "items": {"type": "object"},
+            "items": _ACTION_ITEM_SCHEMA,
         },
         "unresolved_question": {"type": "string"},
         "reasoning_notes": {"type": "string"},
     },
     "required": ["confidence", "actions"],
+    "propertyOrdering": [
+        "confidence",
+        "actions",
+        "unresolved_question",
+        "reasoning_notes",
+    ],
 }
 
 
@@ -401,6 +458,7 @@ def propose_graph_actions_from_evidence(
 
     from gemini_client import gemini_chat, gemini_configured, graph_mine_gemini_model
     from forty_two_context import build_mining_context, mining_context_markdown
+    from graph_corpus_mine import graph_mine_max_output_tokens
 
     if not gemini_configured(data_dir):
         return None, False
@@ -441,7 +499,9 @@ def propose_graph_actions_from_evidence(
             data_dir=_Path(data_dir) if data_dir else None,
             model=graph_mine_gemini_model(_Path(data_dir) if data_dir else None),
             temperature=0.15,
-            max_output_tokens=8192,
+            max_output_tokens=graph_mine_max_output_tokens(
+                _Path(data_dir) if data_dir else None
+            ),
             timeout_seconds=90.0,
             response_mime_type="application/json",
             response_schema=MINING_RESPONSE_SCHEMA,

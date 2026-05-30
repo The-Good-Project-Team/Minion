@@ -258,6 +258,27 @@ def test_ingest_single_file(sidecar, staged_note: Path) -> None:
     assert info["chunk_count"] >= 1
 
 
+def test_ingest_temporary_file_cleans_staged_copy(sidecar, staged_note: Path) -> None:
+    r = sidecar.post("/ingest", {"path": str(staged_note), "temporary": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    queued = Path(body["queued"])
+    assert body["temporary"] is True
+    assert str(sidecar.inbox) in str(queued)
+
+    sources = sidecar.wait_for_sources(1, timeout=45.0)
+    assert len(sources) == 1
+
+    deadline = time.time() + 10
+    while queued.exists() and time.time() < deadline:
+        time.sleep(0.25)
+    assert not queued.exists()
+
+    tracking = sidecar.data_dir / "file_tracking.jsonl"
+    assert tracking.exists()
+    assert str(staged_note.resolve()) in tracking.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # 3. POST /search
 # ---------------------------------------------------------------------------

@@ -195,6 +195,17 @@ END;
 """
 
 
+# Tears down the FTS5 index + its sync triggers so it can be recreated from the
+# `chunks` content table. The index is derived data: dropping it never loses
+# source text. Used by FTS-only corruption recovery.
+_FTS_DROP_SQL = """
+DROP TRIGGER IF EXISTS chunks_ai_fts;
+DROP TRIGGER IF EXISTS chunks_ad_fts;
+DROP TRIGGER IF EXISTS chunks_au_fts;
+DROP TABLE IF EXISTS fts_chunks;
+"""
+
+
 def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
     """Idempotent migrations layered onto `_SCHEMA_SQL` for older installs."""
     conn.execute(
@@ -676,6 +687,66 @@ def _rotate_corrupt_database(db_path: Path) -> Path:
     return backup
 
 
+def _err_indicates_corruption(err: Optional[BaseException]) -> bool:
+    """True for any on-disk corruption signal (not a transient lock/I/O blip).
+
+    The exact phrasing varies by where SQLite first trips over the damage — a
+    contentless FTS5 index can surface as the specific "malformed inverted index"
+    message from ``quick_check`` or as a generic "database disk image is
+    malformed" from the first query that touches it. We can't tell FTS-only
+    damage from base-table damage by message alone, so on any corruption signal
+    we let the recovery loop attempt the (safe, self-declining) FTS rebuild
+    before escalating to a whole-DB rotation.
+    """
+    s = (str(err) if err else "").lower()
+    return any(
+        x in s
+        for x in ("malformed", "corrupt", "not a database", "disk image")
+    )
+
+
+def _repair_fts_index(db_path: Path) -> bool:
+    """Rebuild a corrupt FTS5 index in place. Returns True only if the whole DB
+    passes ``quick_check`` afterwards.
+
+    Precondition check: the base `chunks` table must read cleanly. If it does
+    not, the damage is deeper than the index and we let the caller fall through
+    to whole-DB rotation. Because the FTS table is contentless-linked
+    (``content='chunks'``), dropping and rebuilding it never loses source text.
+    """
+    _safe_unlink_wal_shm(db_path)
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA busy_timeout=8000")
+        except sqlite3.OperationalError:
+            pass
+        _load_vec_extension(conn)
+        try:
+            conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+        except sqlite3.DatabaseError as e:
+            log.warning("FTS repair aborted: base `chunks` table unreadable (%s)", e)
+            return False
+        conn.executescript(_FTS_DROP_SQL)
+        conn.executescript(_FTS_SCHEMA_SQL)
+        with transaction(conn):
+            conn.execute("INSERT INTO fts_chunks(fts_chunks) VALUES('rebuild')")
+        _verify_connection(conn)
+        conn.commit()
+        return True
+    except sqlite3.DatabaseError as e:
+        log.warning("FTS repair failed for %s: %s", db_path, e)
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _apply_journal_mode(
     conn: sqlite3.Connection, db_path: Path, *, wal_first: bool = True
 ) -> str:
@@ -804,12 +875,28 @@ def connect(db_path: Path, *, embed_dim: int = DEFAULT_EMBED_DIM) -> sqlite3.Con
         (True, "NORMAL", "unlink_wal_shm"),
         (False, "NORMAL", "unlink_wal_shm"),
         (False, "FULL", "unlink_wal_shm"),
+        (True, "NORMAL", "rebuild_fts"),
         (True, "NORMAL", "rotate_db"),
     ]
 
     last_err: Optional[BaseException] = None
+    corruption_seen = False
     for pass_i, (wal_first, sync_mode, pre) in enumerate(recovery_plan):
-        if pre == "unlink_wal_shm":
+        if pre == "rebuild_fts":
+            # The FTS5 index is derived from `chunks`; repair it in place rather
+            # than rotating the whole vault aside. _repair_fts_index is the
+            # authority: it declines (returns False) unless `chunks` reads
+            # cleanly and the rebuilt DB passes quick_check, so attempting it on
+            # any corruption signal is safe and never costs data.
+            if not (corruption_seen and _repair_fts_index(db_path)):
+                continue
+            log.error(
+                "SQLite recovery pass %s: rebuilt corrupt FTS index in place for %s "
+                "(captured memory preserved; no rotation needed)",
+                pass_i,
+                db_path,
+            )
+        elif pre == "unlink_wal_shm":
             removed = _safe_unlink_wal_shm(db_path)
             if removed:
                 log.warning(
@@ -860,8 +947,10 @@ def connect(db_path: Path, *, embed_dim: int = DEFAULT_EMBED_DIM) -> sqlite3.Con
             return conn
         except RuntimeError:
             raise
-        except sqlite3.OperationalError as e:
+        except sqlite3.DatabaseError as e:
             last_err = e
+            if _err_indicates_corruption(e):
+                corruption_seen = True
             log.warning(
                 "SQLite open failed pass %s (%s wal_first=%s sync=%s pre=%s): %s",
                 pass_i,

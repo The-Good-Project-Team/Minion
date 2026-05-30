@@ -37,6 +37,8 @@ Run what applies — **do not hand results back as finished without executing or
 Optional after risky UI changes: `cd desktop && npm run test:e2e` (Playwright stack).
 Optional live smoke: `cd desktop && npm run test:live` (status/feed/graph/screen-memory readiness; starts a quiet local sidecar if needed), or `npm run test:live -- --mutating` to also exercise live `remember-screen` without screenshots/adapters.
 
+Optional production smoke (installed app + real data): `./bin/minion prod-smoke` or `cd desktop && npm run test:prod-smoke`. Use `--mutating` to append an auditable `dogfood:*` ambient event and verify recall/search/guidance through the app harness. Audit logs land in `<data_dir>/smoke-runs/`.
+
 Use **`chatgpt_mcp_memory/.venv/bin/python`**, not bare macOS `python3`, for pytest (SQLite extension preflight).
 
 ### Cursor hooks (automatic backup verify)

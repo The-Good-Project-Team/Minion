@@ -14,6 +14,8 @@ d9eced211a2a0b9cd1b2d52f595ee063aea7ff88cddbcaad683ae4aa25df7992-2026-03-21-20-2
 # Derived artifacts (often personal / large)
 chatgpt_mcp_memory/data/raw/
 chatgpt_mcp_memory/data/derived/
+# graphify binary run output (graph.html/json, cache, manifest — regenerated per run)
+graphify-out/
 graph_snapshot.json
 graph_events.jsonl
 life_evidence/
@@ -29,6 +31,7 @@ agent/identity_profile.md
 ssh/
 .secrets/
 **/.secrets/
+gemini_key.md
 
 # Packaging build outputs
 chatgpt_mcp_memory/build/

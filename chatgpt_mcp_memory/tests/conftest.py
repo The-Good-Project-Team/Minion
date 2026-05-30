@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -93,6 +94,94 @@ def _pick_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+@dataclass
+class FakeGeminiServer:
+    base_url: str
+    response_text: str
+    requests: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@pytest.fixture
+def fake_gemini(tmp_path: Path):
+    """Real local HTTP Gemini-compatible endpoint; no function patching."""
+    servers: List[ThreadingHTTPServer] = []
+    old_key = os.environ.get("GEMINI_API_KEY")
+    old_base = os.environ.get("MINION_GEMINI_API_BASE")
+    old_disable_files = os.environ.get("MINION_GEMINI_DISABLE_SECRET_FILES")
+
+    def start(response_text: str) -> FakeGeminiServer:
+        state = FakeGeminiServer(base_url="", response_text=response_text)
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length).decode("utf-8") if length else "{}"
+                try:
+                    payload = json.loads(body)
+                except json.JSONDecodeError:
+                    payload = {}
+                state.requests.append({"path": self.path, "payload": payload})
+                if "streamGenerateContent" in self.path:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    for part in state.response_text.split("|"):
+                        event = {
+                            "candidates": [
+                                {"content": {"parts": [{"text": part}]}, "finishReason": "STOP"}
+                            ]
+                        }
+                        self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+                    return
+                body_out = {
+                    "candidates": [
+                        {
+                            "content": {"parts": [{"text": state.response_text}]},
+                            "finishReason": "STOP",
+                        }
+                    ]
+                }
+                raw = json.dumps(body_out).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *_args: Any) -> None:
+                return
+
+        port = _pick_free_port()
+        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        servers.append(server)
+        state.base_url = f"http://127.0.0.1:{port}/v1beta/models"
+        os.environ["GEMINI_API_KEY"] = "fake-local-key"
+        os.environ["MINION_GEMINI_API_BASE"] = state.base_url
+        os.environ["MINION_GEMINI_DISABLE_SECRET_FILES"] = "1"
+        return state
+
+    try:
+        yield start
+    finally:
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        if old_key is None:
+            os.environ.pop("GEMINI_API_KEY", None)
+        else:
+            os.environ["GEMINI_API_KEY"] = old_key
+        if old_base is None:
+            os.environ.pop("MINION_GEMINI_API_BASE", None)
+        else:
+            os.environ["MINION_GEMINI_API_BASE"] = old_base
+        if old_disable_files is None:
+            os.environ.pop("MINION_GEMINI_DISABLE_SECRET_FILES", None)
+        else:
+            os.environ["MINION_GEMINI_DISABLE_SECRET_FILES"] = old_disable_files
 
 
 @dataclass

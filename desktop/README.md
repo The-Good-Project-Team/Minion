@@ -96,6 +96,21 @@ testing a packaged app or a remote-forwarded sidecar. Mutating checks use
 `.minion_api_token` file. Harness-started sidecars disable the watcher,
 ambient scheduler, and remote analytics.
 
+Production smoke (installed app + real data):
+
+```bash
+# Build, install to ~/Applications/Minion-smoke.app, launch, and probe harness.
+./bin/minion prod-smoke
+
+# Same, but append a dogfood ambient event and verify recall/search/guidance.
+./bin/minion prod-smoke --mutating --json
+
+# Reuse an already-running Minion.app against your live data dir.
+./bin/minion prod-smoke --no-build --no-install --no-launch
+```
+
+The installed app exposes a loopback-only smoke harness (see `<data_dir>/smoke-harness.json`). It is token-gated via `.minion_api_token`. Every run writes an audit JSON line under `<data_dir>/smoke-runs/`.
+
 ## Release zips: Intel vs Apple Silicon
 
 [**GitHub Releases**](https://github.com/reif-is-a-foofie/Minion/releases) ship two zips per version. File names spell out the hardware in plain language (users should not need “arm64” / “x64”):

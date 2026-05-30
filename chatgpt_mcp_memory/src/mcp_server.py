@@ -20,9 +20,8 @@ warnings.filterwarnings(
     message=r"urllib3 v2 only supports OpenSSL 1\.1\.1\+.*LibreSSL.*",
 )
 
-from fastembed import TextEmbedding
-
 from fastembed_cache import fastembed_cache_dir, register_fastembed_data_dir
+from ingest import DeterministicTextEmbedding, deterministic_embeddings_enabled
 from store import (
     DB_FILENAME,
     browse_chunks_chronological as store_browse_chronological,
@@ -78,7 +77,7 @@ TOP_K_CAP = 12
 DEFAULT_TOP_K = 8
 DEFAULT_MAX_CHARS = 900
 DEFAULT_MAX_CHARS_FULL = 2000
-PROTOCOL_VERSION = "2026-05-06"
+PROTOCOL_VERSION = "2025-03-26"
 DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 _INSTRUCTIONS_FALLBACK = (
@@ -144,11 +143,21 @@ def _data_dir() -> Path:
     return exe.parent.parent / "data" / "derived"
 
 
-def _consent_filter_hits_for_mcp(hits: List[Any]) -> List[Any]:
+def _consent_filter_hits_for_mcp(
+    hits: List[Any],
+    *,
+    release_ok: bool = False,
+    approved_release_level: Optional[int] = None,
+) -> List[Any]:
     try:
         from consent_policy import filter_hits_for_mcp
 
-        return filter_hits_for_mcp(hits, _data_dir())
+        return filter_hits_for_mcp(
+            hits,
+            _data_dir(),
+            release_ok=release_ok,
+            approved_release_level=approved_release_level,
+        )
     except Exception:
         log.exception("MCP consent filter failed; using unfiltered hits")
         return hits
@@ -369,6 +378,8 @@ def _maybe_start_watcher(db_path: Path) -> None:
 
 def _get_model() -> TextEmbedding:
     global _MODEL, _MODEL_NAME
+    if deterministic_embeddings_enabled():
+        return DeterministicTextEmbedding()
     with _INDEX_LOCK:
         conn = _get_conn()
         name = (
@@ -378,6 +389,8 @@ def _get_model() -> TextEmbedding:
         )
         if _MODEL is not None and _MODEL_NAME == name:
             return _MODEL
+        from fastembed import TextEmbedding
+
         _MODEL = TextEmbedding(
             model_name=name, cache_dir=fastembed_cache_dir(data_dir=_data_dir())
         )
@@ -452,6 +465,11 @@ def _hit_to_result(hit: Any, max_chars: int) -> Dict[str, Any]:
         "conversation_title": meta.get("conversation_title"),
         "create_time": meta.get("create_time"),
         "text": _cap_text(hit.text, max_chars),
+        "release_level": meta.get("release_level"),
+        "release_stratum": meta.get("release_stratum"),
+        "release_notice": meta.get("release_notice"),
+        "release_required": meta.get("release_required"),
+        "approval_instruction": meta.get("approval_instruction"),
         "storage_tier": getattr(hit, "storage_tier", None) or "hot",
     }
 
@@ -477,6 +495,11 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
     before_f: Optional[float] = float(before) if before is not None else None
     after = arguments.get("after")
     after_f: Optional[float] = float(after) if after is not None else None
+    release_ok = bool(arguments.get("release_ok", False))
+    approved_release_level = arguments.get("approved_release_level")
+    approved_release_level_i: Optional[int] = (
+        max(0, min(5, int(approved_release_level))) if approved_release_level is not None else None
+    )
 
     if top_k < 1:
         top_k = 1
@@ -571,7 +594,11 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         _SESSION_STATE["_last_rerank"] = rerank_used
         _SESSION_STATE["_last_candidates"] = len(relevance_hits)
 
-    hits = _consent_filter_hits_for_mcp(hits)
+    hits = _consent_filter_hits_for_mcp(
+        hits,
+        release_ok=release_ok,
+        approved_release_level=approved_release_level_i,
+    )
 
     if mode in ("relevance", "keyword") and hits:
         hits, bias_meta = apply_identity_rerank(conn, hits)
@@ -630,6 +657,13 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         )
     except Exception:
         pass
+    try:
+        if mode == "relevance" and query:
+            from graph_corpus_mine import schedule_background_graph_mine
+
+            schedule_background_graph_mine(_data_dir(), query=query)
+    except Exception:
+        log.debug("query graph mine schedule skipped", exc_info=True)
 
     return results
 
@@ -1232,7 +1266,13 @@ TOOLS: List[Dict[str, Any]] = [
             "(chronological, query optional) · `keyword` (FTS5 exact-phrase). "
             "Bound time with `before`/`after`. Expand a hit with `get_chunk`; "
             "list chats with `browse_conversations`; fetch a full thread with "
-            "`conversation_chunks`. When in doubt, search first."
+            "`conversation_chunks`. When in doubt, search first.\n\n"
+            "Privacy release: Minion may return `release-request` hits instead "
+            "of the underlying text. That means relevant context exists, but "
+            "the hit requires explicit user approval. Ask the user for OK at "
+            "the shown Level N/5, then repeat `ask_minion` with "
+            "`release_ok=true` and `approved_release_level=N`. Do not infer or "
+            "guess the withheld context."
         ),
         "inputSchema": {
             "type": "object",
@@ -1275,6 +1315,20 @@ TOOLS: List[Dict[str, Any]] = [
                 },
                 "max_chars": {"type": "integer", "minimum": 50, "maximum": 4000, "default": DEFAULT_MAX_CHARS},
                 "dedupe_by_source": {"type": "boolean", "default": True},
+                "release_ok": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Set true only after the user explicitly approved releasing "
+                        "withheld Minion context at approved_release_level."
+                    ),
+                },
+                "approved_release_level": {
+                    "type": ["integer", "null"],
+                    "minimum": 0,
+                    "maximum": 5,
+                    "description": "Highest release level the user explicitly approved for this follow-up call.",
+                },
             },
         },
     },
@@ -1718,7 +1772,7 @@ TOOLS: List[Dict[str, Any]] = [
                 "title": {"type": "string"},
                 "body_md": {"type": "string"},
                 "priority": {"type": ["string", "null"]},
-                "context_refs": {"type": "array"},
+                "context_refs": {"type": "array", "items": {"type": "string"}},
                 "wiki_refs": {"type": "array", "items": {"type": "string"}},
             },
         },

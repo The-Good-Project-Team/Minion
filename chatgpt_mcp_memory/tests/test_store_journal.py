@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import os
 from pathlib import Path
-from unittest.mock import MagicMock
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
@@ -13,39 +13,37 @@ if str(_SRC) not in sys.path:
 from store import _apply_journal_mode  # noqa: E402
 
 
-def _cursor_row(value: str) -> MagicMock:
-    cur = MagicMock()
-    cur.fetchone.return_value = (value,)
-    return cur
-
-
-def test_apply_journal_mode_falls_back_when_wal_raises() -> None:
-    conn = MagicMock()
-    db_path = Path("/tmp/fake-memory.db")
-
-    def execute(sql: str, *a, **kw):
-        s = str(sql).upper()
-        if "JOURNAL_MODE=WAL" in s:
-            raise sqlite3.OperationalError("disk I/O error")
-        if "JOURNAL_MODE=DELETE" in s:
-            return _cursor_row("delete")
-        raise AssertionError(f"unexpected SQL: {sql!r}")
-
-    conn.execute = execute  # type: ignore[method-assign]
-    mode = _apply_journal_mode(conn, db_path)
+def test_apply_journal_mode_delete_path_uses_real_sqlite(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        mode = _apply_journal_mode(conn, db_path, wal_first=False)
+    finally:
+        conn.close()
     assert mode.lower() == "delete"
 
 
-def test_apply_journal_mode_wal_success() -> None:
-    conn = MagicMock()
-    db_path = Path("/tmp/x.db")
-
-    def execute(sql: str, *a, **kw):
-        s = str(sql).upper()
-        if "JOURNAL_MODE=WAL" in s:
-            return _cursor_row("wal")
-        raise AssertionError(f"unexpected SQL: {sql!r}")
-
-    conn.execute = execute  # type: ignore[method-assign]
-    mode = _apply_journal_mode(conn, db_path)
+def test_apply_journal_mode_wal_success_uses_real_sqlite(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        mode = _apply_journal_mode(conn, db_path)
+    finally:
+        conn.close()
     assert mode.lower() == "wal"
+
+
+def test_apply_journal_mode_honors_forced_delete_with_real_sqlite(tmp_path: Path) -> None:
+    old = os.environ.get("MINION_SQLITE_JOURNAL")
+    os.environ["MINION_SQLITE_JOURNAL"] = "delete"
+    db_path = tmp_path / "memory.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        mode = _apply_journal_mode(conn, db_path)
+    finally:
+        conn.close()
+        if old is None:
+            os.environ.pop("MINION_SQLITE_JOURNAL", None)
+        else:
+            os.environ["MINION_SQLITE_JOURNAL"] = old
+    assert mode.lower() == "delete"

@@ -487,16 +487,19 @@ async def _lifespan(app: FastAPI):
     _refresh_mcp_on_launch()
     if not os.environ.get("MINION_DISABLE_AMBIENT_SCHEDULER", "").strip():
         start_ambient_scheduler(State.data_dir, State.conn)
+    try:
+        from file_tracker import start_file_tracker
+
+        start_file_tracker(State.data_dir)
+    except Exception:
+        log.exception("file tracker failed to start")
     start_forty_two_scheduler(State.data_dir, State.conn)
     try:
-        from graph_corpus_mine import graph_mine_enabled, run_graph_mine_tick
+        from graph_corpus_mine import schedule_background_graph_mine
 
-        if graph_mine_enabled(State.data_dir):
-            conn = State.conn()
-            run_graph_mine_tick(conn, State.data_dir, max_llm_calls=2, source="boot")
-            conn.commit()
+        schedule_background_graph_mine(State.data_dir)
     except Exception:
-        log.debug("boot graph mine tick skipped", exc_info=True)
+        log.debug("boot graph mine schedule skipped", exc_info=True)
     try:
         _surface_db_rotate_flag(State.data_dir, State.conn())
         State.conn().commit()
@@ -619,6 +622,7 @@ class IngestBody(BaseModel):
     path: str
     move: bool = False  # if True, move into inbox; else copy
     recursive: bool = True  # used when `path` is a directory
+    temporary: bool = False  # remove staged inbox copy after indexing; original remains tracked
 
 
 class IngestTextBody(BaseModel):
@@ -792,6 +796,7 @@ def _surface_db_rotate_flag(data_dir: Path, conn) -> None:
     backup = str(meta.get("backup_path") or "see data folder")
     system_issue_upsert(
         conn,
+        issue_id="db_rotate",
         severity="elevated",
         source_key="db_rotate",
         body_md=(
@@ -1381,6 +1386,12 @@ def _embed_search_results(
         )
     except Exception:
         pass
+    try:
+        from graph_corpus_mine import schedule_background_graph_mine
+
+        schedule_background_graph_mine(State.data_dir, query=query)
+    except Exception:
+        log.debug("query graph mine schedule skipped", exc_info=True)
     return results
 
 
@@ -1538,6 +1549,22 @@ def identity_mirror(limit_history: int = 60) -> Dict[str, Any]:
     hist = identity_claim_mirror_history(conn, limit=lim)
     md = identity.build_identity_summary(conn, history_tail=min(12, lim))
     return {"markdown": md, "history": hist, "history_count": len(hist)}
+
+
+@app.get("/identity/companion")
+def identity_companion_route() -> Dict[str, Any]:
+    from identity_companion import companion_overview
+
+    return companion_overview(State.conn(), State.data_dir)
+
+
+@app.post("/identity/companion/start")
+def identity_companion_start_route() -> Dict[str, Any]:
+    from identity_companion import open_companion_thread
+
+    out = open_companion_thread(State.conn())
+    State.conn().commit()
+    return out
 
 
 @app.get("/identity/clusters")
@@ -2698,6 +2725,31 @@ def _copy_tree_into_inbox(src_dir: Path, dest_root: Path) -> List[Path]:
     return copied
 
 
+def _trigger_post_ingest_graph(*, added: bool) -> None:
+    """Graph the corpus right after ingest: mark inference pending and kick a
+    background mine. Both are gated on Gemini being configured (no-op otherwise),
+    so ingest stays fast and graphing happens as part of the same experience."""
+    try:
+        from forty_two_queue import maybe_enqueue_after_ingest
+
+        conn = connect(State.db_path)
+        try:
+            maybe_enqueue_after_ingest(conn, skipped=not added)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        log.debug("post-ingest graph enqueue skipped", exc_info=True)
+    if not added:
+        return
+    try:
+        from graph_corpus_mine import schedule_background_graph_mine
+
+        schedule_background_graph_mine(State.data_dir)
+    except Exception:
+        log.debug("post-ingest graph mine schedule skipped", exc_info=True)
+
+
 @app.post("/ingest")
 async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
     """Bring a file or directory into the inbox and ingest it. The HTTP call
@@ -2709,6 +2761,7 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
 
     # -------- Directory path: recurse, then ingest every file in the tree ----
     if src_path.is_dir():
+        copied_temp = False
         if not body.recursive:
             raise HTTPException(status_code=400, detail="path is a directory; set recursive=true")
         # Preserve tree structure under inbox/<dirname>/ so dropping two
@@ -2723,6 +2776,19 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
                 shutil.move(str(src_path), str(inbox_root))
             else:
                 _copy_tree_into_inbox(src_path, inbox_root)
+                copied_temp = bool(body.temporary)
+                if body.temporary:
+                    try:
+                        from file_tracker import register_tracked_path
+
+                        register_tracked_path(
+                            State.data_dir,
+                            original_path=src_path,
+                            staged_path=inbox_root,
+                            kind="directory",
+                        )
+                    except Exception:
+                        log.exception("failed to register tracked directory")
 
         # ChatGPT export directories are a single logical source, not a
         # pile of loose JSONs. Hand the entire tree to the watcher: it
@@ -2814,14 +2880,24 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
                 "skipped": final.get("skipped", 0),
                 "counts": _counts(),
             })
+            _trigger_post_ingest_graph(added=final.get("added", 0) > 0)
+            if copied_temp:
+                shutil.rmtree(inbox_root, ignore_errors=True)
 
         asyncio.create_task(_run_tree())
-        return {"queued": str(inbox_root), "kind": "directory", "file_count": len(files)}
+        return {
+            "queued": str(inbox_root),
+            "kind": "directory",
+            "file_count": len(files),
+            "temporary": copied_temp,
+            "original_path": str(src_path) if copied_temp else None,
+        }
 
     # -------- Single file path ---------------------------------------------
     if not src_path.is_file():
         raise HTTPException(status_code=400, detail=f"unsupported path type: {src_path}")
 
+    copied_temp = False
     try:
         src_path.relative_to(State.inbox)
         dest = src_path
@@ -2831,6 +2907,19 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
             shutil.move(str(src_path), str(dest))
         else:
             shutil.copy2(str(src_path), str(dest))
+            copied_temp = bool(body.temporary)
+            if body.temporary:
+                try:
+                    from file_tracker import register_tracked_path
+
+                    register_tracked_path(
+                        State.data_dir,
+                        original_path=src_path,
+                        staged_path=dest,
+                        kind="file",
+                    )
+                except Exception:
+                    log.exception("failed to register tracked file")
 
     async def _run_ingest() -> Dict[str, Any]:
         await _broadcast({"type": "ingest_started", "path": str(dest)})
@@ -2860,10 +2949,21 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
                 "counts": _counts(),
             }
         )
+        _trigger_post_ingest_graph(added=bool(res.get("source_id")))
+        if copied_temp:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
         return res
 
     asyncio.create_task(_run_ingest())
-    return {"queued": str(dest), "kind": "file"}
+    return {
+        "queued": str(dest),
+        "kind": "file",
+        "temporary": copied_temp,
+        "original_path": str(src_path) if copied_temp else None,
+    }
 
 
 @app.post("/ingest/text")

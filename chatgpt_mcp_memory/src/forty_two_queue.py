@@ -39,10 +39,10 @@ def drain_graph_infer_queue(
     LLM graph mine tick: corpus evidence → validated graph writes.
     Runs continuously when Gemini is configured (core product loop).
     """
-    clear_graph_infer_pending(conn)
-    from graph_corpus_mine import graph_mine_enabled, mine_limits, run_graph_mine_tick
+    from graph_corpus_mine import graph_mine_enabled, mine_limits, run_periodic_graph_mine_tick
 
     if not graph_mine_enabled(data_dir):
+        clear_graph_infer_pending(conn)
         from graph_fill import pick_next_gap
         from forty_two_infer import try_fill_gap_from_corpus
 
@@ -67,12 +67,14 @@ def drain_graph_infer_queue(
 
     limits = mine_limits(data_dir)
     max_calls = max(max_gaps, limits.get("max_42_tick", 4))
-    out = run_graph_mine_tick(
+    out = run_periodic_graph_mine_tick(
         conn,
         data_dir,
         max_llm_calls=max_calls,
         source="42_scheduler",
     )
+    if out.get("status") != "deferred":
+        clear_graph_infer_pending(conn)
     meta_set(conn, _META_LAST_DRAIN, str(time.time()))
     return {
         "filled": out.get("filled", 0),

@@ -417,6 +417,33 @@ export async function fetchIdentityMirror(params: { limit_history?: number } = {
   return apiFetch(`/identity/mirror${qs ? `?${qs}` : ""}`);
 }
 
+export type IdentityCompanionPillar = {
+  label: string;
+  count: number;
+  prompt: string;
+  status: string;
+};
+
+export type IdentityCompanionResponse = {
+  tagline: string;
+  readiness: number;
+  source_count: number;
+  graph_count: number;
+  active_claim_count: number;
+  proposed_claim_count: number;
+  pillars: IdentityCompanionPillar[];
+  next_steps: string[];
+  starter_prompts: string[];
+};
+
+export async function fetchIdentityCompanion(): Promise<IdentityCompanionResponse> {
+  return apiFetch("/identity/companion");
+}
+
+export async function startIdentityCompanion(): Promise<{ thread: ChatThread | null; created: boolean }> {
+  return apiFetch("/identity/companion/start", { method: "POST", body: "{}" });
+}
+
 /** PRAGMA snapshot from POST /maintenance/storage-report (optional on very old sidecars). */
 export type SqliteStorageFootprint = {
   page_count: number;
@@ -562,10 +589,10 @@ export function openSearchStream(
   };
 }
 
-export async function ingestPath(path: string, move = false): Promise<{ queued: string }> {
+export async function ingestPath(path: string, move = false, temporary = false): Promise<{ queued: string }> {
   return apiFetch("/ingest", {
     method: "POST",
-    body: JSON.stringify({ path, move }),
+    body: JSON.stringify({ path, move, temporary }),
   });
 }
 

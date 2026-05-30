@@ -51,7 +51,61 @@ def _chatgpt_export_manifest_paths(root: Path) -> List[Path]:
 
 
 def _looks_like_chatgpt_export(path: Path) -> bool:
-    return path.is_dir() and bool(_chatgpt_export_manifest_paths(path))
+    # Claude exports also ship a `conversations.json`; disambiguate by content
+    # so a Claude export is never routed to the ChatGPT parser.
+    return (
+        path.is_dir()
+        and bool(_chatgpt_export_manifest_paths(path))
+        and not _looks_like_claude_export(path)
+    )
+
+
+def _claude_export_manifest_paths(root: Path) -> List[Path]:
+    """JSON files that define a Claude.ai export.
+
+    Claude ships a single `conversations.json` (some chunked exports use
+    `conversations-*.json`). Empty list means this directory is not one.
+    """
+    native = sorted(root.glob("conversations.json"))
+    if native:
+        return native
+    return sorted(root.glob("conversations-*.json"))
+
+
+def _peek_is_claude_export(manifest: Path) -> bool:
+    """Cheap content sniff: a Claude conversation has `chat_messages`; a
+    ChatGPT one has a `mapping` tree. Read a bounded prefix to decide without
+    parsing a multi-MB manifest."""
+    try:
+        with open(manifest, "r", encoding="utf-8") as fh:
+            head = fh.read(1_000_000)
+    except OSError:
+        return False
+    return '"chat_messages"' in head
+
+
+def _looks_like_claude_export(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    manifests = _claude_export_manifest_paths(path)
+    return bool(manifests) and _peek_is_claude_export(manifests[0])
+
+
+def _claude_export_digest(root: Path, manifests: List[Path]) -> str:
+    """Deterministic digest over (relpath, size, mtime) for dedup."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for p in manifests:
+        rel = p.relative_to(root).as_posix().encode("utf-8")
+        st = p.stat()
+        h.update(rel)
+        h.update(b"\x00")
+        h.update(str(st.st_size).encode("ascii"))
+        h.update(b"\x00")
+        h.update(f"{st.st_mtime:.6f}".encode("ascii"))
+        h.update(b"\n")
+    return h.hexdigest()
 
 
 def _chatgpt_export_digest(root: Path, manifests: List[Path]) -> str:
@@ -89,6 +143,31 @@ _ARCHIVE_EXTS = (".zip",)
 # Conservative cap so DALL-E-style 400-char basenames inside ChatGPT exports
 # don't blow past macOS's 255-byte filename limit.
 _MAX_BASENAME_BYTES = 200
+
+
+class DeterministicTextEmbedding:
+    """Small local embedding model for auditable tests; no network/model download."""
+
+    def __init__(self, *, dim: Optional[int] = None) -> None:
+        self.dim = int(dim or os.environ.get("MINION_TEST_EMBED_DIM") or 384)
+
+    def embed(self, texts: List[str], batch_size: int = 64):
+        for text in texts:
+            vec = np.zeros((self.dim,), dtype=np.float32)
+            for token in re.findall(r"[a-z0-9]{2,}", (text or "").lower()):
+                h = int(hashlib.sha1(token.encode("utf-8")).hexdigest()[:8], 16)
+                vec[h % self.dim] += 1.0
+            norm = float(np.linalg.norm(vec))
+            yield vec / norm if norm > 0 else vec
+
+
+def deterministic_embeddings_enabled() -> bool:
+    return os.environ.get("MINION_DETERMINISTIC_EMBEDDINGS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _unique_dir(parent: Path, name: str) -> Path:
@@ -202,6 +281,8 @@ _MODEL_NAME: Optional[str] = None
 
 def _get_model(name: str):
     """Cache the fastembed model. Safe to call from multiple threads."""
+    if deterministic_embeddings_enabled():
+        return DeterministicTextEmbedding()
     global _MODEL, _MODEL_NAME
     with _MODEL_LOCK:
         if _MODEL is not None and _MODEL_NAME == name:
@@ -421,10 +502,16 @@ def _ingest_file_inner(
     if not path.exists():
         return IngestResult(spath, None, "?", "?", 0, True, reason="missing")
 
-    # Directories are not ingestable in general, but ChatGPT exports ship as
-    # a directory of JSON manifests. Detect that shape and dispatch directly
-    # to the chatgpt_export parser; fall through for everything else.
+    # Directories are not ingestable in general, but ChatGPT and Claude
+    # exports ship as a directory of JSON manifests. Both name their file
+    # `conversations.json`, so we sniff content (Claude has `chat_messages`,
+    # ChatGPT has a `mapping` tree) and dispatch to the right parser; fall
+    # through for everything else.
     if path.is_dir():
+        if _looks_like_claude_export(path):
+            return _ingest_claude_export_dir(
+                conn, path, model_name=model_name, force=force, on_progress=on_progress
+            )
         if _looks_like_chatgpt_export(path):
             return _ingest_chatgpt_export_dir(
                 conn, path, model_name=model_name, force=force, on_progress=on_progress
@@ -596,6 +683,86 @@ def _ingest_chatgpt_export_dir(
         source_id=source_id,
         kind=result.kind or "chatgpt-export",
         parser=result.parser or "chatgpt-export",
+        chunk_count=len(result.chunks),
+        skipped=False,
+    )
+
+
+def _ingest_claude_export_dir(
+    conn: sqlite3.Connection,
+    path: Path,
+    *,
+    model_name: Optional[str],
+    force: bool,
+    on_progress: ProgressFn,
+) -> IngestResult:
+    """Ingest a Claude.ai export directory as a single logical source.
+
+    One `sources` row keyed by the directory path. sha256 is computed over the
+    manifest (relpath, size, mtime) so re-running is a no-op unless a manifest
+    changed.
+    """
+    spath = str(path)
+    manifests = _claude_export_manifest_paths(path)
+    digest = _claude_export_digest(path, manifests)
+
+    if not force:
+        row = conn.execute(
+            "SELECT sha256 FROM sources WHERE path=?", (spath,)
+        ).fetchone()
+        if row and row["sha256"] == digest:
+            return IngestResult(spath, None, "claude-export", "claude-export", 0, True, reason="unchanged")
+
+    total_bytes = sum(p.stat().st_size for p in manifests)
+    latest_mtime = max((p.stat().st_mtime for p in manifests), default=path.stat().st_mtime)
+
+    on_progress("parse_start", {"suffix": "(dir)", "bytes": total_bytes, "manifests": len(manifests)})
+    try:
+        result: ParseResult = parse_file(path, parser="parsers.claude_export", on_progress=on_progress)
+    except UnsupportedFile as e:
+        return IngestResult(spath, None, "claude-export", "?", 0, True, reason=f"unsupported: {e}")
+    except Exception as e:
+        name = type(e).__name__
+        msg = str(e) or name
+        return IngestResult(spath, None, "claude-export", "?", 0, True, reason=f"parse-error: {name}: {msg}")
+
+    if not result.chunks:
+        return IngestResult(
+            spath, None, result.kind or "claude-export", result.parser or "claude-export", 0, True,
+            reason="export parsed but produced no user-message chunks",
+        )
+
+    on_progress("parsed", {"chunks": len(result.chunks), "kind": result.kind, "parser": result.parser})
+
+    name = model_name or os.environ.get("MINION_EMBED_MODEL", DEFAULT_MODEL)
+    model = _get_model(name)
+    texts = [c.text for c in result.chunks]
+    embeddings = _embed(model, texts, on_progress=on_progress)
+
+    chunk_tuples = [(c.text, c.role, c.meta) for c in result.chunks]
+    source_meta = dict(result.source_meta or {})
+    source_meta.setdefault("suffix", "(dir)")
+    source_meta.setdefault("model_name", name)
+    source_meta.setdefault("manifest_count", len(manifests))
+
+    source_id = upsert_source(
+        conn,
+        path=spath,
+        kind=result.kind or "claude-export",
+        sha256=digest,
+        mtime=latest_mtime,
+        bytes_=total_bytes,
+        parser=result.parser or "claude-export",
+        source_meta=source_meta,
+        chunks=chunk_tuples,
+        embeddings=embeddings,
+    )
+
+    return IngestResult(
+        path=spath,
+        source_id=source_id,
+        kind=result.kind or "claude-export",
+        parser=result.parser or "claude-export",
         chunk_count=len(result.chunks),
         skipped=False,
     )

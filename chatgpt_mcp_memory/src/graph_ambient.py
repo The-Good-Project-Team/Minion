@@ -94,7 +94,8 @@ def enrich_graph_from_ambient(
         event_id = str(event.get("event_id") or "")
         event_type = str(event.get("event_type") or event.get("kind") or "")
         app = str(payload.get("app_name") or payload.get("app") or "").strip()
-        ref = f"amb:{event_id}" if event_id else ""
+        refs = _event_source_refs(event, payload)
+        ref = refs[0] if refs else ""
 
         for email in _extract_emails(payload):
             key = f"email:{email.lower()}"
@@ -115,7 +116,7 @@ def enrich_graph_from_ambient(
                 },
             )
             link_belongs_to_scaffold(conn, nid)
-            if _touch_node(conn, nid, ref, app=app, title=label, data_dir=data_dir):
+            if _touch_node(conn, nid, refs, app=app, title=label, data_dir=data_dir):
                 touched += 1
             elif _was_new_person(conn, nid):
                 created += 1
@@ -138,7 +139,7 @@ def enrich_graph_from_ambient(
                 if org_title:
                     org_id = _find_or_create_org(conn, org_title, data_dir=data_dir)
                     if org_id and _touch_node(
-                        conn, org_id, ref, app=app, title=org_title, data_dir=data_dir
+                        conn, org_id, refs, app=app, title=org_title, data_dir=data_dir
                     ):
                         touched += 1
 
@@ -151,14 +152,14 @@ def enrich_graph_from_ambient(
             signals += 1
             matched = _match_existing_nodes(conn, title)
             for nid, kind in matched:
-                if _touch_node(conn, nid, ref, app=app, title=title, data_dir=data_dir):
+                if _touch_node(conn, nid, refs, app=app, title=title, data_dir=data_dir):
                     touched += 1
             if matched:
                 continue
             if title_counts[title] >= 2 or _looks_like_project(title):
                 pid = _find_or_create_project(conn, title, data_dir=data_dir)
                 if pid:
-                    if _touch_node(conn, pid, ref, app=app, title=title, data_dir=data_dir):
+                    if _touch_node(conn, pid, refs, app=app, title=title, data_dir=data_dir):
                         touched += 1
                     if title_counts[title] >= 2:
                         created += 1
@@ -306,7 +307,7 @@ def _active_nodes(conn, *, limit: int) -> List[Dict[str, Any]]:
 def _touch_node(
     conn,
     node_id: str,
-    ref: str,
+    refs_in: Any,
     *,
     app: str,
     title: str,
@@ -320,10 +321,12 @@ def _touch_node(
     ).fetchone()
     if not row:
         return False
+    refs_to_add = [str(x) for x in (refs_in if isinstance(refs_in, list) else [refs_in]) if str(x).strip()]
+    ref = refs_to_add[0] if refs_to_add else ""
     refs = _parse_json_list(row["source_refs_json"])
     changed = False
-    if ref and ref not in refs:
-        _set_node_evidence(conn, node_id, [ref], 0.62)
+    if any(r not in refs for r in refs_to_add):
+        _set_node_evidence(conn, node_id, refs_to_add, 0.62)
         changed = True
     summary = _parse_summary(row["summary"])
     attention = list(summary.get("recent_attention") or [])
@@ -442,6 +445,40 @@ def _payload_host(payload: Dict[str, Any]) -> str:
     if m:
         return m.group(1).lower().lstrip("www.")
     return ""
+
+
+def _event_source_refs(event: Dict[str, Any], payload: Dict[str, Any]) -> List[str]:
+    refs: List[str] = []
+    event_id = str(event.get("event_id") or "")
+    if event_id:
+        refs.append(f"amb:{event_id}")
+    source_path = _ambient_ax_source_path(event, payload)
+    if source_path:
+        refs.append(f"source_path:{source_path}")
+    return refs
+
+
+def _ambient_ax_source_path(event: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    ax = str(payload.get("ax_text_sample") or "").strip()
+    if not ax:
+        return ""
+    ts = float(event.get("captured_at") or payload.get("ts") or time.time())
+    day = time.strftime("%Y-%m-%d", time.localtime(ts))
+    app = str(payload.get("app_name") or payload.get("app") or "unknown")
+    title = str(payload.get("window_title") or payload.get("title") or "")
+    kind = str(payload.get("kind") or event.get("event_type") or "")
+    url = str(payload.get("url") or "")
+    host = str(payload.get("url_or_host") or _slug(title) or _slug(app))
+    if kind == "window_snapshot":
+        return f"ambient/screen/{day}/{_slug(app)}_{int(ts)}.md"
+    if url or "chrome" in app.lower() or "safari" in app.lower():
+        return f"ambient/browser/{day}/{_slug(host)}_{int(ts)}.md"
+    return f"ambient/ax/{day}/{int(ts)}_{_slug(app)}.md"
+
+
+def _slug(s: str, max_len: int = 32) -> str:
+    t = re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+    return (t[:max_len] or "app")
 
 
 def _label_from_email(email: str) -> str:

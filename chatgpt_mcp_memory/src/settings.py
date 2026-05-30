@@ -142,11 +142,17 @@ def _default() -> Dict[str, Any]:
         "forty_two_interval_sec": 300,
         "gemini_model": "gemini-2.5-pro",
         "forty_two_gemini_model": "gemini-2.5-pro",
-        "graph_mine_gemini_model": "gemini-2.5-flash",
+        "graph_mine_gemini_model": "gemini-2.0-flash-lite",
         "graph_mine_enabled": True,
-        "graph_mine_max_calls_per_day": 96,
-        "graph_mine_max_calls_per_tick": 2,
-        "graph_mine_42_max_calls_per_tick": 4,
+        "graph_mine_interval_sec": 21600,
+        "graph_mine_max_calls_per_day": 48,
+        "graph_mine_max_calls_per_tick": 6,
+        "graph_mine_42_max_calls_per_tick": 6,
+        "graph_mine_max_output_tokens": 2048,
+        "graph_mine_on_query_enabled": False,
+        "graph_mine_query_min_interval_sec": 900,
+        "graph_mine_query_same_query_interval_sec": 21600,
+        "graph_mine_query_max_calls_per_tick": 1,
     }
 
 

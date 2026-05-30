@@ -95,6 +95,19 @@ def _complete_reply(
     )
     if not result.get("ok"):
         return (result, user_mid, "")
+    if (thread.get("meta") or {}).get("mode") == "identity_companion":
+        try:
+            from preference_promotion import record_explicit_preference
+
+            record_explicit_preference(
+                conn,
+                text=text,
+                source="identity_companion",
+                auto_activate=True,
+                meta={"conversation_thread_id": thread_id},
+            )
+        except Exception:
+            log.debug("identity companion preference promotion skipped", exc_info=True)
 
     thread = chat_thread_get(conn, thread_id) or thread
     try:
@@ -196,6 +209,19 @@ def stream_reply(
     if not result.get("ok"):
         yield {"event": "error", "data": {"code": result.get("error", "failed"), "message": str(result.get("error"))}}
         return
+    if (thread.get("meta") or {}).get("mode") == "identity_companion":
+        try:
+            from preference_promotion import record_explicit_preference
+
+            record_explicit_preference(
+                conn,
+                text=text,
+                source="identity_companion",
+                auto_activate=True,
+                meta={"conversation_thread_id": thread_id},
+            )
+        except Exception:
+            log.debug("identity companion preference promotion skipped", exc_info=True)
 
     thread = chat_thread_get(conn, thread_id) or thread
     asst_mid = _new_id("cmsg")

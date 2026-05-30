@@ -2,18 +2,23 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
+from ingest import _embed, _get_model
 from graph_corpus_mine import (
-    graph_mine_enabled,
     graph_mine_status,
+    maybe_run_query_graph_mine,
     pick_mining_targets,
+    run_periodic_graph_mine_tick,
     run_graph_mine_tick,
+    schedule_background_graph_mine,
 )
-from store import connect, meta_set, seed_sync_sources
+from settings import load_settings, save_settings
+from store import connect, meta_get, seed_sync_sources, upsert_source
 
 
 @pytest.fixture()
@@ -39,48 +44,78 @@ def test_pick_mining_targets_includes_durable_family_bucket(conn) -> None:
     )
 
 
-def test_run_mine_tick_skips_without_gemini(conn, tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("gemini_client.gemini_configured", lambda _dd=None: False)
-    out = run_graph_mine_tick(conn, tmp_path, max_llm_calls=2)
-    assert out["status"] == "disabled"
-
-
-def test_run_mine_tick_applies_me_profile(conn, tmp_path: Path, monkeypatch) -> None:
-    sec = tmp_path / ".secrets"
-    sec.mkdir()
-    (sec / "gemini_api_key").write_text("fake", encoding="utf-8")
-
-    fake_hits = {
-        "hits": [
-            {
-                "chunk_id": "ch1",
-                "score": 0.6,
-                "path": "notes/me.md",
-                "text": "Reif grew up in Michigan and works on Minion.",
-            }
-        ],
-        "evidence_refs": ["chunk:ch1"],
+def _without_gemini_env():
+    saved = {
+        key: os.environ.pop(key, None)
+        for key in (
+            "GEMINI_API_KEY",
+            "MINION_GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "MINION_GEMINI_API_BASE",
+            "MINION_GEMINI_DISABLE_SECRET_FILES",
+        )
     }
-    fake_proposal = {
+    os.environ["MINION_GEMINI_DISABLE_SECRET_FILES"] = "1"
+    return saved
+
+
+def _restore_env(saved: dict[str, str | None]) -> None:
+    for key, val in saved.items():
+        if val is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = val
+
+
+def test_run_mine_tick_skips_without_gemini(conn, tmp_path: Path) -> None:
+    saved = _without_gemini_env()
+    try:
+        out = run_graph_mine_tick(conn, tmp_path, max_llm_calls=2)
+        assert out["status"] == "disabled"
+    finally:
+        _restore_env(saved)
+
+
+def test_run_mine_tick_applies_me_profile(conn, tmp_path: Path, fake_gemini) -> None:
+    os.environ["MINION_DETERMINISTIC_EMBEDDINGS"] = "1"
+    text = (
+        "About me biography background: Reif grew up in Michigan. "
+        "My role and profession: I build Minion."
+    )
+    model = _get_model("deterministic")
+    embeddings = _embed(model, [text])
+    upsert_source(
+        conn,
+        path=str(tmp_path / "notes" / "me.md"),
+        kind="text",
+        sha256="me-profile",
+        mtime=1.0,
+        bytes_=len(text),
+        parser="test",
+        source_meta={},
+        chunks=[(text, "user", {})],
+        embeddings=embeddings,
+    )
+    conn.commit()
+    response = {
         "confidence": 0.85,
         "actions": [
             {
                 "type": "set_me_profile",
                 "summary": "Grew up in Michigan; builds Minion.",
-                "evidence_refs": ["chunk:ch1"],
             }
         ],
         "unresolved_question": "",
     }
+    server = fake_gemini(json.dumps(response))
 
-    with patch("forty_two_infer.retrieve_evidence_pack", return_value=fake_hits):
-        with patch(
-            "forty_two_llm.propose_graph_actions_from_evidence",
-            return_value=(fake_proposal, True),
-        ):
-            out = run_graph_mine_tick(conn, tmp_path, max_llm_calls=1)
+    try:
+        out = run_graph_mine_tick(conn, tmp_path, max_llm_calls=1)
+    finally:
+        os.environ.pop("MINION_DETERMINISTIC_EMBEDDINGS", None)
 
-    assert out.get("filled", 0) >= 1
+    assert out.get("filled", 0) >= 1, out
+    assert server.requests
     row = conn.execute(
         "SELECT summary FROM graph_nodes WHERE node_id='scaffold-me'"
     ).fetchone()
@@ -89,8 +124,60 @@ def test_run_mine_tick_applies_me_profile(conn, tmp_path: Path, monkeypatch) -> 
     assert meta.get("stability") == "core"
 
 
-def test_graph_mine_status_tracks_calls(conn, tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("graph_corpus_mine.graph_mine_enabled", lambda _dd: True)
+def test_graph_mine_status_tracks_calls(conn, tmp_path: Path) -> None:
+    sec = tmp_path / ".secrets"
+    sec.mkdir()
+    (sec / "gemini_api_key").write_text("fake", encoding="utf-8")
     st = graph_mine_status(conn, tmp_path)
     assert st["enabled"] is True
     assert st["max_calls_per_day"] >= 48
+    assert st["periodic_interval_sec"] == 21600
+
+
+def test_periodic_graph_mine_debounces(conn, tmp_path: Path) -> None:
+    saved = _without_gemini_env()
+    try:
+        first = run_periodic_graph_mine_tick(conn, tmp_path, now=1000)
+        second = run_periodic_graph_mine_tick(conn, tmp_path, now=1100)
+    finally:
+        _restore_env(saved)
+
+    assert first["status"] == "disabled"
+    assert second["status"] == "deferred"
+
+
+def test_query_graph_mine_has_smart_limits(conn, tmp_path: Path) -> None:
+    saved = _without_gemini_env()
+    settings = load_settings(tmp_path)
+    settings["graph_mine_on_query_enabled"] = True
+    save_settings(tmp_path, settings)
+    try:
+        first = maybe_run_query_graph_mine(conn, tmp_path, "who is Tiffani", now=2000)
+        second = maybe_run_query_graph_mine(conn, tmp_path, "who is Sean", now=2050)
+        third = maybe_run_query_graph_mine(conn, tmp_path, "who is Tiffani", now=3000)
+    finally:
+        _restore_env(saved)
+
+    assert first["status"] == "disabled"
+    assert second["status"] == "deferred"
+    assert third["status"] == "deferred"
+
+
+def test_schedule_background_graph_mine_nonblocking(tmp_path: Path) -> None:
+    saved = _without_gemini_env()
+    try:
+        out = schedule_background_graph_mine(tmp_path)
+        assert out["status"] == "scheduled"
+        deadline = threading.Event()
+        for _ in range(30):
+            c = connect(tmp_path / "memory.db")
+            try:
+                if meta_get(c, "graph_mine_last_periodic"):
+                    deadline.set()
+                    break
+            finally:
+                c.close()
+            deadline.wait(0.1)
+        assert deadline.is_set()
+    finally:
+        _restore_env(saved)

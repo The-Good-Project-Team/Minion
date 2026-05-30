@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -115,6 +116,26 @@ def build_queries_for_gap(gap: Dict[str, Any]) -> List[str]:
         if len(out) >= 6:
             break
     return out or ["life context people relationships"]
+
+
+def _evidence_quality(text: str) -> float:
+    """Heuristic multiplier: prefer substantive snippets over AX chrome noise."""
+    t = (text or "").strip()
+    if len(t) < 40:
+        return 0.35
+    if len(t) < 100:
+        return 0.7
+    lower = t.lower()
+    chrome_noise = (
+        "bookmark this tab",
+        "address and search bar",
+        "extensions",
+        " - pinned",
+        "view site information",
+    )
+    if sum(1 for phrase in chrome_noise if phrase in lower) >= 3:
+        return 0.55
+    return 1.0
 
 
 def retrieve_evidence_pack(
@@ -280,11 +301,44 @@ def apply_proposal(
     evidence_refs = list(proposal.get("evidence_refs") or [])
     stability = str(proposal.get("stability") or gap.get("stability") or "active")
 
-    for act in proposal.get("actions") or []:
+    actions = list(proposal.get("actions") or [])
+
+    # Map proposed identifiers (the loose ids/titles the LLM emits) → the real
+    # graph node ids we create or already have. add_edge endpoints are resolved
+    # against this map so we never write an edge to a node that does not exist.
+    created: Dict[str, str] = {}
+
+    def _register(real_id: str, *aliases: str) -> None:
+        if not real_id:
+            return
+        for alias in aliases:
+            key = _norm_key(alias)
+            if key:
+                created.setdefault(key, real_id)
+
+    me_aliases = {"me", "myself", "i", "self", "you", "user", "owner", _norm_key(ME_NODE)}
+
+    def _resolve_endpoint(raw: str) -> Optional[str]:
+        """Map a proposed endpoint to a real node id, or None if it cannot be
+        resolved (in which case the edge is skipped instead of dangling)."""
+        key = _norm_key(raw)
+        if not key or key in me_aliases:
+            return ME_NODE
+        if key in created:
+            return created[key]
+        if raw and _node_exists(conn, raw):
+            return raw
+        return None
+
+    # --- Pass 1: everything except edges, so created nodes exist before linking. ---
+    edge_actions: List[Dict[str, Any]] = []
+    for act in actions:
         atype = str(act.get("type") or "")
         act_refs = list(act.get("evidence_refs") or evidence_refs)
 
-        if atype == "set_me_profile":
+        if atype == "add_edge":
+            edge_actions.append(act)
+        elif atype == "set_me_profile":
             text = str(act.get("summary") or act.get("user_note") or "").strip()
             if text:
                 _me_profile(conn, text, act_refs, stability=stability)
@@ -306,19 +360,8 @@ def apply_proposal(
                 _person_summary(conn, nid, text)
                 _set_node_evidence(conn, nid, act_refs, float(act.get("confidence") or proposal.get("confidence") or 0.8))
                 _mark_stability(conn, nid, stability)
+                _register(nid, nid, str(act.get("node_id") or ""), _node_title(conn, nid))
                 deltas.append(f"Filled **{_node_title(conn, nid)}** from your notes.")
-        elif atype == "add_edge":
-            fr = str(act.get("from_node_id") or ME_NODE)
-            to = str(act.get("to_node_id") or subject_id or "")
-            rel = str(act.get("rel_kind") or "knows")
-            note = str(act.get("relation_note") or act.get("summary") or "")
-            if rel == "knows" and to:
-                _link_knows(conn, fr, to, note)
-                _set_node_evidence(conn, to, act_refs, float(act.get("confidence") or 0.8))
-                deltas.append(f"Linked you → **{_node_title(conn, to)}** from context.")
-            elif to and fr:
-                _insert_edge(conn, fr, to, rel, act_refs, float(act.get("confidence") or 0.8))
-                deltas.append(f"Linked graph ({rel}).")
         elif atype == "create_node":
             kind = str(act.get("node_kind") or "person")
             title = str(act.get("title") or "").strip()
@@ -342,7 +385,27 @@ def apply_proposal(
                     _link_knows(conn, ME_NODE, nid, note)
             _set_node_evidence(conn, nid, act_refs, float(act.get("confidence") or 0.8))
             _mark_stability(conn, nid, stability)
+            _register(nid, nid, str(act.get("node_id") or ""), title)
             deltas.append(f"Added **{title}** to your graph from saved context.")
+
+    # --- Pass 2: edges, resolved to real node ids only (no dangling endpoints). ---
+    for act in edge_actions:
+        act_refs = list(act.get("evidence_refs") or evidence_refs)
+        fr = _resolve_endpoint(str(act.get("from_node_id") or ""))
+        to = _resolve_endpoint(str(act.get("to_node_id") or subject_id or ""))
+        rel = str(act.get("rel_kind") or "knows")
+        note = str(act.get("relation_note") or act.get("summary") or "")
+        if not fr or not to or fr == to:
+            # Unresolvable or self-referential endpoint — skip rather than write a
+            # dangling edge that points at a non-existent node.
+            continue
+        if rel == "knows":
+            _link_knows(conn, fr, to, note)
+            _set_node_evidence(conn, to, act_refs, float(act.get("confidence") or 0.8))
+            deltas.append(f"Linked you → **{_node_title(conn, to)}** from context.")
+        else:
+            _insert_edge(conn, fr, to, rel, act_refs, float(act.get("confidence") or 0.8))
+            deltas.append(f"Linked graph ({rel}).")
 
     gap_exhausted = _gap_resolved(conn, gap, gtype)
     out = {
@@ -495,6 +558,20 @@ def _node_title(conn, node_id: str) -> str:
         "SELECT title FROM graph_nodes WHERE node_id=?", (node_id,)
     ).fetchone()
     return str(row["title"]) if row else "them"
+
+
+def _norm_key(value: str) -> str:
+    """Normalize a proposed id/title for endpoint matching (case/space-insensitive)."""
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _node_exists(conn, node_id: str) -> bool:
+    if not node_id:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM graph_nodes WHERE node_id=?", (node_id,)
+    ).fetchone()
+    return row is not None
 
 
 def _set_node_evidence(
