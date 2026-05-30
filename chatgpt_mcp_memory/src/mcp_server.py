@@ -50,7 +50,8 @@ import telemetry
 import identity
 from second_brain import build_working_context
 from version import __version__
-from retrieval_bias import apply_identity_rerank, rrf_fuse
+from retrieval_bias import apply_identity_rerank
+import retrieval_engine
 import screen_context_store
 from screen_memory import (
     create_task_from_recent_screen,
@@ -541,22 +542,32 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Fetch 3x the user's top_k as candidates: gives dedup + fusion room
         # to promote under-ranked scanned docs without starving the final list.
         internal_k = max(top_k * 3, top_k + 8)
+        # Parallel multi-lane retrieval: dense ∥ sparse ∥ graph fused via weighted
+        # RRF, then a cross-encoder rerank of the top candidates. The lanes read
+        # independent tables, so each gets its own reader connection (WAL) and
+        # they overlap instead of running back-to-back. Fixes both the latency of
+        # serial lanes and the precision gap where a short chat turn echoing the
+        # query outranks the real source document.
+        rerank_on = retrieval_engine.rerank_enabled()
         try:
-            from graph_retrieval import neighborhood_search
-
-            relevance_hits = neighborhood_search(
+            hits = retrieval_engine.search_fused(
                 conn,
-                qvec,
                 query,
+                qvec,
                 top_k=internal_k,
+                conn_factory=_new_conn,
+                rerank=rerank_on,
                 kind=kind,
                 path_glob=path_glob,
                 since=since_f,
+                before=before_f,
+                after=after_f,
                 role=role,
             )
+            rerank_used = "rrf+xenc" if rerank_on else "rrf"
         except Exception:
-            log.exception("graph neighborhood search failed; using global search")
-            relevance_hits = store_search(
+            log.exception("fused retrieval failed; falling back to global search")
+            hits = store_search(
                 conn,
                 qvec,
                 top_k=internal_k,
@@ -565,34 +576,10 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
                 since=since_f,
                 role=role,
             )
-        # Hybrid rerank: fuse semantic cosine with FTS5 BM25 via Reciprocal
-        # Rank Fusion. Fixes the classic failure mode where a short chat turn
-        # echoing the query ("ok and how does this fit the patriarchal
-        # blessing") outranks the OCR'd source document. FTS5 rewards exact
-        # phrase hits that embeddings underweight. Skip fusion when FTS is
-        # unavailable (SQLite build w/o FTS5) or the query is empty.
-        hits = relevance_hits
-        rerank_used = "none"
-        if query and fts_available(conn):
-            try:
-                keyword_hits = store_keyword_search(
-                    conn,
-                    query,
-                    top_k=internal_k,
-                    role=role,
-                    kind=kind,
-                    path_glob=path_glob,
-                    before=before_f,
-                    after=after_f,
-                )
-                if keyword_hits:
-                    hits = rrf_fuse(relevance_hits, keyword_hits)
-                    rerank_used = "rrf"
-            except Exception:
-                log.exception("RRF fusion failed; falling back to relevance-only")
+            rerank_used = "none"
         # Bookkeeping for telemetry below.
         _SESSION_STATE["_last_rerank"] = rerank_used
-        _SESSION_STATE["_last_candidates"] = len(relevance_hits)
+        _SESSION_STATE["_last_candidates"] = len(hits)
 
     hits = _consent_filter_hits_for_mcp(
         hits,

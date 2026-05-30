@@ -90,7 +90,7 @@ def remember_screen(
     )
     if graph_signal:
         try:
-            from forty_two_queue import enqueue_graph_infer
+            from librarian_queue import enqueue_graph_infer
 
             enqueue_graph_infer(conn, reason="screen_memory")
             conn.commit()

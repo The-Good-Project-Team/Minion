@@ -99,7 +99,7 @@ def _run_once(data_dir, conn_factory) -> None:
                 log.exception("council evaluate_patterns failed")
             if graph_signal:
                 try:
-                    from forty_two_queue import enqueue_graph_infer
+                    from librarian_queue import enqueue_graph_infer
 
                     enqueue_graph_infer(conn, reason="ambient")
                 except Exception:

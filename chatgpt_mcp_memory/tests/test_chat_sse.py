@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from chat_sse import iter_text_deltas, sse_line
-from forty_two import next_question, stream_reply
+from librarian import next_question, stream_reply
 from store import _new_id, connect, seed_sync_sources
 
 
@@ -63,7 +63,7 @@ def test_stream_reply_emits_sse_events(conn) -> None:
     assert done["data"]["thread"]["thread_id"] == tid
 
 
-def test_forty_two_reply_stream_http(sidecar) -> None:
+def test_librarian_reply_stream_http(sidecar) -> None:
     """User objective: agent reply stream returns assistant SSE frames."""
     conn = connect(sidecar.data_dir / "memory.db")
     try:

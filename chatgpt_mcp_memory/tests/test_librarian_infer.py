@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 
 from ingest import _embed, _get_model
-from forty_two_infer import (
+from librarian_infer import (
     AUTO_WRITE_CONFIDENCE,
     build_queries_for_gap,
     retrieve_evidence_pack,
     try_fill_gap_from_corpus,
     validate_proposal,
 )
-from forty_two_queue import drain_graph_infer_queue, enqueue_graph_infer, has_graph_infer_pending
+from librarian_queue import drain_graph_infer_queue, enqueue_graph_infer, has_graph_infer_pending
 from graph_fill import open_thread_for_gap, pick_next_gap
 from store import connect, seed_sync_sources, upsert_source
 
@@ -187,7 +187,7 @@ def test_apply_proposal_resolves_loose_edge_endpoints(conn, tmp_path: Path) -> N
     """A create_node + add_edge proposal that references the new node by a loose,
     LLM-invented id ("practice-of-life") and "me" must land the node AND connect a
     real, non-dangling edge scaffold-me -> <real node id>."""
-    from forty_two_infer import apply_proposal
+    from librarian_infer import apply_proposal
 
     gap = {
         "gap_type": "bucket",
@@ -241,10 +241,67 @@ def test_apply_proposal_resolves_loose_edge_endpoints(conn, tmp_path: Path) -> N
     assert dangling == 0
 
 
+def test_sanitize_normalizes_and_drops_relations() -> None:
+    """A loosely-phrased relation must be normalized to an allowed kind, and a
+    genuinely unknown relation must drop ONLY that edge — never discard the
+    proposal's valid node creation (the 'invalid_rel:founded' regression)."""
+    from librarian_infer import ALLOWED_REL_KINDS, _normalize_rel_kind, sanitize_proposal
+
+    assert "founded" in ALLOWED_REL_KINDS
+    assert _normalize_rel_kind("founder_of") == "founded"
+    assert _normalize_rel_kind("Works For") == "works_at"
+    assert _normalize_rel_kind("knows") == "knows"
+
+    prop = {
+        "actions": [
+            {"type": "create_node", "node_kind": "organization", "title": "Acme"},
+            {"type": "add_edge", "from_node_id": "scaffold-me", "to_node_id": "acme", "rel_kind": "founder_of"},
+            {"type": "add_edge", "from_node_id": "scaffold-me", "to_node_id": "acme", "rel_kind": "teleports_to"},
+        ]
+    }
+    sanitize_proposal(prop)
+    edges = [a for a in prop["actions"] if a["type"] == "add_edge"]
+    assert len(edges) == 1  # nonsense relation dropped
+    assert edges[0]["rel_kind"] == "founded"  # synonym normalized
+    assert any(a["type"] == "create_node" for a in prop["actions"])  # node survives
+
+
+def test_apply_proposal_lands_founded_company(conn, tmp_path: Path) -> None:
+    """End-to-end of the Q2 finding: a founded company lands under the Companies
+    bucket with a real, non-dangling scaffold-me --founded--> <org> edge."""
+    from librarian_infer import apply_proposal
+
+    gap = {"gap_type": "bucket", "parent_node_id": "scaffold-work-companies", "node_kind": "organization"}
+    proposal = {
+        "confidence": 0.9,
+        "actions": [
+            {
+                "type": "create_node",
+                "node_kind": "organization",
+                "title": "Rooted Wellness Collective",
+                "node_id": "rooted-wellness",
+                "parent_node_id": "scaffold-work-companies",
+            },
+            {"type": "add_edge", "from_node_id": "me", "to_node_id": "rooted-wellness", "rel_kind": "founded"},
+        ],
+    }
+    out = apply_proposal(conn, gap, proposal, data_dir=tmp_path)
+    conn.commit()
+    assert out["filled"]
+    org = conn.execute(
+        "SELECT node_id, parent_node_id, node_kind FROM graph_nodes WHERE title='Rooted Wellness Collective'"
+    ).fetchone()
+    assert org and org["parent_node_id"] == "scaffold-work-companies" and org["node_kind"] == "organization"
+    edge = conn.execute(
+        "SELECT from_node_id, to_node_id FROM graph_edges WHERE rel_kind='founded'"
+    ).fetchone()
+    assert edge and edge["from_node_id"] == "scaffold-me" and edge["to_node_id"] == org["node_id"]
+
+
 def test_apply_proposal_skips_unresolvable_edge(conn, tmp_path: Path) -> None:
     """An add_edge whose endpoints resolve to nothing real must be skipped rather
     than written as a dangling edge."""
-    from forty_two_infer import apply_proposal
+    from librarian_infer import apply_proposal
 
     gap = {"gap_type": "bucket", "parent_node_id": "scaffold-work-companies"}
     before = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
@@ -278,7 +335,7 @@ def test_queue_enqueue_and_drain(conn, tmp_path: Path) -> None:
 
 
 def test_scheduler_drains_pending(conn, tmp_path: Path, fake_gemini) -> None:
-    from forty_two_scheduler import tick
+    from librarian_scheduler import tick
 
     fake_gemini(json.dumps({"confidence": 0.8, "actions": [], "unresolved_question": ""}))
     conn.execute(

@@ -1,4 +1,4 @@
-"""42 uses Contacts evidence for bucket-fill suggestions."""
+"""Librarian uses Contacts evidence for bucket-fill suggestions."""
 from __future__ import annotations
 
 import json

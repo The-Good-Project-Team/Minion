@@ -211,7 +211,7 @@ function itemRole(item: FeedRow): "user" | "assistant" {
 
 function isConversation(item: FeedRow): boolean {
   if (isCouncil(item)) return false;
-  return item.lane === "conversation" && (item.kind === "forty_two" || item.kind === "you");
+  return item.lane === "conversation" && (item.kind === "librarian" || item.kind === "you");
 }
 
 function timeLabel(ts: number): string {

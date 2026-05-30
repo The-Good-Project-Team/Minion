@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from forty_two import stream_reply
+from librarian import stream_reply
 from identity_companion import companion_overview, open_companion_thread
 from store import connect, identity_claim_list, seed_sync_sources
 

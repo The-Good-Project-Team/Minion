@@ -12,7 +12,7 @@ _SYSTEM = """You are 42, Minion's guide for filling in the user's private life g
 
 Rules:
 - Keep replies short: one or two paragraphs, conversational, warm but direct.
-- You may use light markdown (**bold** for names). Do not prefix lines with "**42:**".
+- You may use light markdown (**bold** for names). Do not prefix lines with "**Librarian:**".
 - Use ONLY facts from GRAPH_ACTION and THREAD — never invent people, jobs, or relationships.
 - If the user greeted you or gave filler, acknowledge it and ask clearly for what you need (a name, how they know someone, yes/no on a claim, or skip).
 - If GRAPH_ACTION says the graph was updated, confirm what changed in plain language.
@@ -25,7 +25,7 @@ _SYSTEM_OPENING = """You are 42, Minion's guide building the user's private life
 Given MINION_CONTEXT JSON, ask ONE clear question to fill the highest-priority gap.
 - Use capture/corpus hints when relevant (what they're looking at now).
 - For empty buckets, suggest contact names if listed — invite tap or type.
-- Short, warm, one paragraph. Light markdown ok. No "**42:**" prefix.
+- Short, warm, one paragraph. Light markdown ok. No "**Librarian:**" prefix.
 - Never invent facts not in MINION_CONTEXT."""
 
 _SYSTEM_PARSE = """You extract what the user meant for their life graph.
@@ -71,7 +71,7 @@ def _action_context(
     minion_ctx: Dict[str, Any] = {}
     if conn is not None:
         try:
-            from forty_two_context import build_minion_context
+            from librarian_context import build_minion_context
 
             label = str(gap.get("label") or gap.get("bucket_label") or "")
             minion_ctx = build_minion_context(
@@ -104,9 +104,9 @@ def compose_opening_question(
     data_dir: Optional[Path] = None,
 ) -> Tuple[str, bool]:
     """LLM opening line for a new gap thread."""
-    from gemini_client import forty_two_gemini_model, gemini_chat, gemini_configured
+    from gemini_client import librarian_gemini_model, gemini_chat, gemini_configured
     from graph_fill import compose_question
-    from forty_two_context import build_minion_context, context_markdown
+    from librarian_context import build_minion_context, context_markdown
 
     fallback = compose_question(conn, gap, data_dir=data_dir)
     if not gemini_configured(data_dir):
@@ -123,13 +123,13 @@ def compose_opening_question(
             system=_SYSTEM_OPENING,
             messages=[{"role": "user", "content": user}],
             data_dir=data_dir,
-            model=forty_two_gemini_model(data_dir),
+            model=librarian_gemini_model(data_dir),
             temperature=0.55,
             max_output_tokens=512,
         )
         return text.strip(), True
     except Exception as exc:
-        log.warning("42 gemini opening failed: %s", exc)
+        log.warning("Librarian gemini opening failed: %s", exc)
         return fallback, False
 
 
@@ -141,8 +141,8 @@ def normalize_user_turn(
     data_dir: Optional[Path] = None,
 ) -> Tuple[str, Optional[str]]:
     """Return (body_for_apply_answer, action_override)."""
-    from gemini_client import forty_two_gemini_model, gemini_chat, gemini_configured
-    from forty_two_context import build_minion_context, context_markdown
+    from gemini_client import librarian_gemini_model, gemini_chat, gemini_configured
+    from librarian_context import build_minion_context, context_markdown
 
     raw = (text or "").strip()
     if not raw or not gemini_configured(data_dir):
@@ -161,7 +161,7 @@ def normalize_user_turn(
             system=_SYSTEM_PARSE,
             messages=[{"role": "user", "content": user}],
             data_dir=data_dir,
-            model=forty_two_gemini_model(data_dir),
+            model=librarian_gemini_model(data_dir),
             temperature=0.1,
             max_output_tokens=256,
         )
@@ -182,11 +182,11 @@ def normalize_user_turn(
             return answer[:2000], None
         return raw, None
     except Exception as exc:
-        log.debug("42 parse turn skipped: %s", exc)
+        log.debug("Librarian parse turn skipped: %s", exc)
         return raw, None
 
 
-def compose_42_reply(
+def compose_librarian_reply(
     conn,
     thread: Dict[str, Any],
     result: Dict[str, Any],
@@ -195,7 +195,7 @@ def compose_42_reply(
     data_dir: Optional[Path] = None,
 ) -> Tuple[str, bool]:
     """Return (body_md, used_gemini)."""
-    from gemini_client import forty_two_gemini_model, gemini_chat, gemini_configured
+    from gemini_client import librarian_gemini_model, gemini_chat, gemini_configured
     from graph_fill import format_confirmation
 
     fallback = format_confirmation(result)
@@ -218,16 +218,16 @@ def compose_42_reply(
             system=_SYSTEM,
             messages=messages,
             data_dir=data_dir,
-            model=forty_two_gemini_model(data_dir),
+            model=librarian_gemini_model(data_dir),
             max_output_tokens=768,
         )
         return text.strip(), True
     except Exception as exc:
-        log.warning("42 gemini reply failed: %s", exc)
+        log.warning("Librarian gemini reply failed: %s", exc)
         return fallback, False
 
 
-def iter_42_reply_deltas(
+def iter_librarian_reply_deltas(
     conn,
     thread: Dict[str, Any],
     result: Dict[str, Any],
@@ -237,7 +237,7 @@ def iter_42_reply_deltas(
 ) -> Tuple[Iterator[str], List[bool]]:
     """Return (text chunks, single-element list set True when Gemini produced tokens)."""
     from chat_sse import iter_text_deltas
-    from gemini_client import forty_two_gemini_model, gemini_chat_stream, gemini_configured
+    from gemini_client import librarian_gemini_model, gemini_chat_stream, gemini_configured
     from graph_fill import format_confirmation
 
     fallback = format_confirmation(result)
@@ -262,7 +262,7 @@ def iter_42_reply_deltas(
                 system=_SYSTEM,
                 messages=messages,
                 data_dir=data_dir,
-                model=forty_two_gemini_model(data_dir),
+                model=librarian_gemini_model(data_dir),
                 max_output_tokens=768,
             ):
                 got = True
@@ -271,7 +271,7 @@ def iter_42_reply_deltas(
             if not got:
                 yield from iter_text_deltas(fallback)
         except Exception as exc:
-            log.warning("42 gemini stream failed: %s", exc)
+            log.warning("Librarian gemini stream failed: %s", exc)
             yield from iter_text_deltas(fallback)
 
     return _gemini(), used
@@ -320,7 +320,8 @@ Same JSON schema as standard infer, plus action type set_me_profile for scaffold
 
 Rules:
 - Prefer create_node under the GAP parent bucket for family members, home places, employers.
-- Use parent_of, child_of, married_to, lives_at, works_at when evidence supports structure.
+- Use parent_of, child_of, married_to, lives_at, works_at, founded, owns when evidence supports structure.
+- For a company the user started, create the organization node and add_edge founded (or works_at) from scaffold-me.
 - set_me_profile: one consolidated biography paragraph for Me (where from, role, key facts).
 - stability is "core" — only facts likely true for years, not this week's task.
 - Every action MUST cite chunk: IDs. Never invent names.
@@ -457,7 +458,7 @@ def propose_graph_actions_from_evidence(
     from pathlib import Path as _Path
 
     from gemini_client import gemini_chat, gemini_configured, graph_mine_gemini_model
-    from forty_two_context import build_mining_context, mining_context_markdown
+    from librarian_context import build_mining_context, mining_context_markdown
     from graph_corpus_mine import graph_mine_max_output_tokens
 
     if not gemini_configured(data_dir):
@@ -508,11 +509,11 @@ def propose_graph_actions_from_evidence(
         )
         parsed = _parse_proposal_json(out)
         if not parsed:
-            log.warning("42 corpus infer returned unparsable JSON: %r", out[:200])
+            log.warning("Librarian corpus infer returned unparsable JSON: %r", out[:200])
             return None, True
         if not parsed.get("actions"):
             log.info(
-                "42 corpus infer found no cited actions for gap=%s",
+                "Librarian corpus infer found no cited actions for gap=%s",
                 gap.get("gap_type") or gap.get("label"),
             )
             return None, True
@@ -526,5 +527,5 @@ def propose_graph_actions_from_evidence(
                 ]
         return parsed, True
     except Exception as exc:
-        log.warning("42 corpus infer LLM failed: %s", exc)
+        log.warning("Librarian corpus infer LLM failed: %s", exc)
         return None, True

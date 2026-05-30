@@ -313,7 +313,7 @@ def _touch_node(
     title: str,
     data_dir: Optional[Path],
 ) -> bool:
-    from forty_two_infer import _set_node_evidence
+    from librarian_infer import _set_node_evidence
 
     row = conn.execute(
         "SELECT source_refs_json, summary FROM graph_nodes WHERE node_id=?",

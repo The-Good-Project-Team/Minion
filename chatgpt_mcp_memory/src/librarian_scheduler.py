@@ -15,8 +15,8 @@ _thread: Optional[threading.Thread] = None
 _stop = threading.Event()
 
 
-def forty_two_interval_sec(data_dir: Optional[Path] = None) -> float:
-    raw = os.environ.get("MINION_42_INTERVAL_SEC", "").strip()
+def librarian_interval_sec(data_dir: Optional[Path] = None) -> float:
+    raw = os.environ.get("MINION_LIBRARIAN_INTERVAL_SEC", "").strip()
     if raw:
         try:
             return max(60.0, float(raw))
@@ -26,7 +26,7 @@ def forty_two_interval_sec(data_dir: Optional[Path] = None) -> float:
         try:
             from settings import load_settings
 
-            v = load_settings(Path(data_dir)).get("forty_two_interval_sec")
+            v = load_settings(Path(data_dir)).get("librarian_interval_sec")
             if v is not None:
                 return max(60.0, float(v))
         except Exception:
@@ -47,12 +47,12 @@ def _notify_chat_updated(conn, thread_id: str) -> None:
             }
         )
     except Exception:
-        log.debug("42 scheduler chat broadcast skipped", exc_info=True)
+        log.debug("Librarian scheduler chat broadcast skipped", exc_info=True)
 
 
 def tick(conn, data_dir) -> Optional[str]:
     """Open a new 42 thread when idle and a gap exists. Returns thread_id if created."""
-    if os.environ.get("MINION_DISABLE_42_SCHEDULER", "").strip().lower() in (
+    if os.environ.get("MINION_DISABLE_LIBRARIAN_SCHEDULER", "").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -67,13 +67,13 @@ def tick(conn, data_dir) -> Optional[str]:
     try:
         from settings import load_settings
 
-        if load_settings(Path(data_dir)).get("forty_two_enabled") is False:
+        if load_settings(Path(data_dir)).get("librarian_enabled") is False:
             return None
     except Exception:
         pass
 
-    from forty_two import active_thread
-    from forty_two_queue import drain_graph_infer_queue
+    from librarian import active_thread
+    from librarian_queue import drain_graph_infer_queue
     from graph_fill import pick_next_gap, open_thread_for_gap
 
     if active_thread(conn):
@@ -94,7 +94,7 @@ def tick(conn, data_dir) -> Optional[str]:
     out = open_thread_for_gap(conn, gap, data_dir=data_dir)
     tid = out["thread"]["thread_id"]
     _notify_chat_updated(conn, tid)
-    log.info("42 scheduler opened thread %s gap=%s", tid, gap.get("gap_type"))
+    log.info("Librarian scheduler opened thread %s gap=%s", tid, gap.get("gap_type"))
     return tid
 
 
@@ -105,7 +105,7 @@ def _run_once(data_dir, conn_factory: Callable) -> None:
         if tid:
             conn.commit()
     except Exception:
-        log.exception("42 scheduler tick failed")
+        log.exception("Librarian scheduler tick failed")
         try:
             conn.rollback()
         except Exception:
@@ -119,22 +119,22 @@ def _run_once(data_dir, conn_factory: Callable) -> None:
 
 def _loop(data_dir, conn_factory: Callable) -> None:
     while not _stop.is_set():
-        interval = forty_two_interval_sec(data_dir)
+        interval = librarian_interval_sec(data_dir)
         if _stop.wait(interval):
             break
         _run_once(data_dir, conn_factory)
 
 
-def start_forty_two_scheduler(data_dir, conn_factory: Callable) -> None:
+def start_librarian_scheduler(data_dir, conn_factory: Callable) -> None:
     global _thread
     if _thread is not None and _thread.is_alive():
         return
-    if os.environ.get("MINION_DISABLE_42_SCHEDULER", "").strip().lower() in (
+    if os.environ.get("MINION_DISABLE_LIBRARIAN_SCHEDULER", "").strip().lower() in (
         "1",
         "true",
         "yes",
     ):
-        log.info("42 scheduler disabled")
+        log.info("Librarian scheduler disabled")
         return
     _stop.clear()
     _thread = threading.Thread(
@@ -145,10 +145,10 @@ def start_forty_two_scheduler(data_dir, conn_factory: Callable) -> None:
     )
     _thread.start()
     log.info(
-        "42 scheduler started (interval=%ss, gemini required)",
-        forty_two_interval_sec(data_dir),
+        "Librarian scheduler started (interval=%ss, gemini required)",
+        librarian_interval_sec(data_dir),
     )
 
 
-def stop_forty_two_scheduler() -> None:
+def stop_librarian_scheduler() -> None:
     _stop.set()

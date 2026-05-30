@@ -61,7 +61,7 @@ DURABLE_TARGETS: Tuple[Dict[str, Any], ...] = (
 
 DEFAULT_MAX_CALLS_PER_DAY = 48
 DEFAULT_MAX_CALLS_AMBIENT_TICK = 6
-DEFAULT_MAX_CALLS_42_TICK = 6
+DEFAULT_MAX_CALLS_LIBRARIAN_TICK = 6
 DEFAULT_MAX_OUTPUT_TOKENS = 2048
 DEFAULT_PERIODIC_INTERVAL_SEC = 6 * 60 * 60
 DEFAULT_QUERY_MIN_INTERVAL_SEC = 15 * 60
@@ -110,7 +110,7 @@ def mine_limits(data_dir: Optional[Path]) -> Dict[str, int]:
         return {
             "max_per_day": DEFAULT_MAX_CALLS_PER_DAY,
             "max_ambient_tick": DEFAULT_MAX_CALLS_AMBIENT_TICK,
-            "max_42_tick": DEFAULT_MAX_CALLS_42_TICK,
+            "max_librarian_tick": DEFAULT_MAX_CALLS_LIBRARIAN_TICK,
         }
     try:
         from settings import load_settings
@@ -121,15 +121,15 @@ def mine_limits(data_dir: Optional[Path]) -> Dict[str, int]:
             "max_ambient_tick": int(
                 s.get("graph_mine_max_calls_per_tick") or DEFAULT_MAX_CALLS_AMBIENT_TICK
             ),
-            "max_42_tick": int(
-                s.get("graph_mine_42_max_calls_per_tick") or DEFAULT_MAX_CALLS_42_TICK
+            "max_librarian_tick": int(
+                s.get("graph_mine_librarian_max_calls_per_tick") or DEFAULT_MAX_CALLS_LIBRARIAN_TICK
             ),
         }
     except Exception:
         return {
             "max_per_day": DEFAULT_MAX_CALLS_PER_DAY,
             "max_ambient_tick": DEFAULT_MAX_CALLS_AMBIENT_TICK,
-            "max_42_tick": DEFAULT_MAX_CALLS_42_TICK,
+            "max_librarian_tick": DEFAULT_MAX_CALLS_LIBRARIAN_TICK,
         }
 
 
@@ -516,7 +516,7 @@ def run_graph_mine_tick(
     if budget <= 0:
         return {"status": "no_budget", "calls": 0, "filled": 0}
 
-    from forty_two_infer import try_fill_gap_from_corpus
+    from librarian_infer import try_fill_gap_from_corpus
 
     filled = 0
     calls = 0

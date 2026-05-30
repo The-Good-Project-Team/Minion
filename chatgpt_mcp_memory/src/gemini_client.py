@@ -77,11 +77,11 @@ def gemini_model(data_dir: Optional[Path] = None) -> str:
     return _model_from_settings(data_dir, "gemini_model", DEFAULT_MODEL)
 
 
-def forty_two_gemini_model(data_dir: Optional[Path] = None) -> str:
-    env = (os.environ.get("MINION_42_GEMINI_MODEL") or "").strip()
+def librarian_gemini_model(data_dir: Optional[Path] = None) -> str:
+    env = (os.environ.get("MINION_LIBRARIAN_GEMINI_MODEL") or "").strip()
     if env:
         return env
-    return _model_from_settings(data_dir, "forty_two_gemini_model", FORTY_TWO_DEFAULT_MODEL)
+    return _model_from_settings(data_dir, "librarian_gemini_model", FORTY_TWO_DEFAULT_MODEL)
 
 
 def graph_mine_gemini_model(data_dir: Optional[Path] = None) -> str:

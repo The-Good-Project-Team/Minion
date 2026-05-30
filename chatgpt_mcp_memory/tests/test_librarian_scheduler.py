@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from forty_two_scheduler import tick
+from librarian_scheduler import tick
 from store import connect, seed_sync_sources
 
 

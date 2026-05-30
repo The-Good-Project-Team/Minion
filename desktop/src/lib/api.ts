@@ -1614,8 +1614,8 @@ export async function fetchFeed(params: { limit?: number; since_hours?: number }
   if (params.limit != null) q.set("limit", String(params.limit));
   if (params.since_hours != null) q.set("since_hours", String(params.since_hours));
   const qs = q.toString();
-  const raw = await apiFetch<ActivityFeedBundle & { forty_two?: AgentStreamState }>(`/feed${qs ? `?${qs}` : ""}`);
-  return { ...raw, agent: raw.agent ?? raw.forty_two };
+  const raw = await apiFetch<ActivityFeedBundle & { librarian?: AgentStreamState }>(`/feed${qs ? `?${qs}` : ""}`);
+  return { ...raw, agent: raw.agent ?? raw.librarian };
 }
 
 export async function fetchGraphScaffold(): Promise<GraphScaffoldResponse> {

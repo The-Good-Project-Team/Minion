@@ -44,7 +44,7 @@ def drain_graph_infer_queue(
     if not graph_mine_enabled(data_dir):
         clear_graph_infer_pending(conn)
         from graph_fill import pick_next_gap
-        from forty_two_infer import try_fill_gap_from_corpus
+        from librarian_infer import try_fill_gap_from_corpus
 
         filled = 0
         deltas: list[str] = []
@@ -66,12 +66,12 @@ def drain_graph_infer_queue(
         return {"filled": filled, "deltas": deltas, "status": last_status}
 
     limits = mine_limits(data_dir)
-    max_calls = max(max_gaps, limits.get("max_42_tick", 4))
+    max_calls = max(max_gaps, limits.get("max_librarian_tick", 4))
     out = run_periodic_graph_mine_tick(
         conn,
         data_dir,
         max_llm_calls=max_calls,
-        source="42_scheduler",
+        source="librarian_scheduler",
     )
     if out.get("status") != "deferred":
         clear_graph_infer_pending(conn)

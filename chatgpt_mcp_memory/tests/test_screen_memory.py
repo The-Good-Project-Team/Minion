@@ -84,9 +84,9 @@ def test_remember_screen_ingests_stream_and_queues_graph(conn, monkeypatch) -> N
     def fake_enqueue(conn, *, reason: str) -> None:
         queued["reason"] = reason
 
-    import forty_two_queue
+    import librarian_queue
 
-    monkeypatch.setattr(forty_two_queue, "enqueue_graph_infer", fake_enqueue)
+    monkeypatch.setattr(librarian_queue, "enqueue_graph_infer", fake_enqueue)
     out = remember_screen(c, data_dir, index_events=False)
     assert out["ambient"]["ingested"] == 2
     assert out["ax_index"]["indexed"] == 1

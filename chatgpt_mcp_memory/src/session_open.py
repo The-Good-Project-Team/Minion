@@ -143,7 +143,7 @@ def _compose_briefing_md(delta: Dict[str, Any], *, display_name: str = "") -> st
 
 def _active_graph_question(conn) -> Tuple[Optional[str], Optional[str], str]:
     """Returns (thread_id, question_md, request_kind)."""
-    from forty_two import active_thread
+    from librarian import active_thread
 
     full = active_thread(conn)
     if not full:
@@ -165,7 +165,7 @@ def _resolve_request(
     delta: Dict[str, Any],
 ) -> Dict[str, Any]:
     from connector_intent import list_open_connector_work, next_poll_question
-    from forty_two import active_thread
+    from librarian import active_thread
     from graph_fill import open_thread_for_gap, pick_next_gap
 
     tid, qbody, kind = _active_graph_question(conn)

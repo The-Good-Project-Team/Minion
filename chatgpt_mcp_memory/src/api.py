@@ -96,7 +96,7 @@ import identity
 from ambient_pipeline import ingest_screen_context_jsonl
 from ambient_index import index_ax_from_stream
 from ambient_scheduler import start_ambient_scheduler
-from forty_two_scheduler import start_forty_two_scheduler
+from librarian_scheduler import start_librarian_scheduler
 from second_brain import build_today_bundle, build_working_context
 from graph_context import build_graph_context, build_menu_status
 from graph_fill import apply_graph_candidate_resolution
@@ -296,7 +296,7 @@ def _watcher_event_bridge(kind: str, payload: Dict[str, Any]) -> None:
                 State.active["added"] += 1
         if not skipped:
             try:
-                from forty_two_queue import enqueue_graph_infer
+                from librarian_queue import enqueue_graph_infer
 
                 enqueue_graph_infer(State.conn(), reason="source_updated")
                 State.conn().commit()
@@ -324,7 +324,7 @@ def _watcher_event_bridge(kind: str, payload: Dict[str, Any]) -> None:
             State.active = {"root": None, "total": 0, "done": 0, "added": 0, "skipped": 0}
         if int(snap.get("added", 0)) > 0:
             try:
-                from forty_two_queue import enqueue_graph_infer
+                from librarian_queue import enqueue_graph_infer
 
                 enqueue_graph_infer(State.conn(), reason="batch_done")
                 State.conn().commit()
@@ -493,7 +493,7 @@ async def _lifespan(app: FastAPI):
         start_file_tracker(State.data_dir)
     except Exception:
         log.exception("file tracker failed to start")
-    start_forty_two_scheduler(State.data_dir, State.conn)
+    start_librarian_scheduler(State.data_dir, State.conn)
     try:
         from graph_corpus_mine import schedule_background_graph_mine
 
@@ -1728,10 +1728,10 @@ def graph_scaffold() -> Dict[str, Any]:
         from graph_fill import pick_next_gap
 
         out["has_fill_gap"] = pick_next_gap(conn, State.data_dir) is not None
-        from forty_two import stream_state
+        from librarian import stream_state
 
         fs = stream_state(conn, State.data_dir)
-        out["forty_two"] = {
+        out["librarian"] = {
             "active_thread_id": fs.get("active_thread_id"),
             "needs_question": fs.get("needs_question"),
             "question_preview": (fs.get("question_body_md") or "")[:160],
@@ -1739,7 +1739,7 @@ def graph_scaffold() -> Dict[str, Any]:
         }
     except Exception:
         out["has_fill_gap"] = False
-        out["forty_two"] = None
+        out["librarian"] = None
     try:
         from graph_ambient import build_graph_spine
 
@@ -1886,7 +1886,7 @@ def chat_thread_reply(thread_id: str, body: ChatReplyBody) -> Dict[str, Any]:
     return out
 
 
-class FortyTwoReplyBody(BaseModel):
+class LibrarianReplyBody(BaseModel):
     message: str = ""
     thread_id: Optional[str] = None
     action: Optional[str] = None
@@ -2036,13 +2036,13 @@ def dev_e2e_seed_graph_gap(body: E2eSeedGraphGapBody) -> Dict[str, Any]:
     """Playwright-only: insert a sparse person and open the next agent thread."""
     if not _e2e_dev_tools_allowed():
         raise HTTPException(status_code=404, detail="not available")
-    import forty_two
+    import librarian
     from chat_store import chat_threads_list
     from store import _new_id
 
     conn = State.conn()
     for row in chat_threads_list(conn, status="open", limit=50):
-        forty_two.dismiss(conn, str(row["thread_id"]))
+        librarian.dismiss(conn, str(row["thread_id"]))
     nid = _new_id("gn")
     now = time.time()
     name = (body.name or "E2E Journey Person").strip()[:120]
@@ -2055,7 +2055,7 @@ def dev_e2e_seed_graph_gap(body: E2eSeedGraphGapBody) -> Dict[str, Any]:
     )
     from graph_fill import compose_question, open_thread_for_gap, pick_next_gap
 
-    out = forty_two.next_question(conn, State.data_dir)
+    out = librarian.next_question(conn, State.data_dir)
     thread = out.get("thread") or {}
     if not thread.get("thread_id"):
         gap = pick_next_gap(conn, State.data_dir)
@@ -2093,20 +2093,20 @@ def dev_e2e_seed_graph_gap(body: E2eSeedGraphGapBody) -> Dict[str, Any]:
 
 
 @app.post("/chat/agent/next")
-def chat_forty_two_next() -> Dict[str, Any]:
-    import forty_two
+def chat_librarian_next() -> Dict[str, Any]:
+    import librarian
 
-    out = forty_two.next_question(State.conn(), State.data_dir)
+    out = librarian.next_question(State.conn(), State.data_dir)
     State.conn().commit()
     return out
 
 
-def _resolve_forty_two_thread_id(body: FortyTwoReplyBody) -> str:
-    import forty_two
+def _resolve_librarian_thread_id(body: LibrarianReplyBody) -> str:
+    import librarian
 
     tid = body.thread_id
     if not tid:
-        active = forty_two.active_thread(State.conn())
+        active = librarian.active_thread(State.conn())
         if not active:
             raise HTTPException(status_code=400, detail="no active thread; call /chat/agent/next")
         tid = active["thread_id"]
@@ -2151,11 +2151,11 @@ def _chat_sse_response(event_iter) -> StreamingResponse:
 
 
 @app.post("/chat/agent/reply")
-def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
-    import forty_two
+def chat_librarian_reply(body: LibrarianReplyBody) -> Dict[str, Any]:
+    import librarian
 
-    tid = _resolve_forty_two_thread_id(body)
-    out = forty_two.reply(
+    tid = _resolve_librarian_thread_id(body)
+    out = librarian.reply(
         State.conn(),
         tid,
         body=body.message,
@@ -2181,13 +2181,13 @@ def chat_forty_two_reply(body: FortyTwoReplyBody) -> Dict[str, Any]:
 
 
 @app.post("/chat/agent/reply/stream")
-def chat_forty_two_reply_stream(body: FortyTwoReplyBody) -> StreamingResponse:
-    import forty_two
+def chat_librarian_reply_stream(body: LibrarianReplyBody) -> StreamingResponse:
+    import librarian
 
-    tid = _resolve_forty_two_thread_id(body)
+    tid = _resolve_librarian_thread_id(body)
 
     def events():
-        yield from forty_two.stream_reply(
+        yield from librarian.stream_reply(
             State.conn(),
             tid,
             body=body.message,
@@ -2199,12 +2199,12 @@ def chat_forty_two_reply_stream(body: FortyTwoReplyBody) -> StreamingResponse:
 
 
 @app.post("/chat/agent/dismiss")
-def chat_forty_two_dismiss(body: FortyTwoReplyBody) -> Dict[str, Any]:
-    import forty_two
+def chat_librarian_dismiss(body: LibrarianReplyBody) -> Dict[str, Any]:
+    import librarian
 
     if not body.thread_id:
         raise HTTPException(status_code=400, detail="thread_id required")
-    out = forty_two.dismiss(State.conn(), body.thread_id)
+    out = librarian.dismiss(State.conn(), body.thread_id)
     State.conn().commit()
     return out
 
@@ -2730,7 +2730,7 @@ def _trigger_post_ingest_graph(*, added: bool) -> None:
     background mine. Both are gated on Gemini being configured (no-op otherwise),
     so ingest stays fast and graphing happens as part of the same experience."""
     try:
-        from forty_two_queue import maybe_enqueue_after_ingest
+        from librarian_queue import maybe_enqueue_after_ingest
 
         conn = connect(State.db_path)
         try:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from forty_two import next_question, reply
+from librarian import next_question, reply
 from graph_fill import _is_plausible_graph_title, apply_answer, open_thread_for_gap, pick_next_gap
 from store import _new_id, connect, seed_sync_sources
 
@@ -63,7 +63,7 @@ def test_sparse_person_reply_updates_summary(conn) -> None:
     assert result.get("resolved") is False
 
 
-def test_forty_two_reply_chain(conn) -> None:
+def test_librarian_reply_chain(conn) -> None:
     _sparse_person(conn, "Sam")
     nxt = next_question(conn, None)
     assert nxt["created"] is True
@@ -100,7 +100,7 @@ def test_next_question_uses_graph_gap(conn) -> None:
     assert out["created"] is True
     body = out["thread"]["messages"][0]["body_md"]
     assert "Casey" in body
-    # Template openings use "**42:**"; Gemini openings omit that prefix by design.
+    # Template openings use "**Librarian:**"; Gemini openings omit that prefix by design.
     assert "42" in body.lower() or "casey" in body.lower()
 
 

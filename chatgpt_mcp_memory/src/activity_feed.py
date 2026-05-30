@@ -68,7 +68,7 @@ _FEED_SKIP_APPS = frozenset(
 )
 _HIGH_SIGNAL_KINDS = frozenset(
     {
-        "forty_two",
+        "librarian",
         "you",
         "graph_update",
         "graph_status",
@@ -459,23 +459,23 @@ def build_activity_feed(
     issues = system_issues_open(conn, limit=10)
 
     river: List[Dict[str, Any]] = []
-    forty_two_state: Dict[str, Any] = {
+    librarian_state: Dict[str, Any] = {
         "active_thread_id": None,
         "needs_question": False,
         "open_count": 0,
     }
     try:
-        from forty_two import conversation_feed_items, pinned_conversation_item, stream_state
+        from librarian import conversation_feed_items, pinned_conversation_item, stream_state
 
         river.extend(conversation_feed_items(conn, since_ts=since_ts, limit=min(40, lim)))
-        forty_two_state = stream_state(conn, data_dir)
+        librarian_state = stream_state(conn, data_dir)
         pin = pinned_conversation_item(conn)
         if pin:
             pin_ids = {pin["feed_id"]}
             river = [r for r in river if r.get("feed_id") not in pin_ids]
             river.insert(0, pin)
     except Exception:
-        log.exception("forty_two feed items failed")
+        log.exception("librarian feed items failed")
     try:
         from graph_events import graph_event_feed_items
 
@@ -513,7 +513,7 @@ def build_activity_feed(
         "council_items": council_items,
         "memory_prefetch": [],
         "graph": graph_scaffold_list(conn),
-        "forty_two": forty_two_state,
+        "librarian": librarian_state,
         "session": session_hint,
         "composed_at": time.time(),
         "since_ts": since_ts,

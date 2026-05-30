@@ -17,7 +17,7 @@ from chat_store import (
 
 log = logging.getLogger(__name__)
 
-MODE = "forty_two"
+MODE = "librarian"
 
 
 def active_thread(conn) -> Optional[Dict[str, Any]]:
@@ -83,7 +83,7 @@ def _complete_reply(
     thread = chat_thread_get(conn, thread_id) or thread
 
     from graph_fill import apply_answer
-    from forty_two_llm import compose_42_reply, normalize_user_turn
+    from librarian_llm import compose_librarian_reply, normalize_user_turn
 
     body_for_graph, action_override = normalize_user_turn(
         conn, thread, text, data_dir=data_dir
@@ -111,11 +111,11 @@ def _complete_reply(
 
     thread = chat_thread_get(conn, thread_id) or thread
     try:
-        guidance, used_llm = compose_42_reply(
+        guidance, used_llm = compose_librarian_reply(
             conn, thread, result, user_text=text, data_dir=data_dir
         )
     except Exception as exc:
-        log.warning("compose_42_reply failed: %s", exc)
+        log.warning("compose_librarian_reply failed: %s", exc)
         guidance = "Thanks — I've saved that for your graph."
         used_llm = False
     if not (guidance or "").strip():
@@ -196,7 +196,7 @@ def stream_reply(
 
     thread = chat_thread_get(conn, thread_id) or thread
     from graph_fill import apply_answer
-    from forty_two_llm import compose_42_reply, iter_42_reply_deltas, normalize_user_turn
+    from librarian_llm import compose_librarian_reply, iter_librarian_reply_deltas, normalize_user_turn
 
     body_for_graph, action_override = normalize_user_turn(
         conn, thread, text, data_dir=data_dir
@@ -231,7 +231,7 @@ def stream_reply(
     }
 
     parts: List[str] = []
-    delta_iter, used_flag = iter_42_reply_deltas(
+    delta_iter, used_flag = iter_librarian_reply_deltas(
         conn, thread, result, user_text=text, data_dir=data_dir
     )
     for delta in delta_iter:
@@ -244,7 +244,7 @@ def stream_reply(
     guidance = "".join(parts).strip()
     used_llm = bool(used_flag[0])
     if not guidance:
-        guidance, used_llm = compose_42_reply(
+        guidance, used_llm = compose_librarian_reply(
             conn, thread, result, user_text=text, data_dir=data_dir
         )
 
@@ -311,17 +311,17 @@ def conversation_feed_items(
             body = str(m.get("body_md") or "").strip()
             if not body:
                 continue
-            is_42 = role == "assistant"
+            is_librarian = role == "assistant"
             items.append(
                 _feed_item(
                     feed_id=f"msg-{m.get('message_id')}",
                     ts=ts,
                     lane="conversation",
-                    kind="forty_two" if is_42 else "you",
-                    title="Minion" if is_42 else "You",
+                    kind="librarian" if is_librarian else "you",
+                    title="Minion" if is_librarian else "You",
                     body=body,
                     parse=None,
-                    actions=_conversation_actions(m, full) if is_42 else [],
+                    actions=_conversation_actions(m, full) if is_librarian else [],
                     refs={"thread_id": tid, "message_id": str(m.get("message_id") or "")},
                     graph_kinds=_graph_kinds_for_thread(full),
                 )
@@ -375,7 +375,7 @@ def stream_state(conn, data_dir: Optional[Path] = None) -> Dict[str, Any]:
                 question_body = str(m.get("body_md") or "").strip()
                 break
 
-    from gemini_client import forty_two_gemini_model, gemini_configured
+    from gemini_client import librarian_gemini_model, gemini_configured
 
     return {
         "open_count": chat_open_count(conn),
@@ -385,7 +385,7 @@ def stream_state(conn, data_dir: Optional[Path] = None) -> Dict[str, Any]:
         "question_body_md": question_body,
         "has_gap": has_gap,
         "llm_available": gemini_configured(data_dir),
-        "gemini_model": forty_two_gemini_model(data_dir) if gemini_configured(data_dir) else None,
+        "gemini_model": librarian_gemini_model(data_dir) if gemini_configured(data_dir) else None,
     }
 
 
@@ -408,7 +408,7 @@ def pinned_conversation_item(conn) -> Optional[Dict[str, Any]]:
             feed_id=f"msg-pin-{m.get('message_id')}",
             ts=float(m.get("created_at") or time.time()),
             lane="conversation",
-            kind="forty_two",
+            kind="librarian",
             title="Minion",
             body=body,
             parse=None,

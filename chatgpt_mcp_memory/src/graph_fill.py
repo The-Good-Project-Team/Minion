@@ -423,7 +423,7 @@ def compose_question(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] = No
         label = gap.get("label") or "this"
         corpus = prefetch_for_subject(conn, subject_label=str(label), top_k=3)
         body = (
-            f"**42:** Mirror flagged **{gap.get('kind', 'identity')}** — should this land on your graph?\n\n"
+            f"**Librarian:** Mirror flagged **{gap.get('kind', 'identity')}** — should this land on your graph?\n\n"
             f"> {label}\n\n"
         )
         cite = corpus_summary_line(corpus)
@@ -438,7 +438,7 @@ def compose_question(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] = No
         corpus = prefetch_for_subject(
             conn, subject_label=str(label), subject_id=sid, top_k=3
         )
-        body = f"**42:** Who is **{label}** to you? One line is enough — I'll file it on your graph."
+        body = f"**Librarian:** Who is **{label}** to you? One line is enough — I'll file it on your graph."
         cite = corpus_summary_line(corpus)
         if cite:
             body += f"\n\n{cite}"
@@ -447,7 +447,7 @@ def compose_question(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] = No
     if gtype == "person_relation":
         label = gap.get("label") or "someone"
         return (
-            f"**42:** How do you know **{label}**? "
+            f"**Librarian:** How do you know **{label}**? "
             "(e.g. coworker, cousin, neighbor — I'll link them to you on the graph.)"
         )
 
@@ -459,7 +459,7 @@ def compose_question(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] = No
             gap["suggestions"] = suggestions
             labels = ", ".join(f"**{s['name']}**" for s in suggestions[:5])
             body = (
-                f"**42:** Your **{bucket}** bucket is empty. "
+                f"**Librarian:** Your **{bucket}** bucket is empty. "
                 f"From Contacts I have {labels} not on your graph yet — "
                 "tap a name below or type one; I'll add them and link you."
             )
@@ -468,7 +468,7 @@ def compose_question(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] = No
                 body += f"\n\n{cite}"
             return body
         body = (
-            f"**42:** Your **{bucket}** bucket is empty. "
+            f"**Librarian:** Your **{bucket}** bucket is empty. "
             f"Name {hint} — I'll add a node and wire it into the graph."
         )
         cite = _ambient_corpus_line(conn, f"{bucket} {hint}")
@@ -481,16 +481,16 @@ def compose_question(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] = No
         title = gap.get("window_title") or ""
         line = f"**{app}**" + (f" — “{title}”" if title else "")
         return (
-            f"**42:** I noticed {line}. "
+            f"**Librarian:** I noticed {line}. "
             "Who or what is this on your graph — a **person**, **project**, or skip?"
         )
 
-    return "**42:** What's one person or project I should add to your graph right now?"
+    return "**Librarian:** What's one person or project I should add to your graph right now?"
 
 
 def open_thread_for_gap(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Create thread + first assistant message for a gap."""
-    from forty_two_infer import try_fill_gap_from_corpus
+    from librarian_infer import try_fill_gap_from_corpus
 
     auto_attempts = 0
     while gap and auto_attempts < 8:
@@ -514,17 +514,17 @@ def open_thread_for_gap(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] =
             gap["evidence_cite"] = infer.get("evidence_cite")
         break
 
-    meta: Dict[str, Any] = {"mode": "forty_two", "gap": gap}
+    meta: Dict[str, Any] = {"mode": "librarian", "gap": gap}
     if gap.get("claim_id"):
         meta["claim_id"] = gap["claim_id"]
-    topic = "42 · graph"
+    topic = "Librarian · graph"
     subject_id = gap.get("subject_id")
     if gap.get("gap_type") == "claim":
-        topic = f"42 · {gap.get('kind', 'mirror')}"
+        topic = f"Librarian · {gap.get('kind', 'mirror')}"
     elif gap.get("gap_type") == "person":
-        topic = f"42 · {gap.get('label', 'person')}"
+        topic = f"Librarian · {gap.get('label', 'person')}"
     elif gap.get("gap_type") == "bucket":
-        topic = f"42 · {gap.get('bucket_label', 'graph')}"
+        topic = f"Librarian · {gap.get('bucket_label', 'graph')}"
 
     tid = chat_thread_insert(
         conn,
@@ -538,18 +538,18 @@ def open_thread_for_gap(conn, gap: Dict[str, Any], *, data_dir: Optional[Path] =
     body = compose_question(conn, gap, data_dir=data_dir)
     if gap.get("infer_question"):
         cite = gap.get("evidence_cite") or ""
-        body = f"**42:** {gap['infer_question']}"
+        body = f"**Librarian:** {gap['infer_question']}"
         if cite:
             body += f"\n\nFrom your notes — {cite}"
     else:
         try:
-            from forty_two_llm import compose_opening_question
+            from librarian_llm import compose_opening_question
 
             llm_body, used = compose_opening_question(conn, gap, data_dir=data_dir)
             if used and llm_body:
                 body = llm_body
         except Exception:
-            log.debug("42 llm opening skipped", exc_info=True)
+            log.debug("Librarian llm opening skipped", exc_info=True)
     msg_meta: Dict[str, Any] = {"gap": gap, "speaker": "Minion"}
     if gap.get("suggestions"):
         msg_meta["suggestions"] = gap["suggestions"]
@@ -664,7 +664,7 @@ def apply_answer(
             nid = ensure_person_node(
                 conn,
                 label=title,
-                meta={"user_note": text[:500], "source": "forty_two"},
+                meta={"user_note": text[:500], "source": "librarian"},
             )
         else:
             nid = _create_graph_node(conn, parent_id, node_kind, title, user_note=text)
@@ -774,13 +774,13 @@ def _log_deltas(data_dir: Optional[Path], result: Dict[str, Any]) -> None:
 
         for d in result.get("deltas") or []:
             plain = re.sub(r"\*\*([^*]+)\*\*", r"\1", str(d))
-            log_graph_event(data_dir, plain, action="forty_two")
+            log_graph_event(data_dir, plain, action="librarian")
     except Exception:
         log.debug("graph event log failed", exc_info=True)
 
 
 def format_confirmation(result: Dict[str, Any]) -> str:
-    lines = [f"**42:** {d}" for d in result.get("deltas") or ["Updated your graph."]]
+    lines = [f"**Librarian:** {d}" for d in result.get("deltas") or ["Updated your graph."]]
     follow = result.get("follow_up")
     if follow and not result.get("resolved"):
         lines.append("")
@@ -788,7 +788,7 @@ def format_confirmation(result: Dict[str, Any]) -> str:
     elif result.get("resolved"):
         nxt = "Ask me again when you're ready — I'll find the next empty spot."
         lines.append("")
-        lines.append(f"**42:** {nxt}")
+        lines.append(f"**Librarian:** {nxt}")
     return "\n".join(lines)
 
 
@@ -858,10 +858,10 @@ def _create_graph_node(
         return ensure_person_node(
             conn,
             label=title,
-            meta={"user_note": user_note[:500], "source": "forty_two"},
+            meta={"user_note": user_note[:500], "source": "librarian"},
         )
     nid = _new_id("gn")
-    meta = {"user_note": user_note[:500], "source": "forty_two"} if user_note else {}
+    meta = {"user_note": user_note[:500], "source": "librarian"} if user_note else {}
     now = time.time()
     conn.execute(
         "INSERT INTO graph_nodes(node_id, node_kind, title, status, body_md, wiki_page_id, "

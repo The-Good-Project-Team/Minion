@@ -1,4 +1,4 @@
-"""42 Gemini dialogue layer."""
+"""Librarian Gemini dialogue layer."""
 from __future__ import annotations
 
 import os
@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from forty_two_llm import (
+from librarian_llm import (
     MINING_RESPONSE_SCHEMA,
-    compose_42_reply,
-    iter_42_reply_deltas,
+    compose_librarian_reply,
+    iter_librarian_reply_deltas,
 )
 from graph_fill import apply_answer, open_thread_for_gap, pick_next_gap
 from store import connect, seed_sync_sources
@@ -60,7 +60,7 @@ def test_compose_falls_back_without_key(conn, tmp_path: Path) -> None:
         gap = pick_next_gap(conn, None)
         out = open_thread_for_gap(conn, gap)
         result = apply_answer(conn, out["thread"], body="hi there")
-        body, used = compose_42_reply(
+        body, used = compose_librarian_reply(
             conn, out["thread"], result, user_text="hi there", data_dir=tmp_path
         )
         assert used is False
@@ -88,7 +88,7 @@ def test_compose_uses_local_gemini_server(conn, tmp_path: Path, fake_gemini) -> 
     gap = pick_next_gap(conn, None)
     out = open_thread_for_gap(conn, gap)
     result = apply_answer(conn, out["thread"], body="hi there")
-    body, used = compose_42_reply(
+    body, used = compose_librarian_reply(
         conn, out["thread"], result, user_text="hi there", data_dir=tmp_path
     )
     assert used is True
@@ -101,7 +101,7 @@ def test_stream_deltas_from_local_gemini_server(conn, tmp_path: Path, fake_gemin
     gap = pick_next_gap(conn, None)
     out = open_thread_for_gap(conn, gap)
     result = apply_answer(conn, out["thread"], body="hi there")
-    it, flag = iter_42_reply_deltas(
+    it, flag = iter_librarian_reply_deltas(
         conn, out["thread"], result, user_text="hi there", data_dir=tmp_path
     )
     text = "".join(it)

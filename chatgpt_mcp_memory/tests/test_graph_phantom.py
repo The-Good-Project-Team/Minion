@@ -41,8 +41,8 @@ def test_purge_removes_phantom_person_and_stale_thread(conn, tmp_path) -> None:
     tid = chat_thread_insert(
         conn,
         subject_id=nid,
-        topic="42 · graph",
-        meta={"mode": "forty_two", "gap": {"gap_type": "person_relation", "subject_id": nid, "label": "hi there"}},
+        topic="Librarian · graph",
+        meta={"mode": "librarian", "gap": {"gap_type": "person_relation", "subject_id": nid, "label": "hi there"}},
     )
     conn.commit()
 
@@ -59,8 +59,8 @@ def test_purge_closes_thread_when_subject_missing(conn) -> None:
     tid = chat_thread_insert(
         conn,
         subject_id=ghost,
-        topic="42 · graph",
-        meta={"mode": "forty_two", "gap": {"gap_type": "person_relation", "subject_id": ghost, "label": "hi there"}},
+        topic="Librarian · graph",
+        meta={"mode": "librarian", "gap": {"gap_type": "person_relation", "subject_id": ghost, "label": "hi there"}},
     )
     conn.commit()
     out = purge_phantom_graph_artifacts(conn, commit=True)

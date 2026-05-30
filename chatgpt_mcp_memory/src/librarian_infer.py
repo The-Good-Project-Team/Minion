@@ -28,11 +28,71 @@ ALLOWED_REL_KINDS = frozenset(
         "participates_in",
         "owns",
         "manages",
+        "founded",
         "parent_of",
         "child_of",
         "married_to",
     }
 )
+
+# Common relation verbs the model emits that map cleanly onto an allowed kind.
+# Normalizing these (instead of rejecting the whole proposal) keeps a valid node
+# creation from being thrown away just because the edge verb was phrased loosely.
+_REL_SYNONYMS = {
+    "founder_of": "founded",
+    "founder": "founded",
+    "co_founded": "founded",
+    "cofounded": "founded",
+    "created": "founded",
+    "started": "founded",
+    "launched": "founded",
+    "employed_by": "works_at",
+    "employee_of": "works_at",
+    "works_for": "works_at",
+    "work_at": "works_at",
+    "located_in": "lives_at",
+    "located_at": "lives_at",
+    "lives_in": "lives_at",
+    "based_in": "lives_at",
+    "member_of": "participates_in",
+    "participant_in": "participates_in",
+    "part_of": "belongs_to",
+    "owns_company": "owns",
+    "runs": "manages",
+    "leads": "manages",
+    "director_of": "manages",
+    "married": "married_to",
+    "spouse_of": "married_to",
+    "parent": "parent_of",
+    "child": "child_of",
+    "related": "related_to",
+}
+
+
+def _normalize_rel_kind(rel: str) -> str:
+    """Map a loosely-phrased relation onto an allowed kind, else return it unchanged."""
+    key = re.sub(r"\s+", "_", str(rel or "").strip().lower())
+    if key in ALLOWED_REL_KINDS:
+        return key
+    return _REL_SYNONYMS.get(key, key)
+
+
+def sanitize_proposal(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize relation verbs and drop only the edges we still can't map, so one
+    loosely-phrased relation never discards the proposal's valid node creations."""
+    actions = proposal.get("actions")
+    if not isinstance(actions, list):
+        return proposal
+    cleaned: List[Dict[str, Any]] = []
+    for act in actions:
+        if str(act.get("type") or "") == "add_edge":
+            rel = _normalize_rel_kind(act.get("rel_kind") or "")
+            if rel not in ALLOWED_REL_KINDS:
+                continue  # drop just this edge, keep the rest of the proposal
+            act = {**act, "rel_kind": rel}
+        cleaned.append(act)
+    proposal["actions"] = cleaned
+    return proposal
 
 
 def build_queries_for_gap(gap: Dict[str, Any]) -> List[str]:
@@ -434,7 +494,7 @@ def try_fill_gap_from_corpus(
     Returns status: filled | needs_question | skipped.
     """
     from gemini_client import gemini_configured
-    from forty_two_llm import propose_graph_actions_from_evidence
+    from librarian_llm import propose_graph_actions_from_evidence
 
     if not gemini_configured(data_dir):
         return {"status": "skipped", "reason": "no_gemini"}
@@ -454,6 +514,7 @@ def try_fill_gap_from_corpus(
         return {"status": "skipped", "reason": "llm_unavailable"}
 
     proposal["stability"] = stability
+    sanitize_proposal(proposal)
 
     ok, reason = validate_proposal(proposal, gap, pack)
     if not ok:

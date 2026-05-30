@@ -18,6 +18,28 @@ HitT = TypeVar("HitT")
 _RRF_K = 60
 
 
+def rrf_fuse_many(
+    lanes: List[Tuple[List[HitT], float]],
+    *,
+    k: int = _RRF_K,
+) -> List[HitT]:
+    """Weighted Reciprocal Rank Fusion over N ranked lanes.
+
+    `lanes` is an ordered list of (hits, weight). On an overlapping chunk_id the
+    Hit object from the *earliest* lane is kept, so callers should order the lane
+    whose Hit.score they want preserved (the semantic/cosine lane) first — this
+    keeps Hit.score comparable for telemetry/UI per the module invariant.
+    """
+    scores: Dict[str, float] = {}
+    kept: Dict[str, HitT] = {}
+    for hits, weight in lanes:
+        for rank, h in enumerate(hits, start=1):
+            cid = h.chunk_id  # type: ignore[attr-defined]
+            scores[cid] = scores.get(cid, 0.0) + weight / (k + rank)
+            kept.setdefault(cid, h)
+    return sorted(kept.values(), key=lambda h: scores[h.chunk_id], reverse=True)  # type: ignore[attr-defined]
+
+
 def rrf_fuse(
     relevance_hits: List[HitT],
     keyword_hits: List[HitT],
@@ -25,19 +47,13 @@ def rrf_fuse(
     k: int = _RRF_K,
     semantic_weight: float = 1.5,
 ) -> List[HitT]:
-    """Weighted RRF; semantic list wins on overlapping chunk_id (cosine on Hit)."""
-    scores: Dict[str, float] = {}
-    kept: Dict[str, HitT] = {}
-    for rank, h in enumerate(relevance_hits, start=1):
-        cid = h.chunk_id  # type: ignore[attr-defined]
-        scores[cid] = scores.get(cid, 0.0) + semantic_weight / (k + rank)
-        kept[cid] = h
-    for rank, h in enumerate(keyword_hits, start=1):
-        cid = h.chunk_id  # type: ignore[attr-defined]
-        scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank)
-        kept.setdefault(cid, h)
-    fused = sorted(kept.values(), key=lambda h: scores[h.chunk_id], reverse=True)  # type: ignore[attr-defined]
-    return fused
+    """Two-lane weighted RRF; semantic list wins on overlapping chunk_id (cosine on Hit).
+
+    Backwards-compatible thin wrapper over `rrf_fuse_many`.
+    """
+    return rrf_fuse_many(
+        [(relevance_hits, semantic_weight), (keyword_hits, 1.0)], k=k
+    )
 
 
 def _storage_tier_sort_epsilon(storage_tier: str) -> float:
