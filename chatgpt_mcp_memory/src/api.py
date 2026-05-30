@@ -1666,6 +1666,10 @@ class GraphExtractBody(BaseModel):
     source_ids: Optional[List[str]] = None
 
 
+class GraphReshuffleBody(BaseModel):
+    force: bool = False
+
+
 @app.get("/today")
 def today_bundle() -> Dict[str, Any]:
     return build_today_bundle(State.conn(), State.data_dir)
@@ -1853,6 +1857,17 @@ def graph_extract_route(body: GraphExtractBody) -> Dict[str, Any]:
         State.data_dir,
         body.source_ids or None,
     )
+    conn.commit()
+    return result
+
+
+@app.post("/graph/reshuffle")
+def graph_reshuffle_route(body: GraphReshuffleBody) -> Dict[str, Any]:
+    """The Librarian decides whether to update the graph now, and does the work if so."""
+    from corpus_extract import reconsider_graph
+
+    conn = State.conn()
+    result = reconsider_graph(conn, State.data_dir, force=bool(body.force))
     conn.commit()
     return result
 

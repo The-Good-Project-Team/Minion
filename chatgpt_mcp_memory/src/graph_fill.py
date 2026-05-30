@@ -209,7 +209,7 @@ def apply_graph_candidate_resolution(
         deltas.extend(result.get("deltas") or [])
         merge.update(result.get("payload") or {})
     elif status in ("approved", "merged") and candidate.get("candidate_type") == "corpus_entity":
-        result = _apply_corpus_entity_candidate(conn, candidate, merge)
+        result = _apply_corpus_entity_candidate(conn, candidate, merge, data_dir=data_dir)
         if not result.get("ok"):
             return result
         node_id = str(result.get("node_id") or "")
@@ -358,8 +358,11 @@ def _apply_corpus_entity_candidate(
     conn,
     candidate: Dict[str, Any],
     payload: Dict[str, Any],
+    *,
+    data_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Confirm a corpus-extracted entity → create the graph node the user approved."""
+    """Confirm a corpus-extracted entity → create the node, then let the user's
+    answer extend the graph (relations + follow-up questions)."""
     original = dict(candidate.get("payload") or {})
     merged = {**original, **payload}
     label = _first_phrase(str(merged.get("label") or merged.get("title") or "").strip())
@@ -407,11 +410,30 @@ def _apply_corpus_entity_candidate(
             "updated_at=? WHERE node_id=?",
             (json.dumps(existing[:80], ensure_ascii=False), time.time(), node_id),
         )
+
+    deltas = [f"Added **{label}** ({node_kind}) to your graph from new context."]
+    follow_ups: List[Dict[str, Any]] = []
+    # The user's answer drives further graph mutations + genuine follow-up questions.
+    if note:
+        try:
+            from corpus_extract import apply_answer
+
+            applied = apply_answer(conn, data_dir, candidate, note, node_id=node_id)
+            deltas.extend(applied.get("deltas") or [])
+            follow_ups = applied.get("follow_ups") or []
+        except Exception:
+            log.debug("corpus answer apply skipped", exc_info=True)
+
     return {
         "ok": True,
         "node_id": node_id,
-        "payload": {"resolved_node_id": node_id, "resolved_label": label, "applied_as": node_kind},
-        "deltas": [f"Added **{label}** ({node_kind}) to your graph from new context."],
+        "payload": {
+            "resolved_node_id": node_id,
+            "resolved_label": label,
+            "applied_as": node_kind,
+            "follow_ups": follow_ups,
+        },
+        "deltas": deltas,
     }
 
 
