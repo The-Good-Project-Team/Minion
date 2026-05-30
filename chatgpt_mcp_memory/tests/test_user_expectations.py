@@ -228,10 +228,10 @@ def test_as_agent_i_must_get_explicit_ok_before_releasing_current_work_context(t
         first = mcp_server._tool_ask_minion(
             {"query": "What am I working on for Project Castle Hill?", "top_k": 4}
         )
-        assert first
-        assert first[0]["kind"] == "release-request"
-        assert first[0]["release_level"] == 3
-        assert "Project Castle Hill" not in first[0]["text"]
+        assert first["chunks"]
+        assert first["chunks"][0]["kind"] == "release-request"
+        assert first["chunks"][0]["release_level"] == 3
+        assert "Project Castle Hill" not in first["chunks"][0]["text"]
 
         approved = mcp_server._tool_ask_minion(
             {
@@ -243,7 +243,7 @@ def test_as_agent_i_must_get_explicit_ok_before_releasing_current_work_context(t
         )
         approved_text = json.dumps(approved, ensure_ascii=False)
         assert "Project Castle Hill" in approved_text
-        assert any(h["kind"] == "screen-event" for h in approved)
+        assert any(h["kind"] == "screen-event" for h in approved["chunks"])
     finally:
         try:
             conn.close()

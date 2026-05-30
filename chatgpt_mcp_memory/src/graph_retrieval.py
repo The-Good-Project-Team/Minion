@@ -79,7 +79,12 @@ def graph_fact_hits(conn, node_ids: List[str], *, limit: int = 5) -> List[Hit]:
                 path=f"graph/{row['node_kind']}/{nid}",
                 kind="graph-fact",
                 mtime=float(row["updated_at"] or time.time()),
-                meta={"node_id": nid, "node_kind": str(row["node_kind"] or ""), "source_refs": refs[:10]},
+                meta={
+                    "node_id": nid,
+                    "node_kind": str(row["node_kind"] or ""),
+                    "label": str(row["title"] or ""),
+                    "source_refs": refs[:10],
+                },
                 source_meta={"source": "life_graph"},
                 storage_tier="hot",
             )

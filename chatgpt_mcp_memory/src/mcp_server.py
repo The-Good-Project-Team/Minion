@@ -593,11 +593,36 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
     else:
         _SESSION_STATE["_bias_meta"] = {}
 
+    # Split the fused hits into an INDEX of pointers: chunk pointers the agent can
+    # expand, plus the graph entities near the query so it can traverse the graph.
+    # The agent gets a map, not a chunk dump — see _tool_ask_minion docstring.
+    # Graph pointers come from a DEDICATED graph lookup, not the fused chunk list:
+    # a single graph fact fuses below multi-lane chunks and would be truncated out.
+    # The agent should always get the entities near its query, independent of chunk rank.
+    graph_pointers: List[Dict[str, Any]] = []
+    graph_cap = max(5, top_k)
+    if query and mode in ("relevance", "keyword"):
+        try:
+            from graph_retrieval import graph_fact_hits, graph_match_node_ids
+
+            node_ids = graph_match_node_ids(conn, query, limit=graph_cap)
+            graph_pointers = [
+                _graph_hit_to_pointer(h)
+                for h in graph_fact_hits(conn, node_ids, limit=graph_cap)
+            ]
+        except Exception:
+            log.debug("graph pointer lookup failed", exc_info=True)
+
     results: List[Dict[str, Any]] = []
     seen_sources: set[str] = set()
     seen_content: set[str] = set()
     content_dropped = 0
     for h in hits:
+        # Graph-fact hits from the fused lane are not chunks; pointers handled above.
+        if h.role == "graph" or h.kind == "graph-fact":
+            continue
+        if len(results) >= top_k:
+            break
         if dedupe_by_source and h.source_id in seen_sources:
             continue
         # Content-dedup catches near-identical chunks across different
@@ -611,8 +636,6 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         seen_sources.add(h.source_id)
         seen_content.add(fp)
         results.append(_hit_to_result(h, max_chars))
-        if len(results) >= top_k:
-            break
 
     # Telemetry: one line per search, so future improvements (retrieval bugs,
     # chronic weak hits, queries that always fall back to keyword) can be
@@ -632,6 +655,7 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
             rerank=_SESSION_STATE.pop("_last_rerank", "none"),
             candidates=_SESSION_STATE.pop("_last_candidates", None),
             content_dropped=content_dropped,
+            graph_pointers=len(graph_pointers),
             hit_kinds=[r.get("kind") for r in results],
             kind_filter=kind,
             path_glob=path_glob,
@@ -652,7 +676,82 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
     except Exception:
         log.debug("query graph mine schedule skipped", exc_info=True)
 
-    return results
+    # The index: chunk pointers to expand + graph entities near the query to traverse.
+    convo_ids: List[str] = []
+    for r in results:
+        cid = r.get("conversation_id")
+        if cid and cid not in convo_ids:
+            convo_ids.append(str(cid))
+    return {
+        "chunks": results,
+        "graph": graph_pointers,
+        "expand": {"conversation_ids": convo_ids[:8]},
+    }
+
+
+def _graph_hit_to_pointer(h: "Hit") -> Dict[str, Any]:
+    """A graph-lane Hit → a pointer the agent can traverse/expand via `get_node`."""
+    meta = h.meta or {}
+    return {
+        "node_id": str(meta.get("node_id") or h.source_id),
+        "label": str(meta.get("label") or ""),
+        "kind": str(meta.get("node_kind") or ""),
+        "score": round(float(h.score), 4),
+        "fact": h.text,
+        "source_refs": (meta.get("source_refs") or [])[:5],
+    }
+
+
+def _tool_get_node(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Expand a graph pointer from ask_minion's `graph` array into the node + its
+    neighbors, so the agent can traverse the user's knowledge graph."""
+    node_id = str(arguments.get("node_id") or "").strip()
+    if node_id.startswith("graph:"):
+        node_id = node_id[len("graph:") :]
+    if not node_id:
+        raise ValueError("node_id is required")
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT node_id, node_kind, title, summary, confidence, source_refs_json, updated_at "
+        "FROM graph_nodes WHERE node_id=?",
+        (node_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"node_id not found: {node_id}")
+    try:
+        refs = json.loads(row["source_refs_json"] or "[]")
+    except Exception:
+        refs = []
+    edges: List[Dict[str, Any]] = []
+    for e in conn.execute(
+        "SELECT from_node_id, to_node_id, rel_kind FROM graph_edges "
+        "WHERE from_node_id=? OR to_node_id=?",
+        (node_id, node_id),
+    ).fetchall():
+        out = str(e["from_node_id"]) == node_id
+        other_id = str(e["to_node_id"] if out else e["from_node_id"])
+        other = conn.execute(
+            "SELECT node_kind, title FROM graph_nodes WHERE node_id=?", (other_id,)
+        ).fetchone()
+        edges.append(
+            {
+                "rel": str(e["rel_kind"] or ""),
+                "direction": "out" if out else "in",
+                "node_id": other_id,
+                "label": str(other["title"]) if other else "",
+                "kind": str(other["node_kind"]) if other else "",
+            }
+        )
+    summary = row["summary"] or ""
+    return {
+        "node_id": node_id,
+        "kind": str(row["node_kind"] or ""),
+        "label": str(row["title"] or ""),
+        "summary": summary,
+        "confidence": float(row["confidence"] or 0),
+        "edges": edges,
+        "source_refs": [str(r) for r in refs][:20],
+    }
 
 
 def _tool_get_chunk(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -1234,12 +1333,18 @@ TOOLS: List[Dict[str, Any]] = [
             "answer lives in their experience — their history, relationships, "
             "decisions, preferences, work, writing, faith, health, anything "
             "tied to their identity. If so, search Minion first, then speak.\n\n"
+            "Returns an INDEX, not prose: `{chunks: [...pointers...], graph: "
+            "[...entities near your query...], expand: {conversation_ids}}`. Each "
+            "`chunks` entry is a pointer (chunk_id + score + snippet) — read the "
+            "snippets, pick what matters, and expand only those with `get_chunk` / "
+            "`conversation_chunks`. Each `graph` entry is a person/org/project/place "
+            "near your query (node_id + label + a one-line fact); follow one with "
+            "`get_node` to traverse the user's knowledge graph. You synthesize the "
+            "answer from the pointers you choose.\n\n"
             "Search strategy: start with `relevance` (semantic). If the top "
             "hits feel weak or miss a specific name, retry the same question "
             "in `keyword` mode — handwriting and scans OCR with noise and "
-            "embeddings underrank rare proper nouns. Expand a promising hit "
-            "with `get_chunk`, pull a whole thread with `conversation_chunks`, "
-            "list chats with `browse_conversations`. For time-scoped "
+            "embeddings underrank rare proper nouns. For time-scoped "
             "questions (first, earliest, latest, before X, since Y), use "
             "`oldest` or `newest` mode.\n\n"
             "When you answer from a Minion hit, name the source briefly so "
@@ -1322,7 +1427,7 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "get_chunk",
         "title": "Get a chunk by id",
-        "description": "Fetch a single chunk by chunk_id (useful for expanding a search hit).",
+        "description": "Fetch a single chunk's full text by chunk_id — expand a pointer from ask_minion's `chunks` array.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1330,6 +1435,21 @@ TOOLS: List[Dict[str, Any]] = [
                 "max_chars": {"type": "integer", "minimum": 50, "maximum": 10000, "default": DEFAULT_MAX_CHARS_FULL},
             },
             "required": ["chunk_id"],
+        },
+    },
+    {
+        "name": "get_node",
+        "title": "Expand a graph entity",
+        "description": (
+            "Expand a graph pointer from ask_minion's `graph` array: returns the "
+            "entity (label, kind, summary) plus its neighbors (related people, "
+            "orgs, projects, places via typed edges) so you can traverse the "
+            "user's knowledge graph one hop at a time."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"node_id": {"type": "string"}},
+            "required": ["node_id"],
         },
     },
     {
@@ -2038,6 +2158,7 @@ _DISPATCH = {
     "ask_minion": _tool_ask_minion,
     "search_memory": _tool_ask_minion,  # legacy alias
     "get_chunk": _tool_get_chunk,
+    "get_node": _tool_get_node,
     "commit_voice": _tool_commit_voice,
     "append_to_voice": _tool_append_to_voice,
     "browse_conversations": _tool_browse_conversations,

@@ -131,9 +131,9 @@ def test_mcp_retrieval_surfaces_user_identity_archive(tmp_path: Path) -> None:
                 "top_k": 3,
             }
         )
-        assert hits
-        assert "private identity companion" in hits[0]["text"]
-        assert "concise engineering updates" in hits[0]["text"]
+        assert hits["chunks"]
+        assert "private identity companion" in hits["chunks"][0]["text"]
+        assert "concise engineering updates" in hits["chunks"][0]["text"]
     finally:
         if not getattr(conn, "_closed", False):
             try:
@@ -189,11 +189,12 @@ def test_ambient_text_promotes_to_graph_and_mcp_search(tmp_path: Path) -> None:
         import mcp_server
 
         hits = mcp_server._tool_ask_minion({"query": "What do we know about Jordan?", "top_k": 3})
-        assert hits
-        assert hits[0]["kind"] == "release-request"
-        assert hits[0]["release_required"] is True
-        assert hits[0]["release_level"] == 3
-        assert "withheld until the user explicitly approves" in hits[0]["text"]
+        # Withheld: the graph fact is gated, surfaced as a release-request chunk pointer.
+        assert hits["chunks"]
+        assert hits["chunks"][0]["kind"] == "release-request"
+        assert hits["chunks"][0]["release_required"] is True
+        assert hits["chunks"][0]["release_level"] == 3
+        assert "withheld until the user explicitly approves" in hits["chunks"][0]["text"]
 
         approved = mcp_server._tool_ask_minion(
             {
@@ -203,9 +204,11 @@ def test_ambient_text_promotes_to_graph_and_mcp_search(tmp_path: Path) -> None:
                 "approved_release_level": 3,
             }
         )
-        assert approved
-        assert approved[0]["kind"] == "graph-fact"
-        assert "Jordan" in approved[0]["text"]
+        # Approved: the Jordan entity now surfaces as a graph pointer (index model).
+        assert approved["graph"]
+        assert any(
+            "Jordan" in (g.get("label", "") + " " + g.get("fact", "")) for g in approved["graph"]
+        )
     finally:
         try:
             conn.close()
