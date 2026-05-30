@@ -352,12 +352,14 @@ def characterize_corpus(
                 )
             data = json.loads(raw)
         except Exception as exc:
+            # One malformed round shouldn't end the whole characterization — skip
+            # this slice and let the remaining rounds refine.
             log.warning("corpus characterize round %d failed: %s", idx + 1, exc)
-            break
+            continue
 
         new_shape = str(data.get("shape") or "").strip()
         if not new_shape:
-            break
+            continue
         kinds = [str(k) for k in (data.get("dominant_kinds") or []) if str(k).strip()]
         prev = shape
         shape = new_shape
