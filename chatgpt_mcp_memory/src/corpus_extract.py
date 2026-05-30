@@ -110,13 +110,13 @@ def _collect_evidence(
         placeholders = ",".join("?" * len(source_ids))
         rows = conn.execute(
             f"SELECT c.text, s.path FROM chunks c JOIN sources s ON s.source_id = c.source_id "
-            f"WHERE c.source_id IN ({placeholders}) ORDER BY c.source_id, c.seq",
+            f"WHERE c.source_id IN ({placeholders}) ORDER BY s.path, c.seq",
             tuple(source_ids),
         ).fetchall()
     else:
         rows = conn.execute(
             "SELECT c.text, s.path FROM chunks c JOIN sources s ON s.source_id = c.source_id "
-            "ORDER BY s.updated_at DESC, c.seq LIMIT 400"
+            "ORDER BY s.path, c.seq LIMIT 400"
         ).fetchall()
     parts: List[str] = []
     paths: List[str] = []
@@ -154,17 +154,20 @@ def _evidence_slices(
     (step = (1-overlap) * window) so each round sees fresh material that overlaps the
     previous by `overlap` for continuity.
     """
+    # Order by source PATH (+ seq), not updated_at or the random source_id, so the
+    # evidence pool is identical regardless of ingest order — the graph the LLM builds
+    # should not depend on which corpus landed first.
     if source_ids:
         placeholders = ",".join("?" * len(source_ids))
         rows = conn.execute(
-            f"SELECT c.text FROM chunks c WHERE c.source_id IN ({placeholders}) "
-            f"ORDER BY c.source_id, c.seq",
+            f"SELECT c.text FROM chunks c JOIN sources s ON s.source_id = c.source_id "
+            f"WHERE c.source_id IN ({placeholders}) ORDER BY s.path, c.seq",
             tuple(source_ids),
         ).fetchall()
     else:
         rows = conn.execute(
             "SELECT c.text FROM chunks c JOIN sources s ON s.source_id = c.source_id "
-            "ORDER BY s.updated_at DESC, c.seq LIMIT 2000"
+            "ORDER BY s.path, c.seq LIMIT 2000"
         ).fetchall()
     texts = [str(r["text"] or "").strip() for r in rows if str(r["text"] or "").strip()]
     if not texts:
