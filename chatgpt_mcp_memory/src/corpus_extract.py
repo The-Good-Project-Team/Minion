@@ -16,6 +16,7 @@ import logging
 import re
 import threading
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -138,6 +139,77 @@ def _collect_evidence(
     return "\n\n---\n\n".join(parts), paths
 
 
+def _evidence_slices(
+    conn,
+    source_ids: Optional[List[str]],
+    *,
+    rounds: int,
+    chars_per_round: int,
+    overlap: float = 0.25,
+) -> List[str]:
+    """Build `rounds` evidence windows spread across the WHOLE corpus.
+
+    Chunks are sampled stratified across all (matching) sources so coverage isn't
+    front-loaded, concatenated into one pool, then sliced into overlapping windows
+    (step = (1-overlap) * window) so each round sees fresh material that overlaps the
+    previous by `overlap` for continuity.
+    """
+    if source_ids:
+        placeholders = ",".join("?" * len(source_ids))
+        rows = conn.execute(
+            f"SELECT c.text FROM chunks c WHERE c.source_id IN ({placeholders}) "
+            f"ORDER BY c.source_id, c.seq",
+            tuple(source_ids),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT c.text FROM chunks c JOIN sources s ON s.source_id = c.source_id "
+            "ORDER BY s.updated_at DESC, c.seq LIMIT 2000"
+        ).fetchall()
+    texts = [str(r["text"] or "").strip() for r in rows if str(r["text"] or "").strip()]
+    if not texts:
+        return []
+
+    # Stratify: walk the chunk list with an even stride so the pool spans the corpus
+    # rather than just its first N chunks.
+    pool_budget = max(chars_per_round * rounds, chars_per_round)
+    stride = max(1, len(texts) // max(1, (pool_budget // 400)))  # ~400 chars/chunk heuristic
+    sampled: List[str] = []
+    total = 0
+    i = 0
+    while i < len(texts) and total < pool_budget:
+        t = texts[i]
+        sampled.append(t)
+        total += len(t)
+        i += stride
+    # Top up with any remaining if stride overshot.
+    if total < pool_budget:
+        for t in texts:
+            if t not in sampled:
+                sampled.append(t)
+                total += len(t)
+                if total >= pool_budget:
+                    break
+    pool = "\n\n---\n\n".join(sampled)
+    return _window(pool, rounds=rounds, chars_per_round=chars_per_round, overlap=overlap)
+
+
+def _window(pool: str, *, rounds: int, chars_per_round: int, overlap: float = 0.25) -> List[str]:
+    """Slice `pool` into up to `rounds` windows of `chars_per_round`, each overlapping
+    the previous by `overlap` (step = (1-overlap) * window)."""
+    if not pool:
+        return []
+    if len(pool) <= chars_per_round:
+        return [pool]
+    step = max(1, int(chars_per_round * (1.0 - overlap)))
+    slices: List[str] = []
+    start = 0
+    while start < len(pool) and len(slices) < rounds:
+        slices.append(pool[start : start + chars_per_round])
+        start += step
+    return slices
+
+
 def _existing_labels(conn) -> set[str]:
     """Normalized labels already on the graph or already pending as candidates."""
     out: set[str] = set()
@@ -154,13 +226,22 @@ def _existing_labels(conn) -> set[str]:
 
 
 _SHAPE_SYSTEM = (
-    "You are looking at a fresh sample of material a user just added to their "
-    "personal knowledge system. Before anything is extracted, describe what this "
-    "collection appears to BE. In 2-4 sentences: what is it, who or what does it "
-    "center on, and what kinds of entities and relationships dominate (people, "
-    "organizations, projects, places, events, ideas)? Be concrete and grounded in "
-    "the sample; do not guess beyond it. Return strict JSON: "
-    '{"shape": "<the description>", "dominant_kinds": ["..."]}'
+    "You are looking at a sample of material a user added to their personal knowledge "
+    "system. Before anything is extracted, describe what this collection appears to BE. "
+    "In 2-4 sentences: what is it, who or what does it center on, and what kinds of "
+    "entities and relationships dominate (people, organizations, projects, places, "
+    "events, ideas)? Be concrete and grounded in the sample; do not guess beyond it. "
+    'Return strict JSON: {"shape": "<description>", "dominant_kinds": ["..."]}'
+)
+
+_SHAPE_REFINE_SYSTEM = (
+    "You are refining your understanding of a collection a user added to their personal "
+    "knowledge system. You will be given your CURRENT understanding plus MORE of the "
+    "material. Update the description: keep what still holds, correct what's now wrong, "
+    "and add what's newly revealed. Stay concrete and grounded in the evidence. Also "
+    "judge whether this new material changed your understanding in a meaningful way. "
+    'Return strict JSON: {"shape": "<updated description>", "dominant_kinds": ["..."], '
+    '"changed": <true if the update is materially different, else false>}'
 )
 
 _SHAPE_SCHEMA: Dict[str, Any] = {
@@ -168,9 +249,34 @@ _SHAPE_SCHEMA: Dict[str, Any] = {
     "properties": {
         "shape": {"type": "string"},
         "dominant_kinds": {"type": "array", "items": {"type": "string"}},
+        "changed": {"type": "boolean"},
     },
     "required": ["shape"],
 }
+
+_META_SHAPE = "corpus_shape"
+_DEFAULT_SHAPE_ROUNDS = 5
+_SHAPE_CHARS_PER_ROUND = 6000
+_SHAPE_CONVERGENCE_RATIO = 0.93
+
+
+def _shape_rounds(data_dir: Optional[Path]) -> int:
+    import os
+
+    raw = os.environ.get("MINION_SHAPE_ROUNDS", "").strip()
+    if raw:
+        try:
+            return max(1, min(10, int(raw)))
+        except ValueError:
+            pass
+    if data_dir:
+        try:
+            from settings import load_settings
+
+            return max(1, min(10, int(load_settings(Path(data_dir)).get("corpus_shape_rounds", _DEFAULT_SHAPE_ROUNDS))))
+        except Exception:
+            pass
+    return _DEFAULT_SHAPE_ROUNDS
 
 
 def characterize_corpus(
@@ -178,34 +284,104 @@ def characterize_corpus(
     data_dir: Optional[Path],
     source_ids: Optional[List[str]] = None,
     *,
-    max_chars: int = 8000,
+    rounds: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Snapshot the data and ask the LLM what it looks like — before any graphing."""
-    if not _gemini_ok(data_dir):
-        return {"shape": "", "dominant_kinds": []}
-    evidence, _ = _collect_evidence(conn, source_ids, max_chars=max_chars)
-    if not evidence.strip():
-        return {"shape": "", "dominant_kinds": []}
-    try:
-        from gemini_client import gemini_chat, graph_mine_gemini_model
+    """Iteratively ask the LLM "what does this look like?" — deepening each round.
 
-        raw = gemini_chat(
-            system=_SHAPE_SYSTEM,
-            messages=[{"role": "user", "content": f"SAMPLE:\n{evidence}"}],
-            data_dir=data_dir,
-            model=graph_mine_gemini_model(data_dir) if data_dir else None,
-            temperature=0.2,
-            max_output_tokens=512,
-            response_mime_type="application/json",
-            response_schema=_SHAPE_SCHEMA,
-        )
-        data = json.loads(raw)
-    except Exception as exc:
-        log.warning("corpus characterize failed: %s", exc)
-        return {"shape": "", "dominant_kinds": []}
+    shape_n = LLM(shape_{n-1} + a fresh, 25%-overlapping slice of the corpus). Runs up
+    to `rounds` rounds, stopping early once the shape converges. The final shape is
+    persisted (meta `corpus_shape`) and seeds the next run, so understanding compounds.
+    """
+    empty = {"shape": "", "dominant_kinds": [], "shape_history": [], "rounds_run": 0, "converged": False}
+    if not _gemini_ok(data_dir):
+        return empty
+    n_rounds = rounds or _shape_rounds(data_dir)
+    slices = _evidence_slices(
+        conn, source_ids, rounds=n_rounds, chars_per_round=_SHAPE_CHARS_PER_ROUND
+    )
+    if not slices:
+        return empty
+
+    from gemini_client import gemini_chat, graph_mine_gemini_model
+    from store import meta_get, meta_set
+
+    model = graph_mine_gemini_model(data_dir) if data_dir else None
+    prior_shape = ""
+    try:
+        prior_shape = str(meta_get(conn, _META_SHAPE) or "").strip()
+    except Exception:
+        prior_shape = ""
+
+    shape = ""
+    dominant: List[str] = []
+    history: List[str] = []
+    converged = False
+    rounds_run = 0
+
+    for idx, sl in enumerate(slices):
+        is_first = idx == 0 and not prior_shape
+        try:
+            if is_first:
+                raw = gemini_chat(
+                    system=_SHAPE_SYSTEM,
+                    messages=[{"role": "user", "content": f"SAMPLE:\n{sl}"}],
+                    data_dir=data_dir,
+                    model=model,
+                    temperature=0.2,
+                    max_output_tokens=512,
+                    response_mime_type="application/json",
+                    response_schema=_SHAPE_SCHEMA,
+                )
+            else:
+                current = shape or prior_shape
+                raw = gemini_chat(
+                    system=_SHAPE_REFINE_SYSTEM,
+                    messages=[{
+                        "role": "user",
+                        "content": f"CURRENT UNDERSTANDING:\n{current}\n\nMORE MATERIAL:\n{sl}",
+                    }],
+                    data_dir=data_dir,
+                    model=model,
+                    temperature=0.2,
+                    max_output_tokens=512,
+                    response_mime_type="application/json",
+                    response_schema=_SHAPE_SCHEMA,
+                )
+            data = json.loads(raw)
+        except Exception as exc:
+            log.warning("corpus characterize round %d failed: %s", idx + 1, exc)
+            break
+
+        new_shape = str(data.get("shape") or "").strip()
+        if not new_shape:
+            break
+        kinds = [str(k) for k in (data.get("dominant_kinds") or []) if str(k).strip()]
+        prev = shape
+        shape = new_shape
+        dominant = kinds or dominant
+        history.append(shape)
+        rounds_run += 1
+
+        # Convergence: LLM's own `changed` flag, plus a text-similarity fallback.
+        if not is_first:
+            llm_changed = data.get("changed")
+            ratio = SequenceMatcher(None, prev, shape).ratio() if prev else 0.0
+            if llm_changed is False or (llm_changed is None and ratio >= _SHAPE_CONVERGENCE_RATIO):
+                converged = True
+                break
+
+    if shape:
+        try:
+            meta_set(conn, _META_SHAPE, shape)
+        except Exception:
+            log.debug("persist corpus_shape failed", exc_info=True)
+
     return {
-        "shape": str(data.get("shape") or "").strip(),
-        "dominant_kinds": [str(k) for k in (data.get("dominant_kinds") or []) if str(k).strip()],
+        "shape": shape,
+        "dominant_kinds": dominant,
+        "shape_history": history,
+        "rounds_run": rounds_run,
+        "converged": converged,
     }
 
 
@@ -346,6 +522,9 @@ def extract_entities_for_sources(
         "created": len(created),
         "entities": created,
         "shape": shape,
+        "shape_history": shape_info.get("shape_history", []),
+        "rounds_run": shape_info.get("rounds_run", 0),
+        "converged": shape_info.get("converged", False),
         "dominant_kinds": shape_info.get("dominant_kinds", []),
     }
 

@@ -16,6 +16,7 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 
 from activity_feed import _candidate_suggestions  # noqa: E402
+from corpus_extract import _window  # noqa: E402
 from graph_fill import apply_graph_candidate_resolution  # noqa: E402
 from store import connect, graph_candidate_create, graph_candidate_list  # noqa: E402
 
@@ -81,6 +82,28 @@ def test_approve_corpus_person_links_to_me(conn) -> None:
         "SELECT node_kind FROM graph_nodes WHERE node_id=?", (out["node_id"],)
     ).fetchone()
     assert row["node_kind"] == "person"
+
+
+def test_window_overlap_and_count() -> None:
+    pool = "".join(chr(65 + (i % 26)) for i in range(10000))  # 10k chars
+    win = 2000
+    slices = _window(pool, rounds=5, chars_per_round=win, overlap=0.25)
+    # step = 1500; starts 0,1500,3000,4500,6000 -> 5 windows
+    assert len(slices) == 5
+    assert all(len(s) <= win for s in slices)
+    # consecutive windows overlap by exactly 25% of the window (500 chars).
+    assert slices[0][1500:2000] == slices[1][0:500]
+    assert slices[1][1500:2000] == slices[2][0:500]
+
+
+def test_window_small_pool_single_slice() -> None:
+    assert _window("short text", rounds=5, chars_per_round=5000) == ["short text"]
+    assert _window("", rounds=5, chars_per_round=5000) == []
+
+
+def test_window_caps_at_rounds() -> None:
+    pool = "x" * 100000
+    assert len(_window(pool, rounds=3, chars_per_round=1000, overlap=0.25)) == 3
 
 
 def test_reject_creates_no_node(conn) -> None:
