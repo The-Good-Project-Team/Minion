@@ -14,6 +14,7 @@ from second_brain import build_working_context
 from life_graph import WIKI_PAGE_TYPE_TO_NODE
 from store import (
     ambient_events_since,
+    graph_candidate_list,
     graph_scaffold_list,
     identity_claim_list,
     sync_job_runs_recent,
@@ -393,6 +394,33 @@ def _claim_suggestions(claims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _candidate_suggestions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Open graph candidates (e.g. corpus-extracted entities) as confirmable items."""
+    out: List[Dict[str, Any]] = []
+    for c in candidates:
+        if c.get("status") != "open":
+            continue
+        payload = c.get("payload") or {}
+        kind = str(payload.get("node_kind") or "person")
+        out.append(
+            _feed_item(
+                feed_id=f"candidate-{c.get('candidate_id')}",
+                ts=float(c.get("updated_at") or c.get("created_at") or 0),
+                lane="suggestion",
+                kind="graph_candidate",
+                title=str(c.get("title") or payload.get("label") or "New entity"),
+                body=(c.get("body_md") or "")[:400],
+                actions=[
+                    {"id": "approve", "label": "Yes, add it"},
+                    {"id": "reject", "label": "No"},
+                ],
+                refs={"candidate_id": str(c.get("candidate_id") or "")},
+                graph_kinds=[kind],
+            )
+        )
+    return out
+
+
 def _issue_suggestions(issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for i in issues:
@@ -457,6 +485,7 @@ def build_activity_feed(
     tasks = task_list(conn, limit=50)
     claims = identity_claim_list(conn, status="proposed", limit=30)
     issues = system_issues_open(conn, limit=10)
+    candidates = graph_candidate_list(conn, status="open", limit=40)
 
     river: List[Dict[str, Any]] = []
     librarian_state: Dict[str, Any] = {
@@ -487,6 +516,7 @@ def build_activity_feed(
     river.extend(_wiki_to_items(wiki))
     river.extend(_task_suggestions(tasks, council_subjects=council_subjects))
     river.extend(_claim_suggestions(claims))
+    river.extend(_candidate_suggestions(candidates))
     river.extend(_issue_suggestions(issues))
 
     status = _graph_status_item(conn, data_dir)

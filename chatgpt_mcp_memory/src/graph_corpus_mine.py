@@ -563,7 +563,7 @@ def run_graph_mine_tick(
             label = ", ".join((deltas or [])[:2]) or f"{filled} graph update(s)"
             log_graph_event(
                 data_dir,
-                f"**42** mined your notes → {label[:240]}",
+                f"**Librarian** mined your notes → {label[:240]}",
                 action="mine",
             )
         except Exception:

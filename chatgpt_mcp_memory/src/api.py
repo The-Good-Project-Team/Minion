@@ -1662,6 +1662,10 @@ class GraphCandidateResolveBody(BaseModel):
     payload: Optional[Dict[str, Any]] = None
 
 
+class GraphExtractBody(BaseModel):
+    source_ids: Optional[List[str]] = None
+
+
 @app.get("/today")
 def today_bundle() -> Dict[str, Any]:
     return build_today_bundle(State.conn(), State.data_dir)
@@ -1836,6 +1840,21 @@ def graph_candidate_resolve_route(
         raise HTTPException(status_code=400, detail=result.get("error") or "candidate resolve failed")
     conn.commit()
     return {"candidate": result.get("candidate"), "result": result}
+
+
+@app.post("/graph/extract")
+def graph_extract_route(body: GraphExtractBody) -> Dict[str, Any]:
+    """L3: extract entities from recent (or given) sources into confirmable candidates."""
+    from corpus_extract import extract_entities_for_sources
+
+    conn = State.conn()
+    result = extract_entities_for_sources(
+        conn,
+        State.data_dir,
+        body.source_ids or None,
+    )
+    conn.commit()
+    return result
 
 
 @app.get("/menu/status")

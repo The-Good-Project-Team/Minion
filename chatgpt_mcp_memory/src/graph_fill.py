@@ -208,6 +208,13 @@ def apply_graph_candidate_resolution(
         node_id = str(result.get("node_id") or "")
         deltas.extend(result.get("deltas") or [])
         merge.update(result.get("payload") or {})
+    elif status in ("approved", "merged") and candidate.get("candidate_type") == "corpus_entity":
+        result = _apply_corpus_entity_candidate(conn, candidate, merge)
+        if not result.get("ok"):
+            return result
+        node_id = str(result.get("node_id") or "")
+        deltas.extend(result.get("deltas") or [])
+        merge.update(result.get("payload") or {})
 
     row = graph_candidate_resolve(conn, candidate_id, status=status, payload_merge=merge)
     out = {"ok": True, "candidate": row, "deltas": deltas, "node_id": node_id or None}
@@ -344,6 +351,67 @@ def _apply_person_merge_candidate(
             "merged_identifiers": identifiers,
         },
         "deltas": [f"Merged new identifiers for **{title}** into your graph."],
+    }
+
+
+def _apply_corpus_entity_candidate(
+    conn,
+    candidate: Dict[str, Any],
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Confirm a corpus-extracted entity → create the graph node the user approved."""
+    original = dict(candidate.get("payload") or {})
+    merged = {**original, **payload}
+    label = _first_phrase(str(merged.get("label") or merged.get("title") or "").strip())
+    node_kind = str(merged.get("node_kind") or merged.get("kind") or "person").strip().lower()
+    if node_kind not in ("person", "organization", "project", "place", "group"):
+        node_kind = "person"
+    if not _is_plausible_graph_title(label, node_kind=node_kind):
+        return {"ok": False, "error": "missing_entity_label"}
+    # The user's reply (how they're connected) becomes the node's note + a relation.
+    note = str(
+        payload.get("relationship")
+        or payload.get("relation_note")
+        or payload.get("user_note")
+        or payload.get("note")
+        or merged.get("evidence")
+        or ""
+    ).strip()[:500]
+    refs = [str(r) for r in (candidate.get("evidence_refs") or []) if str(r).strip()]
+
+    if node_kind == "person":
+        node_id = ensure_person_node(
+            conn,
+            label=label,
+            meta={"user_note": note, "source": "corpus_extract", "evidence_refs": refs},
+        )
+        link_belongs_to_scaffold(conn, node_id)
+        if note:
+            _person_summary(conn, node_id, note)
+            _link_knows(conn, ME_NODE, node_id, note)
+    else:
+        parent = _default_parent_for_kind(node_kind)
+        node_id = _create_graph_node(conn, parent, node_kind, label, user_note=note)
+
+    # Attach provenance + a confirmed-by-user confidence floor.
+    if refs:
+        row = conn.execute(
+            "SELECT source_refs_json FROM graph_nodes WHERE node_id=?", (node_id,)
+        ).fetchone()
+        existing = _json_list(row["source_refs_json"] or "[]") if row else []
+        for r in refs:
+            if r not in existing:
+                existing.append(r)
+        conn.execute(
+            "UPDATE graph_nodes SET source_refs_json=?, confidence=MAX(confidence, 0.8), "
+            "updated_at=? WHERE node_id=?",
+            (json.dumps(existing[:80], ensure_ascii=False), time.time(), node_id),
+        )
+    return {
+        "ok": True,
+        "node_id": node_id,
+        "payload": {"resolved_node_id": node_id, "resolved_label": label, "applied_as": node_kind},
+        "deltas": [f"Added **{label}** ({node_kind}) to your graph from new context."],
     }
 
 
