@@ -247,6 +247,16 @@ mod macos {
             }
             self.depth.set(d + 1);
 
+            // Never read secure fields (passwords) — even inside an allowed window.
+            // Now that we read value() on every element, this element-level guard is
+            // the backstop the app/title deny-list can't cover.
+            if let Ok(r) = element.role() {
+                let role = r.to_string();
+                if role == "AXSecureTextField" || role.contains("Secure") {
+                    return TreeWalkerFlow::SkipSubtree;
+                }
+            }
+
             if let Ok(t) = element.title() {
                 self.push_line(&t.to_string());
             }
