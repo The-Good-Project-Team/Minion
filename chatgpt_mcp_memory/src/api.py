@@ -2575,6 +2575,17 @@ def screen_memory_create_task(
     )
 
 
+@app.get("/recent-work")
+def recent_work_route(days: float = 3.0) -> Dict[str, Any]:
+    """Apps by active attention + on-screen work signals over the last `days`."""
+    import time as _time
+
+    from attention_rollup import recent_work_digest
+
+    days = max(0.5, min(30.0, days))
+    return recent_work_digest(State.conn(), since_ts=_time.time() - days * 86400.0)
+
+
 @app.get("/maintenance/lifecycle-status")
 def maintenance_lifecycle_status() -> Dict[str, Any]:
     """Per-table counts + retention windows + protected (never-deleted) kinds."""

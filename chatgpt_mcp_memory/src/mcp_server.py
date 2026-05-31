@@ -763,6 +763,19 @@ def _graph_hit_to_pointer(h: "Hit") -> Dict[str, Any]:
     }
 
 
+def _tool_recent_work(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Deliver 'what have I been working on' directly: apps ranked by active attention
+    (idle excluded) + the on-screen work signals per app, over the last `days`."""
+    import time as _time
+
+    from attention_rollup import recent_work_digest
+
+    days = float(arguments.get("days") or 3)
+    days = max(0.5, min(30.0, days))
+    conn = _get_conn()
+    return recent_work_digest(conn, since_ts=_time.time() - days * 86400.0)
+
+
 def _tool_get_node(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Expand a graph pointer from ask_minion's `graph` array into the node + its
     neighbors, so the agent can traverse the user's knowledge graph."""
@@ -1499,6 +1512,22 @@ TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "recent_work",
+        "title": "What have I been working on",
+        "description": (
+            "Deliver, in one call, what the user has been working on over the last "
+            "`days` (default 3): `apps_by_attention` (each app with active-attention "
+            "minutes + pct, idle/lock excluded) and `work_signals` (the actual on-screen "
+            "content per app, e.g. sites, docs, terminal tasks). Use this to answer "
+            "'what have I been working on', 'what's the story of my work', or to ground "
+            "a recap — no need to compute it yourself."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"days": {"type": "number", "minimum": 0.5, "maximum": 30, "default": 3}},
+        },
+    },
+    {
         "name": "get_node",
         "title": "Expand a graph entity",
         "description": (
@@ -2220,6 +2249,7 @@ _DISPATCH = {
     "search_memory": _tool_ask_minion,  # legacy alias
     "get_chunk": _tool_get_chunk,
     "get_node": _tool_get_node,
+    "recent_work": _tool_recent_work,
     "commit_voice": _tool_commit_voice,
     "append_to_voice": _tool_append_to_voice,
     "browse_conversations": _tool_browse_conversations,
