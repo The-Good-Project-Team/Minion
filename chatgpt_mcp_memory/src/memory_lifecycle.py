@@ -34,7 +34,8 @@ STREAM_ROTATE_BYTES = 12 * 1024 * 1024
 # graph, wiki, and active claims are structurally out of reach of every trim here.
 PROTECTED_SOURCE_KINDS = frozenset(
     {"text", "markdown", "md", "pdf", "docx", "code", "html", "htm",
-     "chatgpt-export", "claude-export", "image", "audio", "graph-community"}
+     "chatgpt-export", "claude-export", "image", "audio", "graph-community",
+     "screen-ocr"}
 )
 SCREEN_EVENTS_MAX_AGE_DAYS = 30
 RESOLVED_CANDIDATE_MAX_AGE_DAYS = 14

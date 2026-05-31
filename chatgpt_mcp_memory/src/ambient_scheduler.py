@@ -26,6 +26,14 @@ def _run_once(data_dir, conn_factory) -> None:
         conn.commit()
         ax = index_ax_from_stream(data_dir=data_dir, conn=conn, dry_run=False)
         conn.commit()
+        # Full-text screen reading on any app: OCR a few new screenshots per tick.
+        try:
+            from screen_ocr import index_screenshots
+
+            index_screenshots(conn, Path(data_dir), limit=5)
+            conn.commit()
+        except Exception:
+            log.exception("screen OCR indexing failed")
         if os.environ.get("MINION_ENABLE_VOICE", "").strip().lower() in ("1", "true", "on"):
             try:
                 from listening_ingest import ingest_listening_segments
