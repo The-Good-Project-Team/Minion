@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -1554,17 +1555,21 @@ def keyword_search(
 
 
 def _fts5_sanitize(query: str) -> str:
-    """Make a user-typed string safe for FTS5 MATCH.
+    """Make a user-typed string safe for FTS5 MATCH, with BM25 keyword semantics.
 
-    FTS5 treats unquoted punctuation (colons, parens, quotes, dashes) as
-    operators. We wrap each whitespace-separated token in double quotes,
-    escaping embedded double quotes, which forces phrase/token matching
-    without surprising operator semantics.
+    Two things matter:
+    1. Strip punctuation per token. The tokenizer indexes alphanumeric terms, so a
+       quoted token like "properties." or "0-dimensional" matches nothing.
+    2. Join terms with OR, not whitespace. FTS5 treats space-separated terms as an
+       implicit AND — a natural-language query then needs ONE document containing
+       EVERY term verbatim, which matches ~nothing (this left the sparse lane dead).
+       OR lets BM25 rank documents by term overlap, the conventional keyword search.
     """
-    tokens = [t for t in query.split() if t.strip()]
-    if not tokens:
+    toks = re.findall(r"[a-z0-9]+", (query or "").lower())
+    toks = [t for t in toks if len(t) >= 2]
+    if not toks:
         return '""'
-    return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+    return " OR ".join(f'"{t}"' for t in toks)
 
 
 def list_conversations(
