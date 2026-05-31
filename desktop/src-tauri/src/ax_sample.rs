@@ -19,6 +19,7 @@ mod macos {
     use accessibility::{
         AXUIElement, AXUIElementAttributes, TreeWalker, TreeVisitor, TreeWalkerFlow,
     };
+    use core_foundation::string::CFString;
     use std::cell::{Cell, RefCell};
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -257,6 +258,15 @@ mod macos {
             }
             if let Ok(t) = element.value_description() {
                 self.push_line(&t.to_string());
+            }
+            // AXValue carries the ACTUAL on-screen text for static-text / text-field /
+            // text-area / heading / link elements — i.e. web page bodies, terminal
+            // output, native content. Title/label/description only give chrome, so
+            // without reading value() the walk captures the toolbar, not the page.
+            if let Ok(v) = element.value() {
+                if let Some(s) = v.downcast::<CFString>() {
+                    self.push_line(&s.to_string());
+                }
             }
 
             TreeWalkerFlow::Continue
