@@ -23,7 +23,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from beir_eval import _load, _mrr_at_k, _ndcg_at_k, _recall_at_k, EMBED_MODEL  # noqa: E402
 
-DB_PATH = Path("/tmp/minion-beir/memory.db")
+# Per-(dataset, ingest-mode) DB so concurrent runs never share/clobber one file.
+def _db_path(name: str, mode: str) -> Path:
+    return Path(f"/tmp/minion-beir-{name}-{mode}/memory.db")
 
 
 # path → beir doc_id map, populated at ingest time (handles both ingest modes).
@@ -194,13 +196,14 @@ def main() -> None:
     corpus, queries, qrels = _load(name)
     print(f"{name}: {len(corpus)} docs, {len(queries)} test queries  | ingest_mode={ingest_mode}", flush=True)
 
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if DB_PATH.exists():
-        DB_PATH.unlink()
-    conn = connect(DB_PATH)
+    db_path = _db_path(name, ingest_mode)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if db_path.exists():
+        db_path.unlink()
+    conn = connect(db_path)
     embed = TextEmbedding(model_name=EMBED_MODEL)
     if ingest_mode == "pipeline":
-        _ingest_pipeline(conn, corpus, DB_PATH.parent)
+        _ingest_pipeline(conn, corpus, db_path.parent)
     else:
         _ingest_direct(conn, corpus, embed)
 
