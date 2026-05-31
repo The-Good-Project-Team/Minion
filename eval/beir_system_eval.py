@@ -108,10 +108,21 @@ def _run(conn, embed, queries: dict, qrels: dict, *, rerank: bool, label: str) -
         n = float(np.linalg.norm(qvec))
         if n:
             qvec = qvec / n
+        # Over-fetch chunks, then collapse to DISTINCT docs (best rank per doc) — a
+        # doc split into N chunks must count once, or recall/nDCG inflate (>1.0). This
+        # is standard doc-level IR scoring; it also mirrors ask_minion's source-dedup.
         hits = retrieval_engine.search_fused(
-            conn, queries[qid], qvec, top_k=K, conn_factory=None, rerank=rerank
+            conn, queries[qid], qvec, top_k=K * 4, conn_factory=None, rerank=rerank
         )
-        ranked = [d for d in (_doc_id(h) for h in hits) if d]
+        ranked: list = []
+        seen_docs: set = set()
+        for h in hits:
+            d = _doc_id(h)
+            if d and d not in seen_docs:
+                seen_docs.add(d)
+                ranked.append(d)
+            if len(ranked) >= K:
+                break
         rel = qrels[qid]
         agg["ndcg"].append(_ndcg_at_k(ranked, rel, K))
         agg["recall"].append(_recall_at_k(ranked, rel, K))
