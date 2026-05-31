@@ -321,7 +321,11 @@ mod imp {
                 }
 
                 let is_browser = crate::browser_focus::is_browser_app(&win.app_name);
-                let (ax_max_c, ax_max_d) = if is_browser && is_foreground {
+                // Deep AX read for ANY foreground app (not just browsers): the focused
+                // window is what the user is actually reading, so capture its full text
+                // (Pages docs, chat threads, IDEs, PDFs, native apps), not a shallow slice.
+                // Background windows stay light to bound cost.
+                let (ax_max_c, ax_max_d) = if is_foreground {
                     (ax_max_chars().max(20_000), ax_max_depth().max(22))
                 } else {
                     (ax_max_chars(), ax_max_depth())
