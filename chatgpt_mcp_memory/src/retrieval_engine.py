@@ -110,11 +110,14 @@ def _graph_lane(conn: sqlite3.Connection, qvec: np.ndarray, query: str, *, top_k
         return []
     hits: List[Hit] = list(graph_fact_hits(conn, node_ids, limit=min(3, top_k)))
     seen = {h.chunk_id for h in hits}
+    # Scope dense search to the matched nodes' linked sources. Drop any caller
+    # path_glob so we don't pass it twice; the node scope replaces it here.
+    scoped_kw = {k: v for k, v in kw.items() if k != "path_glob"}
     for pglob in linked_source_paths(conn, node_ids)[:5]:
         try:
-            scoped = dense_search(conn, qvec, top_k=top_k, path_glob=f"*{pglob}*", **kw)
-        except TypeError:
-            scoped = dense_search(conn, qvec, top_k=top_k, **kw)
+            scoped = dense_search(conn, qvec, top_k=top_k, path_glob=f"*{pglob}*", **scoped_kw)
+        except Exception:
+            continue
         for h in scoped:
             if h.chunk_id not in seen:
                 hits.append(h)
@@ -130,7 +133,7 @@ def search_fused(
     top_k: int,
     conn_factory: Optional[ConnFactory] = None,
     rerank: bool = True,
-    rerank_top_n: int = 20,
+    rerank_top_n: int = 60,
     kind: Optional[str] = None,
     path_glob: Optional[str] = None,
     since: Optional[float] = None,
@@ -146,22 +149,27 @@ def search_fused(
     dense_filters = dict(kind=kind, path_glob=path_glob, since=since, before=before, role=role)
     kw_filters = dict(kind=kind, path_glob=path_glob, before=before, after=after, role=role)
     has_fts = fts_available(conn)
+    # Candidate pool for the lanes: when reranking, fetch enough per lane that the
+    # cross-encoder has real recall to work with (a small pool caps the rerank — the
+    # BEIR system eval showed reranking only ~20 candidates left ~0.025 nDCG@10 on the
+    # floor vs reranking ~100). Final list is still trimmed to top_k.
+    lane_k = max(top_k, rerank_top_n) if rerank else top_k
 
     def dense_lane(c: sqlite3.Connection) -> List[Hit]:
-        return dense_search(c, qvec, top_k=top_k, **dense_filters)
+        return dense_search(c, qvec, top_k=lane_k, **dense_filters)
 
     def sparse_lane(c: sqlite3.Connection) -> List[Hit]:
         if not (query and has_fts):
             return []
         try:
-            return keyword_search(c, query, top_k=top_k, **kw_filters)
+            return keyword_search(c, query, top_k=lane_k, **kw_filters)
         except Exception:
             log.warning("sparse lane failed", exc_info=True)
             return []
 
     def graph_lane(c: sqlite3.Connection) -> List[Hit]:
         try:
-            return _graph_lane(c, qvec, query, top_k=top_k, **dense_filters)
+            return _graph_lane(c, qvec, query, top_k=lane_k, **dense_filters)
         except Exception:
             log.warning("graph lane failed", exc_info=True)
             return []
