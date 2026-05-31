@@ -27,6 +27,20 @@ AMBIENT_EVENTS_MAX_AGE_DAYS = 21
 AMBIENT_AX_SOURCE_MAX_AGE_DAYS = 14
 STREAM_ROTATE_BYTES = 12 * 1024 * 1024
 
+# Noise / derived-data retention (Workstream 3). We TRIM derived signal, never the
+# user's own content. PROTECTED_SOURCE_KINDS are tiered but never auto-deleted; the
+# trim helpers below only touch derived tables (screen_memory_events, graph_candidates,
+# superseded identity_claims) and derived source kinds (ambient-*). User docs, active
+# graph, wiki, and active claims are structurally out of reach of every trim here.
+PROTECTED_SOURCE_KINDS = frozenset(
+    {"text", "markdown", "md", "pdf", "docx", "code", "html", "htm",
+     "chatgpt-export", "claude-export", "image", "audio", "graph-community"}
+)
+SCREEN_EVENTS_MAX_AGE_DAYS = 30
+RESOLVED_CANDIDATE_MAX_AGE_DAYS = 14
+SUPERSEDED_CLAIM_MAX_AGE_DAYS = 30
+AMBIENT_SUMMARY_MAX_AGE_DAYS = 90
+
 
 def run_lightweight_cleanup(conn, *, now: Optional[float] = None) -> Dict[str, Any]:
     """Cheap passes safe every ambient tick (~45s)."""
@@ -65,12 +79,151 @@ def run_auto_maintenance(conn, data_dir: Path, *, force: bool = False) -> Dict[s
         except Exception:
             log.exception("ambient_consolidation failed")
             out["ambient_consolidation"] = {"error": True}
+        # Trim derived/noise data (never user content — see PROTECTED_SOURCE_KINDS).
+        out["screen_events_trimmed"] = _trim_screen_memory_events(conn, now=now)
+        out["candidates_trimmed"] = _trim_resolved_candidates(conn, now=now)
+        out["claims_trimmed"] = _trim_superseded_claims(conn, now=now)
+        out["ambient_summaries_pruned"] = _prune_old_ambient_summaries(conn, now=now)
+        # L4: refresh community summaries when the graph has changed (cheap signature gate).
+        out["communities"] = _maybe_build_communities(conn, data_dir)
     except Exception:
         log.exception("memory_lifecycle failed")
         out["error"] = True
     meta_set(conn, _META_LAST_RUN, str(now))
     out["finished_at"] = time.time()
     return out
+
+
+_META_COMMUNITY_SIG = "memory_lifecycle_community_sig"
+
+
+def _maybe_build_communities(conn, data_dir: Path) -> Dict[str, Any]:
+    """Rebuild L4 community summaries only when the graph changed since last build."""
+    try:
+        from gemini_client import gemini_configured
+
+        if not gemini_configured(data_dir):
+            return {"skipped": "no_gemini"}
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), 0) AS mx FROM graph_nodes "
+            "WHERE status NOT IN ('scaffold', 'stub')"
+        ).fetchone()
+        edges = conn.execute("SELECT COUNT(*) AS n FROM graph_edges").fetchone()
+        sig = f"{int(row['n'])}:{float(row['mx']):.0f}:{int(edges['n'])}"
+        if meta_get(conn, _META_COMMUNITY_SIG) == sig:
+            return {"skipped": "unchanged"}
+        from graph_community import build_communities  # lazy: graspologic optional
+
+        result = build_communities(conn, data_dir)
+        meta_set(conn, _META_COMMUNITY_SIG, sig)
+        return result
+    except Exception:
+        log.debug("community rebuild skipped", exc_info=True)
+        return {"skipped": "error"}
+
+
+def _trim_screen_memory_events(conn, *, now: float) -> int:
+    """Raw screen events are derived signal (consolidated into ambient-summary chunks)."""
+    cutoff = now - SCREEN_EVENTS_MAX_AGE_DAYS * 86400.0
+    cur = conn.execute(
+        "SELECT COUNT(*) AS n FROM screen_memory_events WHERE occurred_at < ?", (cutoff,)
+    ).fetchone()
+    n = int(cur["n"]) if cur else 0
+    if n:
+        conn.execute("DELETE FROM screen_memory_events WHERE occurred_at < ?", (cutoff,))
+    return n
+
+
+def _trim_resolved_candidates(conn, *, now: float) -> int:
+    """Graph candidates already resolved by the user are done — drop the stale ones."""
+    cutoff = now - RESOLVED_CANDIDATE_MAX_AGE_DAYS * 86400.0
+    cur = conn.execute(
+        "SELECT COUNT(*) AS n FROM graph_candidates "
+        "WHERE status IN ('approved', 'rejected', 'dismissed', 'merged') "
+        "AND COALESCE(resolved_at, updated_at) < ?",
+        (cutoff,),
+    ).fetchone()
+    n = int(cur["n"]) if cur else 0
+    if n:
+        conn.execute(
+            "DELETE FROM graph_candidates "
+            "WHERE status IN ('approved', 'rejected', 'dismissed', 'merged') "
+            "AND COALESCE(resolved_at, updated_at) < ?",
+            (cutoff,),
+        )
+    return n
+
+
+def _trim_superseded_claims(conn, *, now: float) -> int:
+    """Superseded/rejected identity claims are history; active claims are PROTECTED."""
+    cutoff = now - SUPERSEDED_CLAIM_MAX_AGE_DAYS * 86400.0
+    cur = conn.execute(
+        "SELECT COUNT(*) AS n FROM identity_claims "
+        "WHERE status IN ('superseded', 'rejected') AND updated_at < ?",
+        (cutoff,),
+    ).fetchone()
+    n = int(cur["n"]) if cur else 0
+    if n:
+        conn.execute(
+            "DELETE FROM identity_claims "
+            "WHERE status IN ('superseded', 'rejected') AND updated_at < ?",
+            (cutoff,),
+        )
+    return n
+
+
+def _prune_old_ambient_summaries(conn, *, now: float) -> int:
+    """ambient-summary sources are derived rollups; drop ones past retention."""
+    cutoff = now - AMBIENT_SUMMARY_MAX_AGE_DAYS * 86400.0
+    rows = conn.execute(
+        "SELECT source_id, kind FROM sources WHERE kind = 'ambient-summary' AND mtime < ?",
+        (cutoff,),
+    ).fetchall()
+    if not rows:
+        return 0
+    from store import delete_source
+
+    n = 0
+    for r in rows:
+        if r["kind"] in PROTECTED_SOURCE_KINDS:  # invariant guard; never true here
+            continue
+        try:
+            delete_source(conn, r["source_id"])
+            n += 1
+        except Exception:
+            log.debug("failed to prune ambient-summary %s", r["source_id"])
+    return n
+
+
+def lifecycle_status(conn) -> Dict[str, Any]:
+    """Counts per table + retention windows, for /maintenance/lifecycle-status."""
+    def _count(sql: str) -> int:
+        r = conn.execute(sql).fetchone()
+        return int(r[0]) if r else 0
+
+    return {
+        "last_run": meta_get(conn, _META_LAST_RUN),
+        "counts": {
+            "chunks": _count("SELECT COUNT(*) FROM chunks"),
+            "ambient_events": _count("SELECT COUNT(*) FROM ambient_events"),
+            "screen_memory_events": _count("SELECT COUNT(*) FROM screen_memory_events"),
+            "graph_candidates_open": _count("SELECT COUNT(*) FROM graph_candidates WHERE status='open'"),
+            "graph_candidates_resolved": _count("SELECT COUNT(*) FROM graph_candidates WHERE status!='open'"),
+            "identity_claims_active": _count("SELECT COUNT(*) FROM identity_claims WHERE status='active'"),
+            "wiki_pages": _count("SELECT COUNT(*) FROM wiki_pages"),
+        },
+        "retention_days": {
+            "ambient_events": AMBIENT_EVENTS_MAX_AGE_DAYS,
+            "ambient_ax_sources": AMBIENT_AX_SOURCE_MAX_AGE_DAYS,
+            "screen_memory_events": SCREEN_EVENTS_MAX_AGE_DAYS,
+            "resolved_candidates": RESOLVED_CANDIDATE_MAX_AGE_DAYS,
+            "superseded_claims": SUPERSEDED_CLAIM_MAX_AGE_DAYS,
+            "ambient_summaries": AMBIENT_SUMMARY_MAX_AGE_DAYS,
+            "hot_to_warm": HOT_TO_WARM_DAYS,
+            "warm_to_cold": WARM_TO_COLD_DAYS,
+        },
+        "protected_kinds": sorted(PROTECTED_SOURCE_KINDS),
+    }
 
 
 def _auto_tier_promote(

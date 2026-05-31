@@ -1728,6 +1728,24 @@ def council_approve(body: CouncilApproveBody) -> Dict[str, Any]:
     )
 
 
+@app.get("/graph/communities")
+def graph_communities() -> Dict[str, Any]:
+    """L4 global index: the persisted community summaries over the knowledge graph."""
+    from graph_community import get_community_index
+
+    return {"communities": get_community_index(State.conn())}
+
+
+@app.post("/graph/communities/rebuild")
+def graph_communities_rebuild() -> Dict[str, Any]:
+    from graph_community import build_communities
+
+    conn = State.conn()
+    result = build_communities(conn, State.data_dir)
+    conn.commit()
+    return result
+
+
 @app.get("/graph/scaffold")
 def graph_scaffold() -> Dict[str, Any]:
     conn = State.conn()
@@ -2555,6 +2573,14 @@ def screen_memory_create_task(
         minutes=body.minutes,
         title=body.title,
     )
+
+
+@app.get("/maintenance/lifecycle-status")
+def maintenance_lifecycle_status() -> Dict[str, Any]:
+    """Per-table counts + retention windows + protected (never-deleted) kinds."""
+    from memory_lifecycle import lifecycle_status
+
+    return lifecycle_status(State.conn())
 
 
 @app.post("/maintenance/storage-report")

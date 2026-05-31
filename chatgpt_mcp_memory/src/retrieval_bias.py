@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple, TypeVar
 
 from store import Hit, identity_claim_list, preference_clusters_list
@@ -54,6 +55,30 @@ def rrf_fuse(
     return rrf_fuse_many(
         [(relevance_hits, semantic_weight), (keyword_hits, 1.0)], k=k
     )
+
+
+_RECENCY_MAX_EPS = 0.02
+_RECENCY_HALFLIFE_DAYS = 30.0
+
+
+def _recency_decay_enabled() -> bool:
+    import os
+
+    return os.environ.get("MINION_DISABLE_RECENCY_DECAY", "").strip().lower() not in (
+        "1", "true", "yes",
+    )
+
+
+def _recency_sort_epsilon(mtime: float, now: float) -> float:
+    """Gentle, ALWAYS-POSITIVE recency lift (sort-key only; Hit.score untouched).
+
+    eps = max_eps * 0.5^(age/halflife): a fresh memory gets +0.02, ~30d +0.01, old ~0.
+    It lifts recent hits on near-ties; it never demotes older relevant hits below them.
+    """
+    if not mtime or mtime <= 0:
+        return 0.0
+    age_days = max(0.0, (now - float(mtime)) / 86400.0)
+    return _RECENCY_MAX_EPS * (0.5 ** (age_days / _RECENCY_HALFLIFE_DAYS))
 
 
 def _storage_tier_sort_epsilon(storage_tier: str) -> float:
@@ -139,11 +164,14 @@ def apply_identity_rerank(
 
     adjusted_n = 0
     tier_bias_n = 0
+    now = time.time()
+    recency_on = _recency_decay_enabled()
     keyed: List[Tuple[float, int, Hit]] = []
     for i, h in enumerate(hits):
         tier_eps = _storage_tier_sort_epsilon(getattr(h, "storage_tier", "hot"))
         if tier_eps != 0.0:
             tier_bias_n += 1
+        rec_eps = _recency_sort_epsilon(getattr(h, "mtime", 0.0), now) if recency_on else 0.0
         boost = 0.0
         if members and h.chunk_id in members:
             boost += cluster_boost
@@ -157,7 +185,7 @@ def apply_identity_rerank(
         boost = min(boost, total_cap)
         if boost > 0:
             adjusted_n += 1
-        keyed.append((h.score + tier_eps + boost, -i, h))
+        keyed.append((h.score + tier_eps + rec_eps + boost, -i, h))
 
     meta["adjustments_applied"] = adjusted_n
     meta["tier_bias_non_hot"] = tier_bias_n

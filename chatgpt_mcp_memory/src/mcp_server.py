@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -613,6 +614,12 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         except Exception:
             log.debug("graph pointer lookup failed", exc_info=True)
 
+    # Community pointers (L4 global index): the top query-relevant community summaries,
+    # so thematic questions ("what are the main themes") get the global view too.
+    community_pointers: List[Dict[str, Any]] = []
+    if query and mode == "relevance":
+        community_pointers = _community_pointers(conn, query)
+
     results: List[Dict[str, Any]] = []
     seen_sources: set[str] = set()
     seen_content: set[str] = set()
@@ -685,8 +692,62 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
     return {
         "chunks": results,
         "graph": graph_pointers,
+        "communities": community_pointers,
         "expand": {"conversation_ids": convo_ids[:8]},
     }
+
+
+def _community_pointers(conn, query: str, *, limit: int = 2) -> List[Dict[str, Any]]:
+    """Top query-relevant L4 community summaries → global-view pointers for the agent.
+
+    Communities are few, so we rank them directly by query/term overlap rather than
+    via kind-filtered KNN (a single community chunk among thousands rarely survives the
+    global top-K fetch).
+    """
+    try:
+        from graph_community import get_community_index
+
+        index = get_community_index(conn)
+        if not index:
+            return []
+        ql = (query or "").lower()
+        thematic = any(
+            w in ql for w in (
+                "theme", "themes", "main", "overall", "summary", "summarize",
+                "topics", "big picture", "in general", "generally", "focus",
+                "what do i", "what am i", "areas",
+            )
+        )
+        qtok = {t for t in re.findall(r"[a-z0-9]+", ql) if len(t) >= 3}
+        scored: List[tuple] = []
+        for cid, meta in index.items():
+            path = str(meta.get("path") or "")
+            row = conn.execute(
+                "SELECT c.text FROM chunks c JOIN sources s ON s.source_id=c.source_id "
+                "WHERE s.path=? LIMIT 1",
+                (path,),
+            ).fetchone()
+            summary = str(row["text"]) if row else ""
+            blob = f"{meta.get('title', '')} {summary}".lower()
+            overlap = sum(1 for t in qtok if t in blob)
+            # On a thematic/global question, surface communities regardless of literal
+            # token overlap (that's their whole purpose); break ties by community size.
+            if overlap or thematic:
+                scored.append((overlap, int(meta.get("size") or 0), cid, meta, summary))
+        scored.sort(key=lambda x: (-x[0], -x[1]))
+        return [
+            {
+                "community_id": cid,
+                "title": str(meta.get("title") or ""),
+                "summary": summary,
+                "members": [str(m) for m in (meta.get("members") or [])][:12],
+                "score": overlap,
+            }
+            for overlap, _size, cid, meta, summary in scored[:limit]
+        ]
+    except Exception:
+        log.debug("community pointer lookup skipped", exc_info=True)
+        return []
 
 
 def _graph_hit_to_pointer(h: "Hit") -> Dict[str, Any]:
