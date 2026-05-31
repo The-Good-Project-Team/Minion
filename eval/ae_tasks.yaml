@@ -1,0 +1,147 @@
+# Agent-Experience (AE) task set for minion's MCP memory.
+#
+# Each task makes an LLM AGENT answer a question using ONLY minion's MCP tools
+# (ask_minion / get_chunk / get_node / conversation_chunks). The agent's final
+# answer is then judged on:
+#   - correctness:  does the answer match the ground truth?
+#   - recall:       did it surface ALL the relevant memories, not just one?
+#
+# The harness logic is corpus-agnostic; only this file references the test data
+# (a ChatGPT export + Squarespace backend records + YouTube transcripts living
+# under MINION_DATA_DIR=/tmp/minion-runtime).
+#
+# Fields per task:
+#   id          short stable id
+#   question    what the agent is asked (phrased as an end user would)
+#   ideal       free-text ground-truth answer the judge compares against
+#   must_recall list of distinct facts/items a COMPLETE answer should surface;
+#               drives the recall score (fraction surfaced)
+#   note        optional guidance for the judge (not shown to the agent)
+
+tasks:
+  - id: company_founder
+    question: "What company did the user found, and what does it do?"
+    ideal: >
+      The user founded PRACTICE OF LIFE, a company focused on wellbeing /
+      life-skills courses and content (e.g. wellbeing courses, the Bright Side
+      newsletter). It is the user's own company.
+    must_recall:
+      - "PRACTICE OF LIFE is the company"
+      - "it is the user's own / founded company"
+      - "it works on wellbeing / life-skills courses or content"
+
+  - id: newsletter
+    question: "Does the user write a newsletter? What is it called and what is it about?"
+    ideal: >
+      Yes. The user writes The Bright Side, a newsletter about attention,
+      connection, and behavior / behavioral wellbeing.
+    must_recall:
+      - "the newsletter is called The Bright Side"
+      - "it is about attention, connection, and behavior"
+
+  - id: harada_method
+    question: "What is the Harada method and why is the user interested in it?"
+    ideal: >
+      The Harada method is a goal-setting / self-reliance framework. The user is
+      interested in it for setting and pursuing goals (it relates to their
+      goals work), and wanted to learn it in real application and theory, not
+      just from reading online.
+    must_recall:
+      - "Harada method is a goal-setting framework"
+      - "the user is interested in it for goals"
+      - "the user wanted to learn it in practice/application, not just online reading"
+
+  - id: site_platform
+    question: "What platform is the user's website built on, and roughly what is the site for?"
+    ideal: >
+      The website is built on Squarespace. It is the site for the user's
+      PRACTICE OF LIFE work (wellbeing courses / content).
+    must_recall:
+      - "the site is built on Squarespace"
+      - "the site is for PRACTICE OF LIFE / the user's wellbeing work"
+
+  - id: site_seo_settings
+    question: "What SEO or site settings has the user captured for their Squarespace site?"
+    ideal: >
+      The user captured Squarespace SEO settings (a settings-seo record) and
+      related website config such as URL mappings/settings and redirects from
+      the Squarespace backend.
+    must_recall:
+      - "SEO settings were captured (settings-seo)"
+      - "the settings come from the Squarespace backend / site config"
+
+  - id: redirects
+    question: "Has the user set up any URL redirects on their site? Summarize what you find."
+    ideal: >
+      Yes. The user has redirects configured on the Squarespace site, captured
+      in redirects records (redirects.json / redirects-detail) from the backend.
+    must_recall:
+      - "redirects are configured on the site"
+      - "they are recorded in redirects / redirects-detail backend records"
+
+  - id: video_topics
+    question: "The user saved YouTube video transcripts. What topics do they cover?"
+    ideal: >
+      The transcripts cover wellbeing, mental health, life skills, goals, and
+      behavior / self-improvement themes — aligned with the user's PRACTICE OF
+      LIFE / wellbeing work.
+    must_recall:
+      - "the videos are about wellbeing / mental health / life skills"
+      - "they relate to goals or behavior / self-improvement"
+
+  - id: work_focus
+    question: "Summarize the user's main work focus. What are they building?"
+    ideal: >
+      The user's work centers on wellbeing: they founded PRACTICE OF LIFE and
+      are building wellbeing courses and content, write The Bright Side
+      newsletter, and run a Squarespace website to support it.
+    must_recall:
+      - "PRACTICE OF LIFE company"
+      - "wellbeing courses / content"
+      - "The Bright Side newsletter"
+      - "a Squarespace website"
+
+  - id: site_design_fonts
+    question: "What can you tell me about the design or fonts of the user's website?"
+    ideal: >
+      The user has captured design/font configuration for the Squarespace site
+      (a design-fonts record in the backend records), defining the site's fonts.
+    must_recall:
+      - "there is design / font configuration captured"
+      - "it is for the Squarespace site"
+
+  - id: goals_approach
+    question: "How does the user think about setting and pursuing goals?"
+    ideal: >
+      The user reflects on goal-setting deliberately — e.g. pausing to reflect
+      before chasing an exciting goal, and exploring structured frameworks like
+      the Harada method to pursue goals seriously.
+    must_recall:
+      - "the user reflects before chasing a goal"
+      - "the user uses / explores structured frameworks like the Harada method"
+
+  - id: company_relationships
+    question: "What organizations or tools are connected to the user's company in their knowledge graph?"
+    ideal: >
+      PRACTICE OF LIFE is connected to Squarespace (the website platform) and
+      Acuity (scheduling), plus the user's wellbeing projects (wellbeing
+      courses, Bright Side newsletter).
+    must_recall:
+      - "Squarespace is connected"
+      - "Acuity is connected"
+    note: >
+      This task rewards graph traversal: the relationships live on the
+      PRACTICE OF LIFE graph node and its edges, best reached via get_node.
+
+  - id: unknown_absent
+    question: "What programming languages does the user prefer to code in?"
+    ideal: >
+      There is no evidence in memory about the user's preferred programming
+      languages. The honest answer is that this is not known from the stored
+      memories.
+    must_recall:
+      - "the answer is not found / not in memory"
+    note: >
+      Negative/absence task. A correct answer admits the memory has no data on
+      this rather than hallucinating. must_recall is satisfied only by an
+      explicit 'not found' style answer.
