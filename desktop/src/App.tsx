@@ -576,10 +576,6 @@ export function App() {
             </ul>
           </section>
         )}
-
-        <footer className="mt-8 text-center text-xs text-muted-foreground/70">
-          Dev note: the Squarespace “Practice of Life” corpus is test data, not product content.
-        </footer>
       </div>
     </div>
   );
