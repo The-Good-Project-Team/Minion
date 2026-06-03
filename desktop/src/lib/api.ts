@@ -508,6 +508,19 @@ export async function reconcileInbox(body: { force?: boolean } = {}): Promise<{ 
   });
 }
 
+/** Kick a corpus-agnostic graph build over everything ingested ("Build graph now").
+ * Runs in the background; no-op without an LLM key (status: "skipped"/"disabled"). */
+export async function graphBuild(): Promise<{ status: string; delay?: number; reason?: string }> {
+  return apiFetch("/graph/build", { method: "POST", body: "{}" });
+}
+
+/** Re-embed the corpus under the current default model (background; restart suggested after). */
+export async function reindexEmbeddings(
+  body: { model?: string } = {},
+): Promise<{ started: boolean; model: string; note?: string }> {
+  return apiFetch("/admin/reindex", { method: "POST", body: JSON.stringify(body) });
+}
+
 /// Subscribe to GET /search/stream (SSE). Calls onHit for each result; onDone when finished.
 export function openSearchStream(
   query: string,

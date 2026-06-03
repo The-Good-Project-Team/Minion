@@ -10,6 +10,7 @@ import pytest
 import numpy as np
 
 import screen_memory
+import store
 from entity_resolution import ensure_person_node
 from screen_memory import (
     create_task_from_recent_screen,
@@ -437,7 +438,7 @@ def test_fuse_preserves_confidence_hierarchy(conn, monkeypatch) -> None:
     assert marlin["time_range"] == "4s-9s"
     assert marlin["clip_path"].endswith("clip.mov")
     monkeypatch.setattr(screen_memory, "_get_model", lambda *_: object())
-    monkeypatch.setattr(screen_memory, "_embed", lambda *_args, **_kwargs: np.ones((1, 384), dtype=np.float32))
+    monkeypatch.setattr(screen_memory, "_embed", lambda *_args, **_kwargs: np.ones((1, store.DEFAULT_EMBED_DIM), dtype=np.float32))
     index_fused_screen_events(c)
     assert c.execute("SELECT 1 FROM chunks WHERE text LIKE '%4s-9s%' LIMIT 1").fetchone()
     out = screen_search(c, "payout history", app="Chrome", top_k=10)
@@ -468,7 +469,7 @@ def test_index_fused_screen_events_makes_clipboard_searchable(conn, monkeypatch)
         ],
     )
     monkeypatch.setattr(screen_memory, "_get_model", lambda *_: object())
-    monkeypatch.setattr(screen_memory, "_embed", lambda *_args, **_kwargs: np.ones((1, 384), dtype=np.float32))
+    monkeypatch.setattr(screen_memory, "_embed", lambda *_args, **_kwargs: np.ones((1, store.DEFAULT_EMBED_DIM), dtype=np.float32))
     remember_screen(c, data_dir, index_ax=False, ingest_screenshots=False)
     out = index_fused_screen_events(c)
     assert out["indexed"] >= 1
@@ -701,7 +702,7 @@ def test_clipboard_probe_treats_empty_clipboard_as_accessible(monkeypatch) -> No
 def test_screen_search_filters_by_app_and_infers_yesterday(conn, monkeypatch) -> None:
     c, _data_dir = conn
     monkeypatch.setattr(screen_memory, "_get_model", lambda *_: object())
-    monkeypatch.setattr(screen_memory, "_embed", lambda *_args, **_kwargs: np.ones((1, 384), dtype=np.float32))
+    monkeypatch.setattr(screen_memory, "_embed", lambda *_args, **_kwargs: np.ones((1, store.DEFAULT_EMBED_DIM), dtype=np.float32))
     now = time.time()
     lt = time.localtime(now)
     today_start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, lt.tm_wday, lt.tm_yday, lt.tm_isdst))
@@ -719,7 +720,7 @@ def test_screen_search_filters_by_app_and_infers_yesterday(conn, monkeypatch) ->
             parser="screen_event",
             source_meta={"focus_app": app},
             chunks=[(text, "ambient", {"app": app, "create_time": mtime})],
-            embeddings=np.ones((1, 384), dtype=np.float32),
+            embeddings=np.ones((1, store.DEFAULT_EMBED_DIM), dtype=np.float32),
         )
 
     add_screen_source("ambient/screen-events/yesterday/chrome.md", "Chrome Stripe Export button", "Chrome", yesterday)

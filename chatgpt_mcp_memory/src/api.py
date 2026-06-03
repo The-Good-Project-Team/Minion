@@ -1274,22 +1274,26 @@ def delete_endpoint(body: DeleteBody) -> Dict[str, Any]:
 
 
 _query_model = None
+_query_model_name: Optional[str] = None
 _query_model_lock = threading.Lock()
 
 
 def _get_query_model():
-    global _query_model
+    global _query_model, _query_model_name
     with _query_model_lock:
         if _query_model is not None:
             return _query_model
         from fastembed import TextEmbedding
         from store import get_meta
 
+        from ingest import DEFAULT_MODEL
+
         name = (
             get_meta(State.conn(), "model_name")
             or os.environ.get("MINION_EMBED_MODEL")
-            or "sentence-transformers/all-MiniLM-L6-v2"
+            or DEFAULT_MODEL
         )
+        _query_model_name = name
         _query_model = TextEmbedding(
             model_name=name, cache_dir=fastembed_cache_dir(data_dir=State.data_dir)
         )
@@ -1307,7 +1311,10 @@ def _embed_search_results(
 ) -> List[Dict[str, Any]]:
     conn = State.conn()
     model = _get_query_model()
-    vec = np.asarray(next(iter(model.embed([query]))), dtype=np.float32)
+    from ingest import apply_query_prefix
+
+    text = apply_query_prefix(_query_model_name or "", query)
+    vec = np.asarray(next(iter(model.embed([text]))), dtype=np.float32)
     norm = float(np.linalg.norm(vec))
     if norm > 0:
         vec = vec / norm
@@ -1744,6 +1751,48 @@ def graph_communities_rebuild() -> Dict[str, Any]:
     result = build_communities(conn, State.data_dir)
     conn.commit()
     return result
+
+
+@app.post("/graph/build")
+def graph_build() -> Dict[str, Any]:
+    """Manual 'Build graph now': corpus-agnostic eager mine of the user's own
+    entities across the whole corpus, then L4 communities. Runs in the
+    background (debounced); returns immediately. No-op without an LLM key."""
+    from graph_corpus_mine import schedule_corpus_graph_build
+
+    return schedule_corpus_graph_build(State.data_dir, delay=0.5)
+
+
+@app.post("/admin/reindex")
+def admin_reindex(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Re-embed the corpus under the current default model in a background
+    thread. Heavy; a restart is recommended once it completes. The live DB is
+    backed up first (see reindex._checkpoint_and_backup)."""
+    import threading as _threading
+
+    from ingest import DEFAULT_MODEL
+
+    model = str((body or {}).get("model") or DEFAULT_MODEL)
+    db_path = State.db_path
+
+    def _worker() -> None:
+        try:
+            from reindex import _checkpoint_and_backup, reindex_embeddings
+            from store import connect as _connect
+
+            _checkpoint_and_backup(db_path)
+            conn = _connect(db_path)
+            try:
+                res = reindex_embeddings(conn, model_name=model)
+                conn.commit()
+                log.info("admin reindex complete: %s", res)
+            finally:
+                conn.close()
+        except Exception:
+            log.exception("admin reindex failed")
+
+    _threading.Thread(target=_worker, name="minion-reindex", daemon=True).start()
+    return {"started": True, "model": model, "note": "restart recommended after completion"}
 
 
 @app.get("/graph/scaffold")
@@ -2814,8 +2863,15 @@ def _trigger_post_ingest_graph(*, added: bool) -> None:
     if not added:
         return
     try:
-        from graph_corpus_mine import schedule_background_graph_mine
+        from graph_corpus_mine import (
+            schedule_background_graph_mine,
+            schedule_corpus_graph_build,
+        )
 
+        # Corpus-agnostic build of the user's OWN entities (debounced to once per
+        # ingest burst) — the primary graph-on-ingest path.
+        schedule_corpus_graph_build(State.data_dir)
+        # Scaffold drip stays as the ongoing personal-identity top-up.
         schedule_background_graph_mine(State.data_dir)
     except Exception:
         log.debug("post-ingest graph mine schedule skipped", exc_info=True)

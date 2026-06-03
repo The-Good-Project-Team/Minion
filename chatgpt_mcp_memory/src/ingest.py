@@ -149,7 +149,9 @@ class DeterministicTextEmbedding:
     """Small local embedding model for auditable tests; no network/model download."""
 
     def __init__(self, *, dim: Optional[int] = None) -> None:
-        self.dim = int(dim or os.environ.get("MINION_TEST_EMBED_DIM") or 384)
+        # Default tracks the live embed dim so test DBs (which bootstrap at
+        # store.DEFAULT_EMBED_DIM) and the deterministic embedder never disagree.
+        self.dim = int(dim or os.environ.get("MINION_TEST_EMBED_DIM") or 768)
 
     def embed(self, texts: List[str], batch_size: int = 64):
         for text in texts:
@@ -273,7 +275,29 @@ def _maybe_unpack_archive(path: Path, *, on_progress: ProgressFn = _noop) -> Opt
     )
 
 
-DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_MODEL = "BAAI/bge-base-en-v1.5"
+# Embedding width of DEFAULT_MODEL. Used only for empty-input zero-shapes; live
+# dims always come from the DB via store.get_embed_dim.
+DEFAULT_MODEL_DIM = 768
+
+# BGE retrieval is asymmetric: the *query* gets an instruction prefix, passages
+# do not. Skipping the query prefix measurably hurts recall, so route every
+# query-embed through `apply_query_prefix`. Non-bge models are passed through
+# untouched (the deterministic test embedder and MiniLM need no prefix).
+BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
+
+
+def uses_query_prefix(model_name: str) -> bool:
+    name = (model_name or "").lower()
+    # bge-m3 / bge-*-icl are instruction-free; classic bge v1.5 en wants it.
+    return "bge" in name and "m3" not in name
+
+
+def apply_query_prefix(model_name: str, query: str) -> str:
+    """Prepend the bge query instruction for bge models; identity otherwise."""
+    return f"{BGE_QUERY_INSTRUCTION}{query}" if uses_query_prefix(model_name) else query
+
+
 _MODEL_LOCK = threading.Lock()
 _MODEL = None
 _MODEL_NAME: Optional[str] = None
@@ -313,7 +337,7 @@ def _embed(
     on_progress: ProgressFn = _noop,
 ) -> np.ndarray:
     if not texts:
-        return np.zeros((0, 384), dtype=np.float32)
+        return np.zeros((0, DEFAULT_MODEL_DIM), dtype=np.float32)
     out: List[np.ndarray] = []
     total = len(texts)
     i = 0

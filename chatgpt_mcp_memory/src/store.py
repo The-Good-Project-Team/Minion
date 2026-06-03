@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover - import guarded so docs-only installs sti
     sqlite_vec = None  # type: ignore
 
 
-DEFAULT_EMBED_DIM = 384
+DEFAULT_EMBED_DIM = 768
 DB_FILENAME = "memory.db"
 
 log = logging.getLogger("minion.store")

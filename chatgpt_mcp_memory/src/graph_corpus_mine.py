@@ -576,3 +576,231 @@ def run_graph_mine_tick(
         "deltas": deltas,
         "remaining_day": max(0, limits["max_per_day"] - int(stats["calls"])),
     }
+
+
+# ---------------------------------------------------------------------------
+# Corpus-agnostic eager mining (the graph-on-ingest build)
+#
+# The scaffold drip above (DURABLE_TARGETS / run_graph_mine_tick) chases a fixed
+# set of personal-identity buckets (family/home/employers) — useless for an
+# arbitrary new user's corpus (a company site, research notes, a product).
+# `mine_corpus_entities` instead samples evidence across the WHOLE corpus and
+# asks the LLM for the general entities actually present, then applies them
+# through the same validated librarian path. It is meant to run ONCE after a
+# bulk ingest settles (no 15-min/daily gate), with the drip remaining as the
+# ongoing identity top-up.
+# ---------------------------------------------------------------------------
+
+
+def _graph_counts(conn) -> Tuple[int, int]:
+    n = conn.execute(
+        "SELECT count(*) FROM graph_nodes WHERE status NOT IN ('scaffold','stub')"
+    ).fetchone()[0]
+    e = conn.execute("SELECT count(*) FROM graph_edges").fetchone()[0]
+    return int(n), int(e)
+
+
+def _sample_corpus_chunks(
+    conn, *, max_chunks: int, min_len: int = 80
+) -> List[Dict[str, Any]]:
+    """Sample chunks stratified round-robin across sources so coverage is even
+    and independent of ingest order. Skips our own graph-derived sources."""
+    rows = conn.execute(
+        "SELECT c.chunk_id, c.text, s.path, s.source_id "
+        "FROM chunks c JOIN sources s ON s.source_id = c.source_id "
+        "WHERE length(c.text) >= ? "
+        "AND s.kind NOT IN ('graph-community', 'graph-fact') "
+        "ORDER BY s.source_id, c.seq",
+        (min_len,),
+    ).fetchall()
+    from collections import OrderedDict
+
+    by_src: "OrderedDict[str, List[Any]]" = OrderedDict()
+    for r in rows:
+        by_src.setdefault(str(r["source_id"]), []).append(r)
+
+    out: List[Any] = []
+    idx = 0
+    while len(out) < max_chunks and any(idx < len(v) for v in by_src.values()):
+        for v in by_src.values():
+            if idx < len(v):
+                out.append(v[idx])
+                if len(out) >= max_chunks:
+                    break
+        idx += 1
+    return [
+        {"chunk_id": str(r["chunk_id"]), "text": str(r["text"] or ""), "path": str(r["path"] or "")}
+        for r in out
+    ]
+
+
+def mine_corpus_entities(
+    conn,
+    data_dir: Optional[Path] = None,
+    *,
+    max_chunks: int = 96,
+    batch: int = 6,
+    max_llm_calls: int = 16,
+    build_communities_after: bool = True,
+) -> Dict[str, Any]:
+    """Corpus-agnostic eager graph build. Returns before/after counts + stats.
+
+    Safe to call with no LLM configured (skips gracefully so dense+sparse still
+    work). Idempotent-ish: re-running re-proposes; entity-resolution + node
+    existence checks in apply_proposal dedupe against existing nodes.
+    """
+    from gemini_client import gemini_configured
+
+    if not gemini_configured(data_dir):
+        return {"status": "skipped", "reason": "no_llm", "calls": 0}
+
+    from librarian_infer import apply_proposal, sanitize_proposal, validate_proposal
+    from librarian_llm import propose_graph_actions_from_evidence
+
+    samples = _sample_corpus_chunks(conn, max_chunks=max_chunks)
+    if not samples:
+        return {"status": "skipped", "reason": "no_chunks", "calls": 0}
+
+    n0, e0 = _graph_counts(conn)
+    gap = {"gap_type": "corpus_mine", "label": "corpus entities", "stability": "active"}
+    calls = 0
+    applied = 0
+    deltas: List[str] = []
+
+    for i in range(0, len(samples), batch):
+        if calls >= max_llm_calls:
+            break
+        group = samples[i : i + batch]
+        pack = {
+            "hits": [
+                {"chunk_id": s["chunk_id"], "score": 1.0, "path": s["path"], "text": s["text"][:500]}
+                for s in group
+            ],
+            "evidence_refs": [f"chunk:{s['chunk_id']}" for s in group],
+        }
+        try:
+            proposal, used = propose_graph_actions_from_evidence(
+                conn, gap, pack, data_dir=data_dir, mining_kind="corpus"
+            )
+        except Exception:
+            log.warning("corpus mine proposal failed", exc_info=True)
+            continue
+        calls += 1
+        if not used or not proposal:
+            continue
+        proposal["stability"] = "active"
+        sanitize_proposal(proposal)
+        ok, reason = validate_proposal(proposal, gap, pack)
+        if not ok:
+            log.debug("corpus mine proposal rejected: %s", reason)
+            continue
+        try:
+            result = apply_proposal(conn, gap, proposal, data_dir=data_dir)
+        except Exception:
+            log.warning("corpus mine apply failed", exc_info=True)
+            continue
+        if result.get("filled"):
+            applied += 1
+            deltas.extend(result.get("deltas") or [])
+
+    communities_summarized: Optional[int] = None
+    if build_communities_after and applied:
+        try:
+            from graph_community import build_communities
+
+            res = build_communities(conn, data_dir)
+            communities_summarized = int(res.get("summarized") or 0) if isinstance(res, dict) else None
+        except Exception:
+            log.warning("community build after corpus mine failed", exc_info=True)
+
+    n1, e1 = _graph_counts(conn)
+    out = {
+        "status": "ok",
+        "calls": calls,
+        "applied": applied,
+        "nodes_before": n0,
+        "nodes_after": n1,
+        "edges_before": e0,
+        "edges_after": e1,
+        "communities": communities_summarized,
+        "deltas": deltas[:20],
+    }
+    if data_dir and applied:
+        try:
+            from graph_events import log_graph_event
+
+            log_graph_event(
+                data_dir,
+                kind="corpus_mine",
+                summary=f"Built graph from corpus: +{n1 - n0} entities, +{e1 - e0} links",
+            )
+        except Exception:
+            log.debug("graph event log skipped", exc_info=True)
+    return out
+
+
+# Debounced one-shot scheduler for the corpus build. A bulk drop fires many
+# per-file ingest events; resetting the timer on each call coalesces them into a
+# SINGLE build after activity settles, instead of one LLM run per file.
+_CORPUS_BUILD_DEBOUNCE_SEC = 20.0
+_corpus_build_timer: Optional[threading.Timer] = None
+_corpus_build_lock = threading.Lock()
+_corpus_build_running = False
+
+
+def schedule_corpus_graph_build(
+    data_dir: Path,
+    *,
+    delay: float = _CORPUS_BUILD_DEBOUNCE_SEC,
+    conn_factory: Optional[Callable[[], Any]] = None,
+) -> Dict[str, Any]:
+    """Debounced, fire-and-forget corpus graph build after ingest settles.
+
+    No-op when graph mining is disabled or no LLM is configured (so dense+sparse
+    ingest stays fast and free). Reuses `mine_corpus_entities`.
+    """
+    global _corpus_build_timer
+    data = Path(data_dir).expanduser().resolve()
+    if not graph_mine_enabled(data):
+        return {"status": "disabled"}
+    try:
+        from gemini_client import gemini_configured
+
+        if not gemini_configured(data):
+            return {"status": "skipped", "reason": "no_llm"}
+    except Exception:
+        return {"status": "skipped", "reason": "no_llm"}
+
+    def _run() -> None:
+        global _corpus_build_running
+        with _corpus_build_lock:
+            if _corpus_build_running:
+                return
+            _corpus_build_running = True
+        try:
+            if conn_factory is not None:
+                conn = conn_factory()
+            else:
+                from store import DB_FILENAME, connect
+
+                conn = connect(data / DB_FILENAME)
+            try:
+                res = mine_corpus_entities(conn, data)
+                conn.commit()
+                log.info("corpus graph build complete: %s", res)
+            finally:
+                if conn_factory is None:
+                    conn.close()
+        except Exception:
+            log.exception("corpus graph build failed")
+        finally:
+            with _corpus_build_lock:
+                _corpus_build_running = False
+
+    with _corpus_build_lock:
+        if _corpus_build_timer is not None:
+            _corpus_build_timer.cancel()
+        _corpus_build_timer = threading.Timer(delay, _run)
+        _corpus_build_timer.daemon = True
+        _corpus_build_timer.start()
+    return {"status": "scheduled", "delay": delay}

@@ -437,11 +437,32 @@ def _parse_proposal_json(raw: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+_SYSTEM_MINE_CORPUS = """You build a knowledge graph from EVIDENCE about ANY corpus a user has added — it might be a company website, research notes, a product, a project archive, or personal files. Do NOT assume it is about the user's family or biography. Extract whatever the evidence is actually about.
+
+Same JSON schema (confidence, actions, unresolved_question, reasoning_notes).
+
+Extract the salient ENTITIES that appear in the evidence and the RELATIONSHIPS between them:
+- create_node for each distinct named entity. Map it to the closest node_kind:
+  organization (companies, brands, institutions), project (products, initiatives, publications, courses, newsletters, programs), person (named individuals), place (locations), group (teams, audiences, categories), role (titles, positions), asset (notable documents, artifacts, properties).
+- add_edge between entities you create when the evidence states or strongly implies a link: founded, works_at, manages, owns, belongs_to, participates_in, related_to.
+- Prefer linking entities to EACH OTHER (e.g. a newsletter belongs_to its company) over linking everything to the user. Only link to scaffold-me when the evidence clearly concerns the user themselves.
+
+Rules:
+- Use ONLY entities/facts present in the EVIDENCE snippets. Never invent names.
+- Every action MUST cite chunk: IDs from the EVIDENCE hits.
+- confidence >= 0.85 only when the entity is clearly named in evidence; otherwise lower.
+- Set node titles to the entity's real name as written, not a description.
+- Keep titles short (the name only) and return at MOST ~12 actions per response — pick the most salient entities so the JSON stays complete and is never truncated.
+- Return ONE JSON object (never a bare array). If nothing is clearly extractable, use "actions": []."""
+
+
 def _infer_system(mining_kind: str) -> str:
     if mining_kind == "durable":
         return _SYSTEM_MINE_DURABLE
     if mining_kind == "ongoing":
         return _SYSTEM_MINE_ONGOING
+    if mining_kind == "corpus":
+        return _SYSTEM_MINE_CORPUS
     return _SYSTEM_INFER
 
 

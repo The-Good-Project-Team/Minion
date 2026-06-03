@@ -22,7 +22,12 @@ warnings.filterwarnings(
 )
 
 from fastembed_cache import fastembed_cache_dir, register_fastembed_data_dir
-from ingest import DeterministicTextEmbedding, deterministic_embeddings_enabled
+from ingest import (
+    DEFAULT_MODEL,
+    DeterministicTextEmbedding,
+    apply_query_prefix,
+    deterministic_embeddings_enabled,
+)
 from store import (
     DB_FILENAME,
     browse_chunks_chronological as store_browse_chronological,
@@ -80,7 +85,7 @@ DEFAULT_TOP_K = 8
 DEFAULT_MAX_CHARS = 900
 DEFAULT_MAX_CHARS_FULL = 2000
 PROTOCOL_VERSION = "2025-03-26"
-DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_EMBED_MODEL = DEFAULT_MODEL
 
 _INSTRUCTIONS_FALLBACK = (
     "Minion is the user's digital identity and long-term memory: their "
@@ -402,7 +407,10 @@ def _get_model() -> TextEmbedding:
 
 def _embed_query(query: str) -> np.ndarray:
     model = _get_model()
-    vec = np.asarray(next(iter(model.embed([query]))), dtype=np.float32)
+    # bge wants the query instruction prefix; _MODEL_NAME holds the active model
+    # (set by _get_model; None under the deterministic test embedder → no prefix).
+    text = apply_query_prefix(_MODEL_NAME or "", query)
+    vec = np.asarray(next(iter(model.embed([text]))), dtype=np.float32)
     norm = float(np.linalg.norm(vec))
     if norm > 0:
         vec = vec / norm

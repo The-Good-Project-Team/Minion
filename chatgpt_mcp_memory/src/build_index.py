@@ -22,9 +22,10 @@ from tqdm import tqdm
 from fastembed_cache import fastembed_cache_dir
 from chatgpt_export_reader import chunk_text, iter_messages
 from store import DB_FILENAME, connect, set_meta, upsert_source
+from ingest import DEFAULT_MODEL, DEFAULT_MODEL_DIM
 
 
-MODEL_NAME_DEFAULT = "sentence-transformers/all-MiniLM-L6-v2"
+MODEL_NAME_DEFAULT = DEFAULT_MODEL
 EMBEDDING_BACKEND = "fastembed"
 SOURCE_KIND = "chatgpt-export"
 PARSER_NAME = "chatgpt-export"
@@ -70,7 +71,7 @@ def _embed_all(
     out: List[np.ndarray] = []
     total = len(texts)
     if total == 0:
-        return np.zeros((0, 384), dtype=np.float32)
+        return np.zeros((0, DEFAULT_MODEL_DIM), dtype=np.float32)
     with tqdm(total=total, desc="Embedding", unit="chunk") as bar:
         i = 0
         while i < total:
@@ -123,7 +124,7 @@ def main() -> None:
     print("Encoding chunks (progress bar)…", flush=True)
     embeddings = _embed_all(model, texts, batch_size=args.batch_size)
 
-    dim = int(embeddings.shape[1]) if embeddings.ndim == 2 else 384
+    dim = int(embeddings.shape[1]) if embeddings.ndim == 2 else DEFAULT_MODEL_DIM
     db_path = derived_dir / DB_FILENAME
     conn = connect(db_path, embed_dim=dim)
     set_meta(conn, "model_name", args.model)
