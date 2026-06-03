@@ -1,6 +1,6 @@
 {
   "name": "minion-desktop",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Minion — a local-first chat agent and personal MCP for your private context graph.",
   "type": "module",
   "scripts": {
