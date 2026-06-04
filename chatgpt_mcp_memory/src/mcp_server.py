@@ -837,6 +837,23 @@ def _tool_get_node(arguments: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _tool_graph_traverse(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Walk the knowledge graph from an entity outward (multi-hop), by NAME or
+    node_id — the relationship/traversal surface, kept separate from chunk
+    retrieval so it never reorders relevance."""
+    from graph_retrieval import traverse_graph
+
+    query = str(arguments.get("query") or "").strip() or None
+    node_id = str(arguments.get("node_id") or "").strip() or None
+    if not query and not node_id:
+        raise ValueError("provide `query` (entity name) or `node_id`")
+    hops = int(arguments.get("hops") or 2)
+    max_nodes = int(arguments.get("max_nodes") or 40)
+    return traverse_graph(
+        _get_conn(), query=query, node_id=node_id, hops=hops, max_nodes=max_nodes
+    )
+
+
 def _tool_get_chunk(arguments: Dict[str, Any]) -> Dict[str, Any]:
     chunk_id = str(arguments.get("chunk_id") or "")
     max_chars = int(arguments.get("max_chars") or DEFAULT_MAX_CHARS_FULL)
@@ -1552,6 +1569,30 @@ TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "graph_traverse",
+        "title": "Traverse the knowledge graph",
+        "description": (
+            "Walk the user's knowledge graph from an entity outward, MULTI-HOP, "
+            "to answer relationship questions ('how is X connected to Y?', "
+            "'what's around Z?', 'who works on this project?'). Start by NAME via "
+            "`query` (e.g. 'Practice of Life') or by `node_id` from ask_minion's "
+            "`graph` array. Returns the local subgraph: nodes (label, kind, "
+            "summary, hop distance) and the typed edges between them. Unlike "
+            "get_node (one hop from a known pointer), this resolves a start by "
+            "name and follows edges up to `hops`. This is the graph surface — it "
+            "does not affect chunk retrieval ranking."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Entity name/phrase to start from"},
+                "node_id": {"type": "string", "description": "Exact node id to start from (alt to query)"},
+                "hops": {"type": "number", "minimum": 1, "maximum": 4, "default": 2},
+                "max_nodes": {"type": "number", "minimum": 1, "maximum": 200, "default": 40},
+            },
+        },
+    },
+    {
         "name": "commit_voice",
         "title": "Commit synthesized voice profile to disk",
         "description": (
@@ -2258,6 +2299,7 @@ _DISPATCH = {
     "search_memory": _tool_ask_minion,  # legacy alias
     "get_chunk": _tool_get_chunk,
     "get_node": _tool_get_node,
+    "graph_traverse": _tool_graph_traverse,
     "recent_work": _tool_recent_work,
     "commit_voice": _tool_commit_voice,
     "append_to_voice": _tool_append_to_voice,

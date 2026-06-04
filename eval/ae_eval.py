@@ -68,6 +68,7 @@ AGENT_TOOLS = {
     "ask_minion": "ask_minion",
     "get_chunk": "get_chunk",
     "get_node": "get_node",
+    "graph_traverse": "graph_traverse",
     "conversation_chunks": "conversation_chunks",
 }
 

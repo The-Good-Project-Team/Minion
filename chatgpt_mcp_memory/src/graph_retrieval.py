@@ -29,6 +29,91 @@ def graph_match_node_ids(conn, query: str, *, limit: int = 5) -> List[str]:
     return [nid for _, nid in scored[:limit]]
 
 
+def traverse_graph(
+    conn,
+    *,
+    query: str | None = None,
+    node_id: str | None = None,
+    hops: int = 2,
+    max_nodes: int = 40,
+) -> dict:
+    """Walk the knowledge graph from an entity (by name via `query`, or by
+    `node_id`) outward up to `hops`, returning the local subgraph.
+
+    Unlike get_node (one hop from a known pointer), this resolves a start by
+    NAME and follows typed edges multiple hops, so an agent can answer
+    relationship/multi-hop questions ("how is X connected to Y", "what's around
+    Z") without already holding a node pointer.
+    """
+    hops = max(1, min(4, int(hops)))
+    max_nodes = max(1, min(200, int(max_nodes)))
+
+    starts: List[str] = []
+    if node_id:
+        nid = node_id[len("graph:"):] if node_id.startswith("graph:") else node_id
+        if nid.strip():
+            starts = [nid.strip()]
+    elif query:
+        starts = graph_match_node_ids(conn, query, limit=5)
+
+    def _node(nid: str):
+        return conn.execute(
+            "SELECT node_id, node_kind, title, summary, confidence FROM graph_nodes WHERE node_id=?",
+            (nid,),
+        ).fetchone()
+
+    nodes: dict = {}
+    edges: List[dict] = []
+    seen_edges: Set[tuple] = set()
+    frontier = list(dict.fromkeys(starts))
+    depth = 0
+    truncated = False
+    while frontier and depth <= hops and len(nodes) < max_nodes:
+        nxt: List[str] = []
+        for nid in frontier:
+            if nid in nodes:
+                continue
+            r = _node(nid)
+            if r is None:
+                continue
+            nodes[nid] = {
+                "node_id": nid,
+                "kind": str(r["node_kind"] or ""),
+                "label": str(r["title"] or ""),
+                "summary": (str(r["summary"] or ""))[:280],
+                "hop": depth,
+            }
+            if len(nodes) >= max_nodes:
+                truncated = True
+                break
+            if depth == hops:
+                continue  # collect this node but don't expand past the hop budget
+            for e in conn.execute(
+                "SELECT from_node_id, to_node_id, rel_kind FROM graph_edges "
+                "WHERE from_node_id=? OR to_node_id=?",
+                (nid, nid),
+            ).fetchall():
+                out = str(e["from_node_id"]) == nid
+                other = str(e["to_node_id"] if out else e["from_node_id"])
+                ekey = (str(e["from_node_id"]), str(e["to_node_id"]), str(e["rel_kind"] or ""))
+                if ekey not in seen_edges:
+                    seen_edges.add(ekey)
+                    edges.append({
+                        "from": ekey[0], "to": ekey[1], "rel": ekey[2],
+                    })
+                nxt.append(other)
+        frontier = nxt
+        depth += 1
+
+    return {
+        "start_nodes": starts,
+        "hops": hops,
+        "nodes": list(nodes.values()),
+        "edges": edges,
+        "truncated": truncated or len(nodes) >= max_nodes,
+    }
+
+
 def linked_source_paths(conn, node_ids: List[str]) -> List[str]:
     if not node_ids:
         return []
