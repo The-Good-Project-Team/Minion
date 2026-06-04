@@ -1,0 +1,469 @@
+tasks:
+- id: sf_1029
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Reduced responsiveness to interleukin-2 in regulatory T cells is associated with
+    greater resistance to autoimmune diseases such as Type 1 Diabetes."'
+  ideal: 'Interleukin-2 gene variation impairs regulatory T cell function and causes autoimmunity: Autoimmune
+    diseases are thought to result from imbalances in normal immune physiology and regulation. Here, we
+    show that autoimmune disease susceptibility and resistance alleles on mouse chromosome 3 (Idd3) correlate
+    wit | Large-scale genetic fine mapping and genotype-phenotype associations implicate polymorphism
+    in the IL2RA region in type 1 diabetes: Genome-wide association studies are now identifying disease-associated
+    chromosome regions. However, even after convincing replication, the localization of the causal variant(s)
+    requires comprehensive resequencing, extens | Type 1 diabetes-associated IL2RA variation lowers IL-2
+    signaling and contributes to diminished CD4+CD25+ regulatory T cell function.: Numerous reports have
+    demonstrated that CD4(+)CD25(+) regulatory T cells (Tregs) from individuals with a range of human
+    autoimmune diseases, including type 1 diabetes, are deficient in their ability to control autologous'
+  must_recall:
+  - Interleukin-2 gene variation impairs regulatory T cell function and causes autoimmunity
+  - Large-scale genetic fine mapping and genotype-phenotype associations implicate polymorphism in the
+    IL2RA region in type 1 diabetes
+  - Type 1 diabetes-associated IL2RA variation lowers IL-2 signaling and contributes to diminished CD4+CD25+
+    regulatory T cell function.
+- id: sf_1041
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Replacement of histone H2A with H2A.Z slows gene activation in yeasts by stabilizing
+    +1 nucleosomes."'
+  ideal: 'Nucleosome stability mediated by histone variants H3.3 and H2A.Z.: Nucleosomes containing the
+    histone variant H3.3 tend to be clustered in vivo in the neighborhood of transcriptionally active
+    genes and over regulatory elements. It has not been clear, however, whether H3.3-containing nuc |
+    Genome-Wide Dynamics of Htz1, a Histone H2A Variant that Poises Repressed/Basal Promoters for Activation
+    through Histone Loss: Histone variants help specialize chromatin regions; however, their impact on
+    transcriptional regulation is largely unknown. Here, we determined the genome-wide localization and
+    dynamics of Htz1, the yeast histone H2A var'
+  must_recall:
+  - Nucleosome stability mediated by histone variants H3.3 and H2A.Z.
+  - Genome-Wide Dynamics of Htz1, a Histone H2A Variant that Poises Repressed/Basal Promoters for Activation
+    through Histone Loss
+- id: sf_1132
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "TCR/CD3 microdomains are a required to induce the immunologic synapse to activate
+    T cells."'
+  ideal: 'Full activation of the T cell receptor requires both clustering and conformational changes at
+    CD3.: T cell receptor (TCR-CD3) triggering involves both receptor clustering and conformational changes
+    at the cytoplasmic tails of the CD3 subunits. The mechanism by which TCRalphabeta ligand binding confers
+    conformational ch | T cell receptor-proximal signals are sustained in peripheral microclusters and
+    terminated in the central supramolecular activation cluster.: T cell receptor (TCR) signaling is initiated
+    and sustained in microclusters; however, it''s not known whether signaling also occurs in the TCR-rich
+    central supramolecular activation cluster (cSMAC). We showed that the cSM'
+  must_recall:
+  - Full activation of the T cell receptor requires both clustering and conformational changes at CD3.
+  - T cell receptor-proximal signals are sustained in peripheral microclusters and terminated in the central
+    supramolecular activation cluster.
+- id: sf_1274
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "The tip of the inner tube of the toxic type VI secretion system (T6SS) antibacterial
+    effector in Escherichia coli (E. coli) carries toxic effector proteins."'
+  ideal: 'Haemolysin coregulated protein is an exported receptor and chaperone of type VI secretion substrates.:
+    Secretion systems require high-fidelity mechanisms to discriminate substrates among the vast cytoplasmic
+    pool of proteins. Factors mediating substrate recognition by the type VI secretion system (T6SS) of
+    Gram-negative b | A view to a kill: the bacterial type VI secretion system.: The bacterial type VI
+    secretion system (T6SS) is an organelle that is structurally and mechanistically analogous to an intracellular
+    membrane-attached contractile phage tail. Recent studies determined that a rapid confor | PAAR-repeat
+    proteins sharpen and diversify the Type VI secretion system spike: The bacterial type VI secretion
+    system (T6SS) is a large multicomponent, dynamic macromolecular machine that has an important role
+    in the ecology of many Gram-negative bacteria. T6SS is responsible for translocation of a'
+  must_recall:
+  - Haemolysin coregulated protein is an exported receptor and chaperone of type VI secretion substrates.
+  - 'A view to a kill: the bacterial type VI secretion system.'
+  - PAAR-repeat proteins sharpen and diversify the Type VI secretion system spike
+- id: sf_133
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Assembly of invadopodia is triggered by focal generation of phosphatidylinositol-3,4-biphosphate
+    and the activation of the nonreceptor tyrosine kinase Src."'
+  ideal: 'The adaptor protein Tks5/Fish is required for podosome formation and function, and for the protease-driven
+    invasion of cancer cells.: Tks5/Fish is a scaffolding protein with five SH3 domains and one PX domain.
+    In Src-transformed cells, Tks5/Fish localizes to podosomes, discrete protrusions of the ventral membrane.
+    We generated Src-transformed cells wit | Dynamic interactions of cortactin and membrane type 1 matrix
+    metalloproteinase at invadopodia: defining the stages of invadopodia formation and function.: Metastatic
+    tumor cells that actively migrate and invade surrounding tissues rely on invadopodia to degrade extracellular
+    matrix (ECM) barriers. Invadopodia are membrane protrusions that localize enzymes required for ECM  |
+    Membrane lipids in invadopodia and podosomes: Key structures for cancer invasion and metastasis: Invadopodia
+    are extracellular matrix (ECM)-degrading protrusions formed by invasive cancer cells. Podosomes are
+    structures functionally similar to invadopodia that are found in oncogene-transformed fibroblasts
+    and monocy | Sequential signals toward podosome formation in NIH-src cells: Podosomes (also termed
+    invadopodia in cancer cells) are actin-rich adhesion structures with matrix degradation activity that
+    develop in various cell types. Despite their significant physiological importance, the molecula |
+    Cortactin regulates cofilin and N-WASp activities to control the stages of invadopodium assembly and
+    maturation: Invadopodia are matrix-degrading membrane protrusions in invasive carcinoma cells. The
+    mechanisms regulating invadopodium assembly and maturation are not understood. We have dissected the
+    stages of invadopodium assembly '
+  must_recall:
+  - The adaptor protein Tks5/Fish is required for podosome formation and function, and for the protease-driven
+    invasion of cancer cells.
+  - 'Dynamic interactions of cortactin and membrane type 1 matrix metalloproteinase at invadopodia: defining
+    the stages of invadopodia formation and function.'
+  - 'Membrane lipids in invadopodia and podosomes: Key structures for cancer invasion and metastasis'
+  - Sequential signals toward podosome formation in NIH-src cells
+  - Cortactin regulates cofilin and N-WASp activities to control the stages of invadopodium assembly and
+    maturation
+- id: sf_1379
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Women with a higher birth weight are more likely to develop breast cancer later
+    in life."'
+  ideal: 'Birth Size and Breast Cancer Risk: Re-analysis of Individual Participant Data from 32 Studies:
+    BACKGROUND Birth size, perhaps a proxy for prenatal environment, might be a correlate of subsequent
+    breast cancer risk, but findings from epidemiological studies have been inconsistent. We re-analysed
+    individual particip | Role of birthweight in the etiology of breast cancer.: Breast cancer may originate
+    in utero. We reviewed the available evidence on the association between birthweight and the risk of
+    breast cancer. To date, 26 research papers addressing this issue have been published. The ma | Intrauterine
+    factors and risk of breast cancer: a systematic review and meta-analysis of current evidence.: BACKGROUND
+    Emerging evidence suggests an association between female prenatal experience and her subsequent risk
+    of developing breast cancer. Potential underlying mechanisms include variation in amounts of maternal
+    endoge | Intrauterine environments and breast cancer risk: meta-analysis and systematic review: INTRODUCTION
+    Various perinatal factors, including birth weight, birth order, maternal age, gestational age, twin
+    status, and parental smoking, have been postulated to affect breast cancer risk in daughters by altering
+    th'
+  must_recall:
+  - 'Birth Size and Breast Cancer Risk: Re-analysis of Individual Participant Data from 32 Studies'
+  - Role of birthweight in the etiology of breast cancer.
+  - 'Intrauterine factors and risk of breast cancer: a systematic review and meta-analysis of current
+    evidence.'
+  - 'Intrauterine environments and breast cancer risk: meta-analysis and systematic review'
+- id: sf_141
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Auditory entrainment is strengthened when people see congruent visual and auditory
+    information."'
+  ideal: 'Auditory Cortex Tracks Both Auditory and Visual Stimulus Dynamics Using Low-Frequency Neuronal
+    Phase Modulation: Integrating information across sensory domains to construct a unified representation
+    of multi-sensory signals is a fundamental characteristic of perception in ecological contexts. One
+    provocative hypothesis deriving from | Congruent Visual Speech Enhances Cortical Entrainment to Continuous
+    Auditory Speech in Noise-Free Conditions.: UNLABELLED Congruent audiovisual speech enhances our ability
+    to comprehend a speaker, even in noise-free conditions. When incongruent auditory and visual information
+    is presented concurrently, it can hinder a listener''s '
+  must_recall:
+  - Auditory Cortex Tracks Both Auditory and Visual Stimulus Dynamics Using Low-Frequency Neuronal Phase
+    Modulation
+  - Congruent Visual Speech Enhances Cortical Entrainment to Continuous Auditory Speech in Noise-Free
+    Conditions.
+- id: sf_179
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Birth-weight is positively associated with breast cancer."'
+  ideal: 'Birth Size and Breast Cancer Risk: Re-analysis of Individual Participant Data from 32 Studies:
+    BACKGROUND Birth size, perhaps a proxy for prenatal environment, might be a correlate of subsequent
+    breast cancer risk, but findings from epidemiological studies have been inconsistent. We re-analysed
+    individual particip | Role of birthweight in the etiology of breast cancer.: Breast cancer may originate
+    in utero. We reviewed the available evidence on the association between birthweight and the risk of
+    breast cancer. To date, 26 research papers addressing this issue have been published. The ma | Intrauterine
+    factors and risk of breast cancer: a systematic review and meta-analysis of current evidence.: BACKGROUND
+    Emerging evidence suggests an association between female prenatal experience and her subsequent risk
+    of developing breast cancer. Potential underlying mechanisms include variation in amounts of maternal
+    endoge | Intrauterine environments and breast cancer risk: meta-analysis and systematic review: INTRODUCTION
+    Various perinatal factors, including birth weight, birth order, maternal age, gestational age, twin
+    status, and parental smoking, have been postulated to affect breast cancer risk in daughters by altering
+    th'
+  must_recall:
+  - 'Birth Size and Breast Cancer Risk: Re-analysis of Individual Participant Data from 32 Studies'
+  - Role of birthweight in the etiology of breast cancer.
+  - 'Intrauterine factors and risk of breast cancer: a systematic review and meta-analysis of current
+    evidence.'
+  - 'Intrauterine environments and breast cancer risk: meta-analysis and systematic review'
+- id: sf_261
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Chronic aerobic exercise alters endothelial function, improving vasodilating mechanisms
+    mediated by NO."'
+  ideal: 'Endothelium-mediated relaxation of porcine collateral-dependent arterioles is improved by exercise
+    training.: BACKGROUND Endothelium-dependent modulation of coronary tone is impaired in the collateral-dependent
+    coronary microcirculation. We used a porcine model of chronic coronary occlusion and collateral development
+    to evaluate | Vasodilator responses of coronary resistance arteries of exercise-trained pigs.: BACKGROUND
+    The purpose of this study was to test the hypothesis that vasodilator responses of porcine coronary
+    resistance arteries are increased by exercise training. METHODS AND RESULTS Yucatan miniature swine
+    were rand'
+  must_recall:
+  - Endothelium-mediated relaxation of porcine collateral-dependent arterioles is improved by exercise
+    training.
+  - Vasodilator responses of coronary resistance arteries of exercise-trained pigs.
+- id: sf_275
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Combining phosphatidylinositide 3-kinase and MEK 1/2 inhibitors is effective at
+    treating KRAS mutant tumors."'
+  ideal: 'Effective Use of PI3K and MEK Inhibitors to Treat Mutant K-Ras G12D and PIK3CA H1047R Murine
+    Lung Cancers: Somatic mutations that activate phosphoinositide 3-kinase (PI3K) have been identified
+    in the p110-alpha catalytic subunit (encoded by PIK3CA). They are most frequently observed in two
+    hotspots: the helical domain (E545K  | NVP-BEZ235, a dual PI3K/mTOR inhibitor, prevents PI3K signaling
+    and inhibits the growth of cancer cells with activating PI3K mutations.: Phosphatidylinositol-3-kinase
+    (PI3K) pathway deregulation is a common event in human cancer, either through inactivation of the
+    tumor suppressor phosphatase and tensin homologue deleted from chromosome 10 or activating m | Mutations
+    in the phosphatidylinositol-3-kinase pathway predict for antitumor activity of the inhibitor PX-866
+    whereas oncogenic Ras is a dominant predictor for resistance.: The novel phosphatidylinositol-3-kinase
+    (PI3K) inhibitor PX-866 was tested against 13 experimental human tumor xenografts derived from cell
+    lines of various tissue origins. Mutant PI3K (PIK3CA) and loss of PTEN activity '
+  must_recall:
+  - Effective Use of PI3K and MEK Inhibitors to Treat Mutant K-Ras G12D and PIK3CA H1047R Murine Lung
+    Cancers
+  - NVP-BEZ235, a dual PI3K/mTOR inhibitor, prevents PI3K signaling and inhibits the growth of cancer
+    cells with activating PI3K mutations.
+  - Mutations in the phosphatidylinositol-3-kinase pathway predict for antitumor activity of the inhibitor
+    PX-866 whereas oncogenic Ras is a dominant predictor for resistance.
+- id: sf_343
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Diabetic patients with acute coronary syndrome experience increased short-term and
+    long-term risk for bleeding events."'
+  ideal: 'Platelet glycoprotein IIb/IIIa inhibitors reduce mortality in diabetic patients with non-ST-segment-elevation
+    acute coronary syndromes.: BACKGROUND Diabetes mellitus is a major risk factor for adverse outcomes
+    after acute coronary syndromes (ACS). Because this disease may be associated with increased platelet
+    aggregation, we investigated whether diabetic  | Impact of diabetes on long-term prognosis in patients
+    with unstable angina and non-Q-wave myocardial infarction: results of the OASIS (Organization to Assess
+    Strategies for Ischemic Syndromes) Registry.: BACKGROUND Although unstable coronary artery disease
+    is the most common reason for admission to a coronary care unit, the long-term prognosis of patients
+    with this diagnosis is unknown. This is particularly true for pati'
+  must_recall:
+  - Platelet glycoprotein IIb/IIIa inhibitors reduce mortality in diabetic patients with non-ST-segment-elevation
+    acute coronary syndromes.
+  - 'Impact of diabetes on long-term prognosis in patients with unstable angina and non-Q-wave myocardial
+    infarction: results of the OASIS (Organization to Assess Strategies for Ischemic Syndromes) Registry.'
+- id: sf_36
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "A deficiency of vitamin B12 increases blood levels of homocysteine."'
+  ideal: 'Folic acid improves endothelial function in coronary artery disease via mechanisms largely independent
+    of homocysteine lowering.: BACKGROUND Homocysteine is a risk factor for coronary artery disease (CAD),
+    although a causal relation remains to be proven. The importance of determining direct causality rests
+    in the fact that plasma homocysteine can b | Randomized trial of folic acid supplementation and serum
+    homocysteine levels.: BACKGROUND Lowering serum homocysteine levels with folic acid is expected to
+    reduce mortality from ischemic heart disease. Homocysteine reduction is known to be maximal at a folic
+    acid dosage of 1 mg/d, but the effect of'
+  must_recall:
+  - Folic acid improves endothelial function in coronary artery disease via mechanisms largely independent
+    of homocysteine lowering.
+  - Randomized trial of folic acid supplementation and serum homocysteine levels.
+- id: sf_385
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Epigenetic modulating agents (EMAs) modulate antitumor immune response in a cancer
+    model system."'
+  ideal: 'Epigenetic Therapy Ties MYC Depletion to Reversing Immune Evasion and Treating Lung Cancer:
+    Combining DNA-demethylating agents (DNA methyltransferase inhibitors [DNMTis]) with histone deacetylase
+    inhibitors (HDACis) holds promise for enhancing cancer immune therapy. Herein, pharmacologic and isoform
+    specificity | Epigenetic therapy activates type I interferon signaling in murine ovarian cancer to
+    reduce immunosuppression and tumor burden.: Ovarian cancer is the most lethal of all gynecological
+    cancers, and there is an urgent unmet need to develop new therapies. Epithelial ovarian cancer (EOC)
+    is characterized by an immune suppressive microenvironment, and '
+  must_recall:
+  - Epigenetic Therapy Ties MYC Depletion to Reversing Immune Evasion and Treating Lung Cancer
+  - Epigenetic therapy activates type I interferon signaling in murine ovarian cancer to reduce immunosuppression
+    and tumor burden.
+- id: sf_452
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Gene expression does not vary appreciably across genetically identical cells."'
+  ideal: 'Nature, Nurture, or Chance: Stochastic Gene Expression and Its Consequences: Gene expression
+    is a fundamentally stochastic process, with randomness in transcription and translation leading to
+    cell-to-cell variations in mRNA and protein levels. This variation appears in organisms ranging from
+    micr | Memory and Modularity in Cell-Fate Decision Making: Genetically identical cells sharing an
+    environment can display markedly different phenotypes. It is often unclear how much of this variation
+    derives from chance, external signals, or attempts by individual cells to exert'
+  must_recall:
+  - 'Nature, Nurture, or Chance: Stochastic Gene Expression and Its Consequences'
+  - Memory and Modularity in Cell-Fate Decision Making
+- id: sf_540
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Hypothalamic glutamate neurotransmission is crucial to energy balance."'
+  ideal: 'Synaptic glutamate release by ventromedial hypothalamic neurons is part of the neurocircuitry
+    that prevents hypoglycemia.: The importance of neuropeptides in the hypothalamus has been experimentally
+    established. Due to difficulties in assessing function in vivo, the roles of the fast-acting neurotransmitters
+    glutamate and GABA are largely un | Topographic mapping of VMH → arcuate nucleus microcircuits and
+    their reorganization by fasting: In the hypothalamic arcuate nucleus (ARC), pro-opiomelanocortin (POMC)
+    neurons inhibit feeding and neuropeptide-Y (NPY) neurons stimulate feeding. We tested whether neurons
+    in the ventromedial hypothalamic nucleus (VMH),'
+  must_recall:
+  - Synaptic glutamate release by ventromedial hypothalamic neurons is part of the neurocircuitry that
+    prevents hypoglycemia.
+  - Topographic mapping of VMH → arcuate nucleus microcircuits and their reorganization by fasting
+- id: sf_597
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Incidence rates of cervical cancer have decreased."'
+  ideal: 'Effect of screening on cervical cancer mortality in England and Wales: analysis of trends with
+    an age period cohort model.: The number of women dying from cervical cancer in 1997 was 7% lower than
+    in 1996 and has fallen by over 25% since 1992.1 Such rapid change must be at least partly due to cervical
+    screening, although strong cohort effects | The effect of mass screening on incidence and mortality
+    of squamous and adenocarcinoma of cervix uteri.: OBJECTIVE To describe the efficacy of the Finnish
+    mass screening program for cervical squamous carcinoma and adenocarcinoma, as reflected by changes
+    of incidence and mortality rate. METHODS Cervical cancer incidence and  | Mass screening programmes
+    and trends in cervical cancer in Finland and the Netherlands.: With respect to cervical cancer management,
+    Finland and the Netherlands are comparable in relevant characteristics, e.g., fertility rate, age-of-mother
+    at first birth and a national screening programme for several years.'
+  must_recall:
+  - 'Effect of screening on cervical cancer mortality in England and Wales: analysis of trends with an
+    age period cohort model.'
+  - The effect of mass screening on incidence and mortality of squamous and adenocarcinoma of cervix uteri.
+  - Mass screening programmes and trends in cervical cancer in Finland and the Netherlands.
+- id: sf_619
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Increased vessel density along with a reduction in fibrosis decreases the efficacy
+    of chemotherapy treatments."'
+  ideal: 'Inhibition of Hedgehog signaling enhances delivery of chemotherapy in a mouse model of pancreatic
+    cancer.: Pancreatic ductal adenocarcinoma (PDA) is among the most lethal human cancers in part because
+    it is insensitive to many chemotherapeutic drugs. Studying a mouse model of PDA that is refractory
+    to the clinically used drug | Hyaluronan impairs vascular function and drug delivery in a mouse model
+    of pancreatic cancer: OBJECTIVE Pancreatic ductal adenocarcinoma (PDA) is characterised by stromal
+    desmoplasia and vascular dysfunction, which critically impair drug delivery. This study examines the
+    role of an abundant extracellular matrix c'
+  must_recall:
+  - Inhibition of Hedgehog signaling enhances delivery of chemotherapy in a mouse model of pancreatic
+    cancer.
+  - Hyaluronan impairs vascular function and drug delivery in a mouse model of pancreatic cancer
+- id: sf_641
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Insomnia can be effectively treated with cognitive behavioral therapy."'
+  ideal: 'Cognitive behavioral therapy vs zopiclone for treatment of chronic primary insomnia in older
+    adults: a randomized controlled trial.: CONTEXT Insomnia is a common condition in older adults and
+    is associated with a number of adverse medical, social, and psychological consequences. Previous research
+    has suggested beneficial outcomes of both psychological | A clinical approach to circadian rhythm
+    sleep disorders.: Circadian rhythm sleep disorders are characterized by complaints of insomnia and
+    excessive sleepiness that are primarily due to alterations in the internal circadian timing system
+    or a misalignment between the timing of '
+  must_recall:
+  - 'Cognitive behavioral therapy vs zopiclone for treatment of chronic primary insomnia in older adults:
+    a randomized controlled trial.'
+  - A clinical approach to circadian rhythm sleep disorders.
+- id: sf_70
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Activation of PPM1D suppresses p53 function."'
+  ideal: 'Exome sequencing identifies somatic gain-of-function PPM1D mutations in brainstem gliomas: Gliomas
+    arising in the brainstem and thalamus are devastating tumors that are difficult to surgically resect.
+    To determine the genetic and epigenetic landscape of these tumors, we performed exomic sequencing
+    of 14 brains | Mosaic PPM1D mutations are associated with predisposition to breast and ovarian cancer:
+    Improved sequencing technologies offer unprecedented opportunities for investigating the role of rare
+    genetic variation in common disease. However, there are considerable challenges with respect to study
+    design, data ana'
+  must_recall:
+  - Exome sequencing identifies somatic gain-of-function PPM1D mutations in brainstem gliomas
+  - Mosaic PPM1D mutations are associated with predisposition to breast and ovarian cancer
+- id: sf_728
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Ly6C hi monocytes have a lower inflammatory capacity than Ly6C lo monocytes."'
+  ideal: 'Fate mapping reveals origins and dynamics of monocytes and tissue macrophages under homeostasis.:
+    Mononuclear phagocytes, including monocytes, macrophages, and dendritic cells, contribute to tissue
+    integrity as well as to innate and adaptive immune defense. Emerging evidence for labor division indicates
+    that manipula | Subpopulations of mouse blood monocytes differ in maturation stage and inflammatory
+    response.: Blood monocytes are well-characterized precursors for macrophages and dendritic cells.
+    Subsets of human monocytes with differential representation in various disease states are well known.
+    In contrast, mouse monocyte sub'
+  must_recall:
+  - Fate mapping reveals origins and dynamics of monocytes and tissue macrophages under homeostasis.
+  - Subpopulations of mouse blood monocytes differ in maturation stage and inflammatory response.
+- id: sf_873
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Obesity is determined solely by environmental factors."'
+  ideal: 'Genetics of obesity in adult adoptees and their biological siblings.: An adoption study of genetic
+    effects on obesity in adulthood was carried out in which adoptees separated from their natural parents
+    very early in life were compared with their biological full and half siblings reared by  | Familial
+    obesity and leanness.: Using the Princeton School District Family Study cohort, our specific aim was
+    to estimate the prevalence of suspected familial ponderosity and leanness, to provide empirical risk
+    estimates for the proportion of probands'' | The body-mass index of twins who have been reared apart.:
+    To assess the relative importance of genetic and environmental effects on the body-mass index (weight
+    in kilograms divided by the square of the height in meters), we studied samples of identical and fraternal
+    twins, rear | An adoption study of human obesity.: We examined the contributions of genetic factors
+    and the family environment to human fatness in a sample of 540 adult Danish adoptees who were selected
+    from a population of 3580 and divided into four weight classes: thin | Genetic analysis of human obesity
+    in an Italian sample.: An analysis of the genetic factors in obesity has been carried out on a sample
+    of nuclear families from Aosta (N. Italy). The families consisted of the parents and sibs of all elementary
+    school children considered to be '
+  must_recall:
+  - Genetics of obesity in adult adoptees and their biological siblings.
+  - Familial obesity and leanness.
+  - The body-mass index of twins who have been reared apart.
+  - An adoption study of human obesity.
+  - Genetic analysis of human obesity in an Italian sample.
+- id: sf_967
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Pretreatment with the Arp2/3 inhibitor CK-666 affects lamelliopodia formation."'
+  ideal: 'Characterization of two classes of small molecule inhibitors of Arp2/3 complex: Polymerization
+    of actin filaments directed by the actin-related protein (Arp)2/3 complex supports many types of cellular
+    movements. However, questions remain regarding the relative contributions of Arp2/3 complex versus  |
+    Arp2/3 complex inhibition radically alters lamellipodial actin architecture, suspended cell shape,
+    and the cell spreading process: Recent studies have investigated the dendritic actin cytoskeleton
+    of the cell edge''s lamellipodial (LP) region by experimentally decreasing the activity of the actin
+    filament nucleator and branch former, the Arp2/3 compl'
+  must_recall:
+  - Characterization of two classes of small molecule inhibitors of Arp2/3 complex
+  - Arp2/3 complex inhibition radically alters lamellipodial actin architecture, suspended cell shape,
+    and the cell spreading process
+- id: sf_971
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Primary cervical cancer screening with HPV detection has higher longitudinal sensitivity
+    than conventional cytology to detect cervical intraepithelial neoplasia grade 2."'
+  ideal: 'Human papillomavirus and Papanicolaou tests to screen for cervical cancer.: BACKGROUND Screening
+    for cervical cancer based on testing for human papillomavirus (HPV) increases the sensitivity of detection
+    of high-grade (grade 2 or 3) cervical intraepithelial neoplasia, but whether this gain repre | Efficacy
+    of human papillomavirus testing for the detection of invasive cervical cancers and cervical intraepithelial
+    neoplasia: a randomised controlled trial.: BACKGROUND Human papillomavirus (HPV) testing is known
+    to be more sensitive, but less specific than cytology for detecting cervical intraepithelial neoplasia
+    (CIN). We assessed the efficacy of cervical-cancer screening p | Evidence regarding human papillomavirus
+    testing in secondary prevention of cervical cancer.: More than ever, clinicians need regularly updated
+    reviews given the continuously increasing amount of new information regarding innovative cervical
+    cancer prevention methods. A summary is given from recent meta-analyses  | Human papillomavirus testing
+    for the detection of high-grade cervical intraepithelial neoplasia and cancer: final results of the
+    POBASCAM randomised controlled trial.: BACKGROUND Human papillomavirus (HPV) testing is more sensitive
+    for the detection of high-grade cervical lesions than is cytology, but detection of HPV by DNA screening
+    in two screening rounds 5 years apart has not been '
+  must_recall:
+  - Human papillomavirus and Papanicolaou tests to screen for cervical cancer.
+  - 'Efficacy of human papillomavirus testing for the detection of invasive cervical cancers and cervical
+    intraepithelial neoplasia: a randomised controlled trial.'
+  - Evidence regarding human papillomavirus testing in secondary prevention of cervical cancer.
+  - 'Human papillomavirus testing for the detection of high-grade cervical intraepithelial neoplasia and
+    cancer: final results of the POBASCAM randomised controlled trial.'
+- id: sf_1
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "0-dimensional biomaterials show inductive properties."'
+  ideal: 'New opportunities: the use of nanotechnologies to manipulate and track stem cells.: Nanotechnologies
+    are emerging platforms that could be useful in measuring, understanding, and manipulating stem cells.
+    Examples include magnetic nanoparticles and quantum dots for stem cell labeling and in vivo tracking;'
+  must_recall:
+  - 'New opportunities: the use of nanotechnologies to manipulate and track stem cells.'
+- id: sf_100
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "All hematopoietic stem cells segregate their chromosomes randomly."'
+  ideal: 'Haematopoietic stem cells do not asymmetrically segregate chromosomes or retain BrdU: Stem cells
+    are proposed to segregate chromosomes asymmetrically during self-renewing divisions so that older
+    (‘immortal’) DNA strands are retained in daughter stem cells whereas newly synthesized strands segregate
+    to dif'
+  must_recall:
+  - Haematopoietic stem cells do not asymmetrically segregate chromosomes or retain BrdU
+- id: sf_1012
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Radioiodine treatment of non-toxic multinodular goitre reduces thyroid volume."'
+  ideal: 'Radioiodine treatment of multinodular non-toxic goitre.: OBJECTIVE To investigate the long term
+    effect of radioactive iodine on thyroid function and size in patients with non-toxic multinodular
+    goitre. DESIGN Consecutive patients with multinodular non-toxic goitre selected for'
+  must_recall:
+  - Radioiodine treatment of multinodular non-toxic goitre.
+- id: sf_1014
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Rapamycin decreases the concentration of triacylglycerols in fruit flies."'
+  ideal: 'Mechanisms of Life Span Extension by Rapamycin in the Fruit Fly Drosophila melanogaster: The
+    target of rapamycin (TOR) pathway is a major nutrient-sensing pathway that, when genetically downregulated,
+    increases life span in evolutionarily diverse organisms including mammals. The central component of
+    this pat'
+  must_recall:
+  - Mechanisms of Life Span Extension by Rapamycin in the Fruit Fly Drosophila melanogaster
+- id: sf_1019
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Rapid phosphotransfer rates govern fidelity in two component systems"'
+  ideal: 'Using Structural Information to Change the Phosphotransfer Specificity of a Two-Component Chemotaxis
+    Signalling Complex: Two-component signal transduction pathways comprising histidine protein kinases
+    (HPKs) and their response regulators (RRs) are widely used to control bacterial responses to environmental
+    challenges. Some bacteria have ov'
+  must_recall:
+  - Using Structural Information to Change the Phosphotransfer Specificity of a Two-Component Chemotaxis
+    Signalling Complex
+- id: sf_1020
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Rapid up-regulation and higher basal expression of interferon-induced genes increase
+    survival of granule cell neurons that are infected by West Nile virus."'
+  ideal: 'Differential innate immune response programs in neuronal subtypes determine susceptibility to
+    infection in the brain by positive stranded RNA viruses: Although susceptibility of neurons in the
+    brain to microbial infection is a major determinant of clinical outcome, little is known about the
+    molecular factors governing this vulnerability. Here we show that two types of '
+  must_recall:
+  - Differential innate immune response programs in neuronal subtypes determine susceptibility to infection
+    in the brain by positive stranded RNA viruses
+- id: sf_1021
+  question: 'According to the indexed research, is this claim supported, and which studies provide the
+    evidence? Claim: "Rapid up-regulation and higher basal expression of interferon-induced genes reduce
+    survival of granule cell neurons that are infected by West Nile virus."'
+  ideal: 'Differential innate immune response programs in neuronal subtypes determine susceptibility to
+    infection in the brain by positive stranded RNA viruses: Although susceptibility of neurons in the
+    brain to microbial infection is a major determinant of clinical outcome, little is known about the
+    molecular factors governing this vulnerability. Here we show that two types of '
+  must_recall:
+  - Differential innate immune response programs in neuronal subtypes determine susceptibility to infection
+    in the brain by positive stranded RNA viruses
