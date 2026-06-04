@@ -748,6 +748,16 @@ _corpus_build_lock = threading.Lock()
 _corpus_build_running = False
 
 
+def corpus_build_running() -> bool:
+    """True while a corpus graph build is actively mining (for UI status).
+
+    Only reflects the active mine — NOT the debounce timer, since a fired
+    threading.Timer stays non-None and would pin the status to "building"
+    forever after the first build.
+    """
+    return _corpus_build_running
+
+
 def schedule_corpus_graph_build(
     data_dir: Path,
     *,

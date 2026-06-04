@@ -514,6 +514,19 @@ export async function graphBuild(): Promise<{ status: string; delay?: number; re
   return apiFetch("/graph/build", { method: "POST", body: "{}" });
 }
 
+/** Cheap live counts for the dashboard. */
+export type GraphStats = {
+  nodes: number;
+  edges: number;
+  communities: number;
+  building: boolean;
+  embed_dim?: number;
+  embed_model?: string;
+};
+export async function fetchGraphStats(): Promise<GraphStats> {
+  return apiFetch("/graph/stats");
+}
+
 /** Re-embed the corpus under the current default model (background; restart suggested after). */
 export async function reindexEmbeddings(
   body: { model?: string } = {},

@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  Brain,
   CheckCircle2,
   Circle,
   Database,
+  FileText,
   FolderOpen,
+  GitFork,
+  Layers,
   Loader2,
   Network,
   Plug,
@@ -14,6 +18,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import {
   connectClaudeDesktop,
+  fetchGraphStats,
   fetchSources,
   fetchStatus,
   graphBuild,
@@ -27,6 +32,7 @@ import {
   type Active,
   type ConnState,
   type EventMsg,
+  type GraphStats,
   type SidecarStatus,
   type Source,
 } from "./lib/api";
@@ -96,6 +102,36 @@ function baseName(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
+/** "BAAI/bge-base-en-v1.5" -> "bge-base-en-v1.5" (drop the org prefix). */
+function shortModel(name: string): string {
+  return name.split("/").pop() || name;
+}
+
+function StatTile({
+  icon,
+  label,
+  value,
+  sub,
+  tint = "text-primary",
+}: {
+  icon: ReactNode;
+  label: string;
+  value: ReactNode;
+  sub?: string;
+  tint?: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-border bg-card p-4">
+      <div className={`inline-flex items-center gap-1.5 text-xs font-medium ${tint}`}>
+        {icon}
+        {label}
+      </div>
+      <div className="mt-1 truncate text-xl font-semibold text-foreground">{value}</div>
+      {sub && <div className="truncate text-xs text-muted-foreground">{sub}</div>}
+    </div>
+  );
+}
+
 function looksLikeExport(s: Source): boolean {
   const hay = `${s.path} ${String(s.meta?.title ?? "")} ${String(s.meta?.source ?? "")}`.toLowerCase();
   return /chatgpt|openai|claude|anthropic|perplexity|gemini|cursor|copilot|grok/.test(hay) || s.kind === "chatgpt-export";
@@ -122,24 +158,36 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [graphMsg, setGraphMsg] = useState("");
   const [graphBusy, setGraphBusy] = useState(false);
+  const [graphStats, setGraphStats] = useState<GraphStats | null>(null);
   const [reindexMsg, setReindexMsg] = useState("");
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
 
   const load = useCallback(async () => {
     try {
-      const [st, srcs] = await Promise.all([
+      const [st, srcs, gs] = await Promise.all([
         fetchStatus().catch(() => null),
         fetchSources({ limit: 500 }).then((r) => r.sources).catch(() => [] as Source[]),
+        fetchGraphStats().catch(() => null),
       ]);
       if (st) {
         setCounts(st.counts);
         setActive(st.active ?? EMPTY_ACTIVE);
       }
       setSources(srcs);
+      if (gs) setGraphStats(gs);
     } catch {
       /* ignore */
     }
   }, []);
+
+  // Poll graph stats while a build is in progress so the dashboard ticks live.
+  useEffect(() => {
+    if (!graphStats?.building) return;
+    const id = setInterval(() => {
+      void fetchGraphStats().then(setGraphStats).catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [graphStats?.building]);
 
   // Live ingest stream → progress + rolling per-file feed.
   useEffect(() => {
@@ -355,10 +403,14 @@ export function App() {
       },
       {
         id: "graph",
-        label: "Build knowledge graph",
-        detail: graphMsg || "Extract people, projects & topics from your corpus",
-        done: false,
-        action: { label: graphBusy ? "Building…" : "Build now", run: runGraphBuild },
+        label: "Knowledge graph",
+        detail:
+          graphMsg ||
+          (counts.sources > 0
+            ? "Builds automatically as you add files — people, projects & topics"
+            : "Add files and Minion maps people, projects & topics for you"),
+        done: counts.sources > 0,
+        action: counts.sources > 0 ? { label: graphBusy ? "Rebuilding…" : "Rebuild", run: runGraphBuild } : undefined,
       },
     ];
   }, [name, counts.sources, sources, graphMsg, graphBusy]);
@@ -439,6 +491,36 @@ export function App() {
             <RefreshCw className="size-4" /> Reindex
           </button>
         </header>
+
+        {/* live dashboard */}
+        <section className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatTile icon={<FileText className="size-4" />} label="Sources" value={counts.sources} tint="text-sky-500" />
+          <StatTile icon={<Database className="size-4" />} label="Chunks" value={counts.chunks} tint="text-blue-500" />
+          <StatTile
+            icon={<GitFork className="size-4" />}
+            label="Knowledge graph"
+            tint="text-violet-500"
+            value={
+              graphStats?.building ? (
+                <span className="inline-flex items-center gap-1.5 text-base text-violet-500">
+                  <Loader2 className="size-4 animate-spin" /> Building…
+                </span>
+              ) : graphStats && (graphStats.nodes > 0 || graphStats.edges > 0) ? (
+                `${graphStats.nodes} branches · ${graphStats.edges} edges`
+              ) : (
+                "—"
+              )
+            }
+            sub={graphStats && graphStats.communities > 0 ? `${graphStats.communities} communities` : undefined}
+          />
+          <StatTile
+            icon={<Brain className="size-4" />}
+            label="Embedder"
+            tint="text-emerald-500"
+            value={graphStats?.embed_dim ? `${graphStats.embed_dim}-d` : "—"}
+            sub={graphStats?.embed_model ? shortModel(graphStats.embed_model) : undefined}
+          />
+        </section>
 
         {sidecar && sidecar.state !== "ready" && (
           <div className="mt-4 rounded-lg border border-border bg-card p-3 text-sm text-muted-foreground">

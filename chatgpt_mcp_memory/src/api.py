@@ -1763,6 +1763,52 @@ def graph_build() -> Dict[str, Any]:
     return schedule_corpus_graph_build(State.data_dir, delay=0.5)
 
 
+@app.get("/graph/stats")
+def graph_stats() -> Dict[str, Any]:
+    """Cheap counts for the dashboard: real (non-scaffold) nodes, edges,
+    L4 communities, and whether a build is in progress."""
+    conn = State.conn()
+
+    def _count(sql: str) -> int:
+        try:
+            row = conn.execute(sql).fetchone()
+            return int(row[0]) if row else 0
+        except Exception:
+            return 0
+
+    nodes = _count("SELECT COUNT(*) FROM graph_nodes WHERE status NOT IN ('scaffold', 'stub')")
+    edges = _count("SELECT COUNT(*) FROM graph_edges")
+    communities = _count(
+        "SELECT COUNT(*) FROM sources WHERE kind='graph-community'"
+    )
+    try:
+        from graph_corpus_mine import corpus_build_running
+
+        building = corpus_build_running()
+    except Exception:
+        building = False
+
+    embed_dim = 0
+    embed_model = ""
+    try:
+        from store import get_embed_dim
+
+        embed_dim = get_embed_dim(conn)
+        row = conn.execute("SELECT value FROM meta WHERE key='model_name'").fetchone()
+        embed_model = str(row[0]) if row else ""
+    except Exception:
+        pass
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "communities": communities,
+        "building": building,
+        "embed_dim": embed_dim,
+        "embed_model": embed_model,
+    }
+
+
 @app.post("/admin/reindex")
 def admin_reindex(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Re-embed the corpus under the current default model in a background
