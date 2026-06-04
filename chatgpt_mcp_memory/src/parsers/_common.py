@@ -1,8 +1,23 @@
 """Shared helpers for parsers (text normalization + chunking)."""
 from __future__ import annotations
 
+import os
 import re
 from typing import List
+
+# Default chunk ceiling, in characters. Sized to the embedder's context budget:
+# bge-base-en-v1.5 (and the ms-marco cross-encoder) cap at 512 tokens ≈ ~2000
+# chars of English. The old 1200 both FRAGMENTED short docs (a ~1.5-1.8k-char
+# abstract split into 2 half-context chunks, tanking dense recall — measured
+# nDCG@10 0.34 chunked vs 0.74 whole on BEIR/scifact) AND wasted ~40% of the
+# model's window. Keep short docs whole; only genuinely long docs still split.
+# Override with MINION_CHUNK_MAX_CHARS for corpora with a different embedder.
+def _default_chunk_max_chars() -> int:
+    try:
+        v = int(os.environ.get("MINION_CHUNK_MAX_CHARS", "") or 0)
+        return v if v > 0 else 2000
+    except ValueError:
+        return 2000
 
 
 def normalize_text(text: str) -> str:
@@ -12,8 +27,10 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def chunk_text(text: str, *, max_chars: int = 1200) -> List[str]:
+def chunk_text(text: str, *, max_chars: int | None = None) -> List[str]:
     """Paragraph-aware splitter with sentence fallback for oversize paragraphs."""
+    if max_chars is None:
+        max_chars = _default_chunk_max_chars()
     text = normalize_text(text)
     if not text:
         return []
