@@ -15,7 +15,6 @@ import identity
 import screen_context_store
 from consent_policy import filter_hits_for_mcp
 from ingest import DEFAULT_MODEL, _embed, _get_model
-from retrieval_bias import apply_identity_rerank
 from store import (
     ambient_events_since,
     identity_claim_list,
@@ -63,7 +62,8 @@ def _prefetch_memory_hits(
         hits = store_search(conn, vecs[0], top_k=top_k)
         if for_mcp:
             hits = filter_hits_for_mcp(hits, data_dir)
-        hits, _ = apply_identity_rerank(conn, hits)
+        # Identity/graph reranking removed from retrieval — kept as its own
+        # surface so it can't degrade relevance (see retrieval_bias).
     except Exception:
         return []
 

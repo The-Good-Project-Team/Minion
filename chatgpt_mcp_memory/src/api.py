@@ -116,7 +116,7 @@ import keys_api
 from version import __version__
 from export_bundle import write_identity_export_zip
 from preference_cluster import run_preference_clustering
-from retrieval_bias import apply_identity_rerank, rrf_fuse
+from retrieval_bias import rrf_fuse
 from store import (
     DB_FILENAME,
     connect,
@@ -1345,7 +1345,9 @@ def _embed_search_results(
                 rerank_used = "rrf"
         except Exception:
             log.exception("RRF fusion failed; relevance-only")
-    hits, bias_meta = apply_identity_rerank(conn, hits)
+    # Pure relevance only. Identity/graph reranking is a separate surface so it
+    # can't degrade retrieval (see mcp_server._tool_ask_minion + retrieval_bias).
+    bias_meta: Dict[str, Any] = {}
     hits = hits[:top_k]
 
     results: List[Dict[str, Any]] = []

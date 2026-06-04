@@ -56,7 +56,6 @@ import telemetry
 import identity
 from second_brain import build_working_context
 from version import __version__
-from retrieval_bias import apply_identity_rerank
 import retrieval_engine
 import screen_context_store
 from screen_memory import (
@@ -596,11 +595,13 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         approved_release_level=approved_release_level_i,
     )
 
-    if mode in ("relevance", "keyword") and hits:
-        hits, bias_meta = apply_identity_rerank(conn, hits)
-        _SESSION_STATE["_bias_meta"] = bias_meta
-    else:
-        _SESSION_STATE["_bias_meta"] = {}
+    # Identity/graph reranking is intentionally NOT applied to retrieval. It
+    # reorders by identity/cluster/recency/storage-tier signals that crater pure
+    # relevance (BEIR/scifact through this surface: nDCG 0.71 -> 0.345), and we
+    # can't reliably tell in the wild whether a corpus even has a useful identity
+    # signal. Graph stays its own surface — the `graph`/`communities` pointers
+    # below + the get_node tool — so it can never hurt chunk retrieval.
+    _SESSION_STATE["_bias_meta"] = {}
 
     # Split the fused hits into an INDEX of pointers: chunk pointers the agent can
     # expand, plus the graph entities near the query so it can traverse the graph.
