@@ -688,6 +688,26 @@ def _rotate_corrupt_database(db_path: Path) -> Path:
     return backup
 
 
+def recent_db_rotation(data_dir: Path, *, within_sec: float = 900.0) -> bool:
+    """True if the DB was rotated aside (corruption recovery) within `within_sec`.
+
+    Read-only: does not consume the flag. Callers use it to pause an automatic
+    full inbox re-index after a rotation, so a single corruption can't drive a
+    re-ingest loop. The authoritative surfacing/consumption of the flag lives in
+    the API lifespan (``_surface_db_rotate_flag``).
+    """
+    flag = Path(data_dir) / ".last_db_rotate.json"
+    try:
+        meta = json.loads(flag.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    try:
+        rotated_at = float(meta.get("rotated_at") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return (time.time() - rotated_at) <= within_sec
+
+
 def _err_indicates_corruption(err: Optional[BaseException]) -> bool:
     """True for any on-disk corruption signal (not a transient lock/I/O blip).
 
