@@ -43,6 +43,18 @@ def _extract_with_trafilatura(raw: str) -> str | None:
     return extracted or None
 
 
+def html_to_text(raw: str) -> str:
+    """Best-effort HTML -> plain text. Tries trafilatura (strips boilerplate),
+    falls back to a tiny html.parser stripper. Reused by the XML/WXR parser to
+    clean `<content:encoded>` page bodies."""
+    text = _extract_with_trafilatura(raw)
+    if text:
+        return text
+    stripper = _StripTags()
+    stripper.feed(raw)
+    return stripper.text()
+
+
 def parse(path: Path) -> ParseResult:
     raw = path.read_text(encoding="utf-8", errors="replace")
     text = _extract_with_trafilatura(raw)

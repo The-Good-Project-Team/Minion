@@ -201,6 +201,15 @@ class State:
         return c
 
 
+# Application Support folder name for this build's private data layer.
+# Minion 2 (768-dim) must NOT share a data dir with Minion 1 (LEGACY, 384-dim):
+# the embedders have incompatible vector widths. The Rust shell normally sets
+# MINION_DATA_DIR (see desktop/src-tauri/src/lib.rs DATA_DIR_NAME); these keep the
+# sidecar consistent when run standalone, and name the legacy dir we import from.
+DATA_DIR_NAME = "Minion 2"
+LEGACY_DATA_DIR_NAME = "Minion"
+
+
 def _resolve_paths() -> None:
     env = os.environ.get("MINION_DATA_DIR")
     if env:
@@ -210,10 +219,10 @@ def _resolve_paths() -> None:
         # The desktop shell always sets MINION_DATA_DIR, but this keeps the
         # sidecar consistent when run standalone.
         if sys.platform == "darwin":
-            State.data_dir = Path.home() / "Library" / "Application Support" / "Minion" / "data"
+            State.data_dir = Path.home() / "Library" / "Application Support" / DATA_DIR_NAME / "data"
         elif sys.platform == "win32":
             appdata = os.environ.get("APPDATA", "")
-            State.data_dir = Path(appdata) / "Minion" / "data" if appdata else Path.home() / ".minion" / "data"
+            State.data_dir = Path(appdata) / DATA_DIR_NAME / "data" if appdata else Path.home() / ".minion" / "data"
         else:
             State.data_dir = Path.home() / ".minion" / "data"
     State.data_dir.mkdir(parents=True, exist_ok=True)
@@ -474,11 +483,37 @@ def _database_status() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _start_legacy_import() -> None:
+    """Spawn the one-shot Minion 1 -> Minion 2 vault import (idempotent)."""
+    if os.environ.get("MINION_DISABLE_LEGACY_IMPORT", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return
+
+    def _run() -> None:
+        try:
+            import migrate_from_legacy
+
+            result = migrate_from_legacy.run(
+                State.data_dir, on_event=_watcher_event_bridge
+            )
+            log.info("legacy import: %s", result)
+        except Exception:
+            log.exception("legacy import thread crashed")
+
+    threading.Thread(target=_run, name="minion-legacy-import", daemon=True).start()
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     State.loop = asyncio.get_running_loop()
     State.subscribers_lock = asyncio.Lock()
     _resolve_paths()
+    # First launch after upgrading from Minion 1: import the old vault from the
+    # legacy "Minion" data dir. Runs in a background thread — Phase A (text copy)
+    # makes keyword search work within seconds; Phase B re-embeds in the
+    # background. No-ops once done, or if there's nothing to import.
+    _start_legacy_import()
     telemetry.configure(State.data_dir)
     # Load & apply user preferences before the watcher starts scanning the
     # inbox — otherwise a reconcile pass could ingest kinds the user has

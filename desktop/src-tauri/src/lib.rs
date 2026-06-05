@@ -140,12 +140,19 @@ const MANAGED_OLLAMA_SHA256: &str =
 // Path resolution
 // ---------------------------------------------------------------------------
 
+/// Application Support folder name for this build's private data layer.
+/// Minion 2 (768-dim) MUST NOT share a data dir with Minion 1 ("Minion", 384-dim):
+/// the two embedders have incompatible vector widths and cannot coexist in one
+/// `vec_chunks` table. Minion 1's "Minion" dir is left untouched and imported
+/// on first launch (see migrate_from_legacy on the sidecar).
+const DATA_DIR_NAME: &str = "Minion 2";
+
 fn resolve_data_dir() -> PathBuf {
     if let Ok(p) = std::env::var("MINION_DATA_DIR") {
         return PathBuf::from(p);
     }
     if let Some(base) = dirs::data_dir() {
-        return base.join("Minion").join("data");
+        return base.join(DATA_DIR_NAME).join("data");
     }
     PathBuf::from(".minion/data")
 }

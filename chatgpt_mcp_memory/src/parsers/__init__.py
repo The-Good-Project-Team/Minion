@@ -59,6 +59,9 @@ _EXT_REGISTRY: Dict[str, Tuple[str, str, str]] = {
     # HTML
     ".html": ("html", "parsers.markup_html", "parse"),
     ".htm":  ("html", "parsers.markup_html", "parse"),
+    # XML / WordPress-WXR exports (per-<item> page extraction; generic fallback)
+    ".xml":  ("xml", "parsers.markup_xml", "parse"),
+    ".rss":  ("xml", "parsers.markup_xml", "parse"),
     # PDF
     ".pdf":  ("pdf",  "parsers.pdf",  "parse"),
     # Office docs
