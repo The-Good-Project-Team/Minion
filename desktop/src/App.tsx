@@ -26,7 +26,6 @@ import {
   ingestText,
   onSidecarStatus,
   openEvents,
-  openMacosPrivacySettings,
   reindexEmbeddings,
   revealInFinder,
   type Active,
@@ -384,20 +383,6 @@ export function App() {
             } catch {
               /* surfaced by status */
             }
-          },
-        },
-      },
-      {
-        id: "screen",
-        label: "Screen & accessibility",
-        detail: localFlag("screen") ? "Capture permissions opened" : "Let Minion read active work",
-        done: localFlag("screen"),
-        action: {
-          label: "Open settings",
-          run: async () => {
-            await openMacosPrivacySettings("accessibility");
-            await openMacosPrivacySettings("screen-recording");
-            setLocalFlag("screen");
           },
         },
       },
