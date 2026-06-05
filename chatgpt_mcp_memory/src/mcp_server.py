@@ -42,6 +42,7 @@ from store import (
     keyword_search as store_keyword_search,
     list_conversations as store_list_conversations,
     list_sources as store_list_sources,
+    recent_db_rotation,
     search as store_search,
     wiki_page_list,
     wiki_page_get,
@@ -372,11 +373,23 @@ def _maybe_start_watcher(db_path: Path) -> None:
         inbox = _inbox_dir()
         inbox.mkdir(parents=True, exist_ok=True)
         conn = _CONN
-        if conn is not None:
+        # Pause the startup re-index if the DB was just rotated aside: replaying
+        # the inbox onto a freshly-emptied DB is what drove the re-ingest loop.
+        # Live watching still starts, so new drops are picked up.
+        skip_reingest = (
+            _env_first("MINION_DISABLE_REINGEST_GUARD") not in ("1", "true", "TRUE")
+            and recent_db_rotation(_data_dir())
+        )
+        if conn is not None and not skip_reingest:
             try:
                 reconcile_once(conn, inbox)
             except Exception:
                 log.exception("startup reconcile failed")
+        elif skip_reingest:
+            log.warning(
+                "startup inbox re-index paused: database was recently rotated aside; "
+                "live watching active."
+            )
         start_background(_new_conn, inbox)
     except Exception:
         log.exception("failed to start watcher")

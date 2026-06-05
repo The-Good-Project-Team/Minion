@@ -50,6 +50,87 @@ def _emit_watcher_error_bounded(
         log.exception("on_event failed for error payload")
 
 
+# ---------------------------------------------------------------------------
+# Inbox hygiene: never descend into opaque bundles or dependency/cache trees.
+#
+# A user once dropped a full machine archive into the inbox; it contained
+# `.app` bundles whose interiors (e.g. a bundled JRE's per-license `.md`
+# files) are tens of thousands of tiny text files. With no walk-level filter
+# the watcher queued every one for embedding, pinning all cores at ~780% CPU
+# and ~5 GB RSS, which in turn caused SQLite lock contention and a
+# corruption-rotation loop. None of these files are user knowledge: macOS
+# bundles are opaque Finder objects, and dependency/cache dirs are vendored
+# machine output. We prune them at the directory level so the walk never even
+# enumerates their contents.
+# ---------------------------------------------------------------------------
+
+# Directory names whose entire subtree we skip (dependency installs, build
+# caches, VCS metadata, package managers).
+_EXCLUDED_DIR_NAMES = frozenset({
+    "node_modules", "__pycache__", "site-packages", "bower_components",
+    "venv", ".tox", ".mypy_cache", ".pytest_cache", ".gradle", ".cargo",
+    ".rustup", ".npm", ".cache", ".terraform", "Pods", "Carthage",
+    "DerivedData", ".Trash",
+})
+
+# Directory-name suffixes marking an opaque macOS bundle / package. The whole
+# subtree is treated as a single object and skipped.
+_EXCLUDED_DIR_SUFFIXES = (
+    ".app", ".framework", ".bundle", ".plugin", ".kext", ".dsym",
+    ".xcassets", ".lproj", ".appex", ".systemextension", ".qlgenerator",
+    ".prefpane", ".component", ".mdimporter", ".xpc",
+    ".photoslibrary", ".imovielibrary", ".tvlibrary", ".musiclibrary",
+    ".aplibrary", ".xcodeproj", ".playground",
+)
+
+# Single-file byte ceiling. No legitimate text/transcript/PDF approaches this;
+# anything larger is almost certainly a binary blob mis-claimed by a parser,
+# and embedding it would stall the pipeline. Overridable for unusual corpora.
+_DEFAULT_MAX_INGEST_BYTES = 100 * 1024 * 1024
+
+
+def _max_ingest_bytes() -> int:
+    raw = os.environ.get("MINION_MAX_INGEST_BYTES", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            log.warning("invalid MINION_MAX_INGEST_BYTES=%r; using default", raw)
+    return _DEFAULT_MAX_INGEST_BYTES
+
+
+def _is_excluded_dir_name(name: str) -> bool:
+    """True if a directory with this name is a bundle/dependency/cache we skip.
+
+    Hidden (dot-prefixed) directories are skipped wholesale, consistent with
+    the existing dotfile skip — they are conventionally machine/system state,
+    not authored knowledge.
+    """
+    if name.startswith("."):
+        return True
+    if name in _EXCLUDED_DIR_NAMES:
+        return True
+    low = name.lower()
+    return any(low.endswith(suf) for suf in _EXCLUDED_DIR_SUFFIXES)
+
+
+def _is_excluded_path(p: Path, inbox: Path) -> bool:
+    """True if any directory segment of `p` *below the inbox root* is excluded.
+
+    Only segments under `inbox` are checked, so the inbox's own ancestry
+    (e.g. ``~/Library/Application Support``) can never trip the filter. Used on
+    the live-watch path where we receive individual file paths rather than
+    walking the tree ourselves.
+    """
+    try:
+        rel = p.resolve().relative_to(inbox.resolve())
+    except (ValueError, OSError):
+        return False
+    # rel.parts[:-1] = directory segments only (the filename is handled by the
+    # dotfile/extension checks at the call site).
+    return any(_is_excluded_dir_name(seg) for seg in rel.parts[:-1])
+
+
 def _is_ingestable(p: Path) -> bool:
     """A file is ingestable if a parser claims it OR it's an archive we unpack."""
     if choose_parser(p) is not None:
@@ -164,13 +245,27 @@ class ReconcileReport:
 
 
 def _iter_inbox_files(inbox: Path) -> Iterable[Path]:
-    for p in inbox.rglob("*"):
-        if not p.is_file():
-            continue
-        name = p.name
-        if name.startswith(".") or name.endswith(".tmp") or name.endswith(".partial"):
-            continue
-        yield p
+    inbox = inbox.resolve()
+    max_bytes = _max_ingest_bytes()
+    # os.walk (not rglob) so we can prune excluded directories *in place* and
+    # never descend into bundle/dependency trees — pruning, not post-filtering,
+    # is what keeps a machine archive from being enumerated file-by-file.
+    for dirpath, dirnames, filenames in os.walk(inbox):
+        dirnames[:] = [d for d in dirnames if not _is_excluded_dir_name(d)]
+        for name in filenames:
+            if name.startswith(".") or name.endswith(".tmp") or name.endswith(".partial"):
+                continue
+            p = Path(dirpath) / name
+            try:
+                if not p.is_file():
+                    continue
+                if p.stat().st_size > max_bytes:
+                    log.info("skipping oversized inbox file (%d bytes): %s",
+                             p.stat().st_size, p)
+                    continue
+            except OSError:
+                continue
+            yield p
 
 
 def reconcile_once(
@@ -431,7 +526,17 @@ def start_background(
                 if owning_export is not None:
                     export_dirs_to_ingest.add(owning_export)
                     continue
+                # Same bundle/dependency/oversize guards as the reconcile walk,
+                # applied per-event since live paths arrive one at a time.
+                if _is_excluded_path(p, inbox):
+                    continue
                 if not p.is_file() or not _is_ingestable(p):
+                    continue
+                try:
+                    if p.stat().st_size > _max_ingest_bytes():
+                        log.info("skipping oversized inbox file: %s", p)
+                        continue
+                except OSError:
                     continue
                 key = str(p)
                 if key in seen_actionable:

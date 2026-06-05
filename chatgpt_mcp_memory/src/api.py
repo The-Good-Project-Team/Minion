@@ -363,11 +363,19 @@ _watcher_mode: str = "disabled"
 _manual_reconcile_lock = threading.Lock()
 
 
-def _start_watcher() -> None:
+def _start_watcher(skip_reingest: bool = False) -> None:
     global _watcher_thread, _heartbeat_thread, _watcher_mode
     _watcher_mode = "disabled"
     if os.environ.get("MINION_DISABLE_WATCHER") in ("1", "true", "TRUE"):
         return
+    # A just-rotated DB pauses the startup re-index (see _surface_db_rotate_flag)
+    # unless explicitly overridden. The live watcher still starts, so anything
+    # newly dropped into the inbox is still picked up.
+    if skip_reingest and os.environ.get("MINION_DISABLE_REINGEST_GUARD") not in ("1", "true", "TRUE"):
+        log.warning(
+            "startup inbox re-index paused: database was just rotated aside; "
+            "live watching active. Restart again or trigger a manual reconcile to re-index."
+        )
     try:
         from watcher import reconcile_once, start_background, start_polling_watcher
 
@@ -379,6 +387,11 @@ def _start_watcher() -> None:
         # socket from binding. We broadcast "ready" once it's done.
         def _reconcile_bg() -> None:
             try:
+                if skip_reingest and os.environ.get("MINION_DISABLE_REINGEST_GUARD") not in ("1", "true", "TRUE"):
+                    # Don't replay the inbox onto a freshly-emptied DB.
+                    State.db_error = None
+                    _schedule_broadcast({"type": "ready", "counts": _counts()})
+                    return
                 bg_conn = connect(State.db_path)
                 try:
                     reconcile_once(bg_conn, State.inbox, on_event=_watcher_event_bridge)
@@ -480,7 +493,16 @@ async def _lifespan(app: FastAPI):
             log.info("parser_extensions: loaded %s user mapping(s)", n_ext)
     except Exception:
         log.exception("failed to load parser_extensions.json")
-    _start_watcher()
+    # Detect a just-rotated DB *before* the watcher reconcile runs, so we can
+    # pause the auto-reindex (a freshly-emptied DB + a large inbox is what
+    # produced the re-ingest CPU loop). Surfaces a health issue either way.
+    just_rotated = False
+    try:
+        just_rotated = _surface_db_rotate_flag(State.data_dir, State.conn())
+        State.conn().commit()
+    except Exception:
+        log.exception("db_rotate flag handling failed")
+    _start_watcher(skip_reingest=just_rotated)
     # Nudge Claude Desktop to re-read our tool descriptions + retrieval policy
     # whenever the MCP-relevant sources have changed since last launch. No-op
     # if Claude's config file doesn't exist (user hasn't opted in yet).
@@ -500,11 +522,6 @@ async def _lifespan(app: FastAPI):
         schedule_background_graph_mine(State.data_dir)
     except Exception:
         log.debug("boot graph mine schedule skipped", exc_info=True)
-    try:
-        _surface_db_rotate_flag(State.data_dir, State.conn())
-        State.conn().commit()
-    except Exception:
-        log.exception("db_rotate flag handling failed")
     try:
         analytics_remote.emit_session_if_ready()
     except Exception:
@@ -784,11 +801,18 @@ class DestructiveConfirmBody(BaseModel):
     confirm: bool = False
 
 
-def _surface_db_rotate_flag(data_dir: Path, conn) -> None:
-    """If SQLite recovery rotated the DB aside, surface one Activity health issue."""
+def _surface_db_rotate_flag(data_dir: Path, conn) -> bool:
+    """If SQLite recovery rotated the DB aside, surface one Activity health issue.
+
+    Returns True when a fresh rotation was found and surfaced, so the caller can
+    decide whether to *skip* the automatic inbox re-index. Blindly replaying a
+    large inbox onto a just-emptied DB is exactly what turned a single
+    corruption into a CPU-pinning re-ingest loop, so a rotation pauses the
+    auto-reindex until the user (or the next clean restart) opts back in.
+    """
     flag = data_dir / ".last_db_rotate.json"
     if not flag.exists():
-        return
+        return False
     try:
         meta = json.loads(flag.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -801,13 +825,16 @@ def _surface_db_rotate_flag(data_dir: Path, conn) -> None:
         source_key="db_rotate",
         body_md=(
             "Your vault database was replaced after corruption was detected. "
-            f"Backup: `{backup}`. Life-graph answers may also be in `graph_snapshot.json`."
+            f"Backup: `{backup}`. Life-graph answers may also be in `graph_snapshot.json`. "
+            "Automatic re-indexing of the inbox was paused to avoid reload churn; "
+            "it resumes on the next restart, or trigger it now from Settings."
         ),
     )
     try:
         flag.unlink()
     except OSError:
         pass
+    return True
 
 
 @app.post("/nuke")
