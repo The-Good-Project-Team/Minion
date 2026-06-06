@@ -6,18 +6,22 @@ set -euo pipefail
 # and ensures the bundle is user-readable.
 
 app_path="${1:-}"
-if [[ -z "$app_path" ]]; then
-  echo "usage: postbuild_macos_sanitize_app.sh /path/to/Minion.app" >&2
-  exit 2
-fi
-if [[ ! -d "$app_path" ]]; then
-  # In some build environments (e.g. IDE sandboxes), Tauri bundles into a temp
-  # dir. Fall back to the most recent bundled Minion.app we can find.
-  candidate="$(ls -td /var/folders/*/*/*/cursor-sandbox-cache/*/cargo-target/release/bundle/macos/Minion.app 2>/dev/null | head -n 1 || true)"
+if [[ -z "$app_path" || ! -d "$app_path" ]]; then
+  # No path given, or the given one is stale. Auto-detect the freshly built
+  # bundle. productName is "Minion 2" (so "Minion 2.app"); tolerate older
+  # "Minion.app" and the IDE-sandbox temp target dir too. Newest match wins.
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  desktop_dir="$(cd "$here/.." && pwd)"
+  candidate="$(
+    {
+      ls -td "$desktop_dir/src-tauri/target/release/bundle/macos/"*.app 2>/dev/null
+      ls -td /var/folders/*/*/*/cursor-sandbox-cache/*/cargo-target/release/bundle/macos/*.app 2>/dev/null
+    } | head -n 1 || true
+  )"
   if [[ -n "${candidate:-}" && -d "$candidate" ]]; then
     app_path="$candidate"
   else
-    echo "not a directory: $app_path" >&2
+    echo "postbuild sanitize: could not find a built .app (pass the path explicitly)" >&2
     exit 2
   fi
 fi

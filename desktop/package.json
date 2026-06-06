@@ -18,7 +18,7 @@
     "test:live": "bash scripts/live-smoke.sh",
     "test:prod-smoke": "bash scripts/prod-smoke.sh",
     "test:all": "bash scripts/verify-all.sh",
-    "tauri:build:macos": "bunx tauri build && bash ./scripts/postbuild_macos_sanitize_app.sh ./src-tauri/target/release/bundle/macos/Minion.app && APP=$(ls -td /var/folders/*/*/*/cursor-sandbox-cache/*/cargo-target/release/bundle/macos/Minion.app 2>/dev/null | head -n 1) && ditto -c -k --sequesterRsrc --keepParent \"$APP\" \"${APP}.zip\""
+    "tauri:build:macos": "bunx tauri build && bash ./scripts/postbuild_macos_sanitize_app.sh && bash ./scripts/package_macos_zip.sh"
   },
   "license": "MIT",
   "dependencies": {
