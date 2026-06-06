@@ -81,6 +81,20 @@ def _remote_enabled(root: Path) -> tuple[bool, str]:
     return True, url
 
 
+def _monitoring_enabled(root: Path) -> tuple[bool, str]:
+    """Error/crash forwarding is **opt-in** (settings.remote_monitoring=true),
+    independent of the opt-out aggregate telemetry above. Same collector URL."""
+    url = effective_analytics_url().strip()
+    if not url:
+        return False, ""
+    try:
+        if not load_settings(root).get("remote_monitoring"):
+            return False, ""
+    except Exception:
+        return False, ""
+    return True, url
+
+
 def _under_hourly_cap(max_per_hour: int = 120) -> bool:
     global _hour_bucket, _hour_count
     with _lock:
@@ -182,6 +196,101 @@ def _sanitize(kind: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "reason_class": rcls,
         }
     return None
+
+
+def _scrub(text: str, max_len: int = 600) -> str:
+    """Best-effort redaction: drop home-dir prefixes so paths don't leak a
+    username, then truncate. The collector still sees error *shapes*, not data."""
+    if not isinstance(text, str):
+        text = str(text)
+    try:
+        home = str(Path.home())
+        if home and home in text:
+            text = text.replace(home, "~")
+    except Exception:
+        pass
+    text = " ".join(text.split())
+    return text[:max_len]
+
+
+def emit_error(
+    source: str,
+    message: str,
+    *,
+    detail: Optional[str] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Forward one error/crash report to the collector when monitoring is opted in.
+
+    ``source`` is "sidecar" (API/MCP) or "desktop" (UI). Never raises."""
+    try:
+        root = telemetry_data_dir()
+        if root is None:
+            return
+        ok, url = _monitoring_enabled(root)
+        if not ok or not url:
+            return
+        if not _under_hourly_cap():
+            return
+        body: Dict[str, Any] = {
+            "schema": _SCHEMA,
+            "event": "error",
+            "source": str(source)[:24],
+            "message": _scrub(message),
+            "install_id": _install_id(root),
+            "app_version": __version__,
+            "os": platform.system(),
+            "arch": platform.machine(),
+        }
+        if detail:
+            body["detail"] = _scrub(detail, max_len=2000)
+        if isinstance(context, dict) and context:
+            # Keep context small + string-only; never trust caller types.
+            slim: Dict[str, Any] = {}
+            for k, v in list(context.items())[:12]:
+                slim[str(k)[:40]] = _scrub(str(v), max_len=200)
+            body["context"] = slim
+        _post(url, body)
+    except Exception:
+        log.debug("emit_error failed", exc_info=True)
+
+
+class _RemoteMonitorHandler(logging.Handler):
+    """Logging handler that forwards ERROR+ records to the collector (opt-in).
+    Attach once at startup; gating happens per-record inside emit_error."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if record.name.startswith("minion.analytics"):
+                return  # never recurse on our own POST failures
+            msg = record.getMessage()
+            detail = None
+            if record.exc_info:
+                import traceback
+
+                detail = "".join(traceback.format_exception(*record.exc_info))
+            emit_error(
+                "sidecar",
+                f"{record.name}: {msg}",
+                detail=detail,
+                context={"level": record.levelname, "logger": record.name},
+            )
+        except Exception:
+            pass
+
+
+_monitor_handler_installed = False
+
+
+def install_log_monitor(level: int = logging.ERROR) -> None:
+    """Idempotently attach the remote monitor to the root logger."""
+    global _monitor_handler_installed
+    with _lock:
+        if _monitor_handler_installed:
+            return
+        _monitor_handler_installed = True
+    h = _RemoteMonitorHandler(level=level)
+    logging.getLogger().addHandler(h)
 
 
 def on_telemetry_logged(kind: str, fields: Dict[str, Any]) -> None:

@@ -561,6 +561,11 @@ async def _lifespan(app: FastAPI):
         analytics_remote.emit_session_if_ready()
     except Exception:
         pass
+    try:
+        # Opt-in: forward ERROR+ sidecar logs to the collector for monitoring.
+        analytics_remote.install_log_monitor()
+    except Exception:
+        pass
     yield
 
 
@@ -765,6 +770,7 @@ class ConnectBody(BaseModel):
 class SettingsBody(BaseModel):
     disabled_kinds: Optional[List[str]] = None
     telemetry_opt_out: Optional[bool] = None
+    remote_monitoring: Optional[bool] = None
     ambient_sensing_enabled: Optional[bool] = None
     full_listening_enabled: Optional[bool] = None
     capture_on_empty_ax: Optional[bool] = None
@@ -980,6 +986,8 @@ def update_settings(body: SettingsBody) -> Dict[str, Any]:
         current["disabled_kinds"] = body.disabled_kinds
     if body.telemetry_opt_out is not None:
         current["telemetry_opt_out"] = bool(body.telemetry_opt_out)
+    if body.remote_monitoring is not None:
+        current["remote_monitoring"] = bool(body.remote_monitoring)
     if body.ambient_sensing_enabled is not None:
         current["ambient_sensing_enabled"] = bool(body.ambient_sensing_enabled)
     if body.full_listening_enabled is not None:
@@ -1164,6 +1172,37 @@ def diagnostics_about() -> Dict[str, Any]:
             "Log lines may still contain filenames you indexed; use redacted export when sharing."
         ),
     }
+
+
+@app.post("/diagnostics/client-log")
+def diagnostics_client_log(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Accept an error/crash report from the desktop UI and forward it to the
+    collector **iff** the user opted into remote monitoring. Always returns
+    ``{forwarded: bool}`` so the client never needs to know the setting state.
+
+    Used to surface UI crashes (e.g. the WebView renderer dying → white screen)
+    that the sidecar can't observe on its own."""
+    body = body or {}
+    message = str(body.get("message") or "client error")[:600]
+    detail = body.get("detail")
+    context = body.get("context") if isinstance(body.get("context"), dict) else None
+    src = str(body.get("source") or "desktop")[:24]
+    forwarded = False
+    try:
+        root = analytics_remote.telemetry_data_dir()
+        if root is not None:
+            ok, _url = analytics_remote._monitoring_enabled(root)
+            if ok:
+                analytics_remote.emit_error(
+                    src,
+                    message,
+                    detail=str(detail) if detail else None,
+                    context=context,
+                )
+                forwarded = True
+    except Exception:
+        log.debug("client-log forward failed", exc_info=True)
+    return {"forwarded": forwarded}
 
 
 @app.get("/diagnostics/log")

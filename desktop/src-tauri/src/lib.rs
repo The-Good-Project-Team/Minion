@@ -1366,6 +1366,72 @@ fn env_truthy(name: &str) -> bool {
     }
 }
 
+/// Check the configured updater endpoint on launch and, when a newer signed
+/// build exists, download + install it and relaunch. This is the channel that
+/// lets us ship a hotfix on demand: without it the updater plugin is loaded but
+/// never asked "is there an update?", so installed builds never self-update.
+///
+/// Progress is emitted on `updater://status` for the UI. Errors are best-effort
+/// and non-fatal — a failed check must never block app startup. Set
+/// `MINION_DISABLE_AUTO_UPDATE=1` to opt out (e.g. for local dev builds).
+fn spawn_update_check(handle: AppHandle) {
+    if env_truthy("MINION_DISABLE_AUTO_UPDATE") {
+        return;
+    }
+    if cfg!(debug_assertions) {
+        // Dev builds aren't signed/versioned for the updater; skip.
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        use tauri_plugin_updater::UpdaterExt;
+        let updater = match handle.updater() {
+            Ok(u) => u,
+            Err(e) => {
+                dbg("updater", serde_json::json!({"state": "init_err", "error": e.to_string()}));
+                return;
+            }
+        };
+        match updater.check().await {
+            Ok(Some(update)) => {
+                let version = update.version.clone();
+                let _ = handle.emit(
+                    "updater://status",
+                    serde_json::json!({"state": "available", "version": version}),
+                );
+                dbg("updater", serde_json::json!({"state": "available", "version": version}));
+                let res = update
+                    .download_and_install(|_chunk, _total| {}, || {})
+                    .await;
+                match res {
+                    Ok(_) => {
+                        let _ = handle.emit(
+                            "updater://status",
+                            serde_json::json!({"state": "installed", "version": version}),
+                        );
+                        dbg("updater", serde_json::json!({"state": "installed", "version": version}));
+                        // Relaunch into the freshly installed build.
+                        handle.restart();
+                    }
+                    Err(e) => {
+                        let _ = handle.emit(
+                            "updater://status",
+                            serde_json::json!({"state": "error", "message": e.to_string()}),
+                        );
+                        dbg("updater", serde_json::json!({"state": "install_err", "error": e.to_string()}));
+                    }
+                }
+            }
+            Ok(None) => {
+                dbg("updater", serde_json::json!({"state": "up_to_date"}));
+            }
+            Err(e) => {
+                // Offline / endpoint unreachable / signature mismatch — log only.
+                dbg("updater", serde_json::json!({"state": "check_err", "error": e.to_string()}));
+            }
+        }
+    });
+}
+
 #[tauri::command]
 fn app_config(state: tauri::State<AppState>) -> serde_json::Value {
     let sidecar_bootstrapped = state
@@ -2122,6 +2188,10 @@ pub fn run() {
         .manage(state)
         .setup(move |app| {
             setup_menu_bar_icon(app);
+            // Check for a newer signed build and self-update on launch. Runs
+            // independently of the sidecar so a hotfix lands even if indexing
+            // is unhealthy. Non-blocking, best-effort.
+            spawn_update_check(app.handle().clone());
             // Bootstrap + spawn on a background thread so the window paints
             // immediately. UI subscribes to `sidecar://status` for progress.
             let handle = app.handle().clone();

@@ -774,6 +774,8 @@ export type Settings = {
   disabled_kinds: string[];
   /** When true, do not POST anonymized telemetry to the configured collector. */
   telemetry_opt_out?: boolean;
+  /** Opt-in (default off): forward error/crash diagnostics to the collector. */
+  remote_monitoring?: boolean;
   ambient_sensing_enabled?: boolean;
   /** Continuous mic + local transcripts; default off. */
   full_listening_enabled?: boolean;
@@ -999,6 +1001,39 @@ export async function fetchDiagnosticsLogTextAtBase(apiBase: string, lines = 400
 
 export function loopbackApiBaseForPort(port: number): string {
   return `http://127.0.0.1:${port}`;
+}
+
+/**
+ * Best-effort: report a UI error/crash to the sidecar, which forwards it to the
+ * remote collector only when the user has opted into monitoring. Swallows all
+ * failures — a reporter must never throw into an error handler or boundary.
+ * The sidecar may not be reachable (this is often called when things are broken),
+ * so a short timeout keeps it from hanging.
+ */
+export async function reportClientError(
+  message: string,
+  detail?: string,
+  context?: Record<string, unknown>,
+): Promise<void> {
+  try {
+    const cfg = await getConfig();
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 3000);
+    await fetch(`${cfg.api_base}/diagnostics/client-log`, {
+      method: "POST",
+      headers: authHeaders(cfg),
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        source: "desktop",
+        message: String(message).slice(0, 600),
+        detail: detail ? String(detail).slice(0, 4000) : undefined,
+        context,
+      }),
+    }).catch(() => {});
+    clearTimeout(t);
+  } catch {
+    /* ignore — reporting is best-effort */
+  }
 }
 
 // --- Second brain / butler API ---

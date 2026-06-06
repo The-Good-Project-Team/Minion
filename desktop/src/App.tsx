@@ -179,6 +179,23 @@ export function App() {
     }
   }, []);
 
+  // Coalesce the per-file refreshes the ingest stream triggers. The backend
+  // emits one `source_updated` per file; on a big corpus (100k+ chunks) calling
+  // the full `load()` (3 fetches + a 500-row setState) on every event thrashed
+  // the WebView heap until macOS killed the renderer → blank white window.
+  // Debounce to a single trailing refresh; live counts still tick via e.counts.
+  const loadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleLoad = useCallback(() => {
+    if (loadTimer.current) clearTimeout(loadTimer.current);
+    loadTimer.current = setTimeout(() => {
+      loadTimer.current = null;
+      void load();
+    }, 1500);
+  }, [load]);
+  useEffect(() => () => {
+    if (loadTimer.current) clearTimeout(loadTimer.current);
+  }, []);
+
   // Poll graph stats while a build is in progress so the dashboard ticks live.
   useEffect(() => {
     if (!graphStats?.building) return;
@@ -214,7 +231,7 @@ export function App() {
             const path = String((e.result as any)?.path ?? "");
             if (path) pushFeed(path, "indexed", "added");
             if (e.counts) setCounts(e.counts);
-            void load();
+            scheduleLoad();
             break;
           }
           case "tree_done":
@@ -225,9 +242,15 @@ export function App() {
       (s) => setConn(s),
     ).then((c) => (cleanup = c));
     return () => cleanup?.();
-  }, [load]);
+  }, [load, scheduleLoad]);
 
   useEffect(() => {
+    // A clean mount means we're past any crash loop; reset the reload guard.
+    try {
+      sessionStorage.removeItem("minion:reload-tries");
+    } catch {
+      /* ignore */
+    }
     void load();
     void onSidecarStatus((s) => setSidecar(s));
   }, [load]);

@@ -133,6 +133,11 @@ def _default() -> Dict[str, Any]:
     return {
         "disabled_kinds": [],
         "telemetry_opt_out": False,
+        # Opt-in (default off): ship error/crash diagnostics from the sidecar AND
+        # the desktop UI to the remote collector so we can see what's breaking on
+        # a user's machine (e.g. the white-screen renderer crash). Separate from
+        # the opt-out aggregate telemetry above.
+        "remote_monitoring": False,
         "ambient_sensing_enabled": True,
         "full_listening_enabled": False,
         "capture_on_empty_ax": False,
@@ -174,6 +179,7 @@ def _normalize(data: Dict[str, Any]) -> Dict[str, Any]:
     out.pop("analytics_opt_in", None)
     tot = out.get("telemetry_opt_out")
     out["telemetry_opt_out"] = bool(tot) if tot is not None else False
+    out["remote_monitoring"] = bool(out.get("remote_monitoring"))
     out["ambient_sensing_enabled"] = bool(out.get("ambient_sensing_enabled", True))
     raw_ac = out.get("ambient_collectors") or {}
     merged = dict(DEFAULT_AMBIENT_COLLECTORS)
