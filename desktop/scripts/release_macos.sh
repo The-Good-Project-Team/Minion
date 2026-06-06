@@ -40,11 +40,13 @@ out="$desktop_dir/release/$tag"
 mkdir -p "$out"
 echo "── Minion release $tag → $out  (repo: $repo)"
 
-declare -A ARCH_TRIPLE=( [aarch64]="aarch64-apple-darwin" [x86_64]="x86_64-apple-darwin" )
-declare -A ARCH_LABEL=( [aarch64]="AppleSilicon" [x86_64]="Intel" )
+# bash 3.2 (macOS default) has no associative arrays — use case helpers.
+arch_triple() { case "$1" in aarch64) echo "aarch64-apple-darwin";; x86_64) echo "x86_64-apple-darwin";; esac; }
+arch_label()  { case "$1" in aarch64) echo "AppleSilicon";; x86_64) echo "Intel";; esac; }
+
 for arch in $arches; do
-  triple="${ARCH_TRIPLE[$arch]}"
-  label="${ARCH_LABEL[$arch]}"
+  triple="$(arch_triple "$arch")"
+  label="$(arch_label "$arch")"
   echo "── building $arch ($triple)…"
   ( cd "$desktop_dir" && bunx tauri build --target "$triple" )
 
@@ -62,16 +64,13 @@ for arch in $arches; do
   cp "$sig" "$out/$asset.sig"
   # Human-friendly double-clickable zip too (app + install guide).
   bash "$here/package_macos_zip.sh" "$app" "$out/Minion-$version-macOS-$label.zip" || true
-
-  url="https://github.com/$repo/releases/download/$tag/$asset"
-  latest_args+=( "--$ARCH_PLATKEY[$arch]-url" )  # placeholder; replaced below
 done
 
 # Build latest.json (write_latest_json.py lives in the sidecar tree).
 wlj="$desktop_dir/scripts/write_latest_json.py"
 gen=( python3 "$wlj" --version "$version" --notes "Minion $version — white-screen fix, auto-update, opt-in monitoring" )
 for arch in $arches; do
-  label="${ARCH_LABEL[$arch]}"
+  label="$(arch_label "$arch")"
   asset="Minion-$version-macOS-$label.app.tar.gz"
   url="https://github.com/$repo/releases/download/$tag/$asset"
   if [[ "$arch" == "aarch64" ]]; then
