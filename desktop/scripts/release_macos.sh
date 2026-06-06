@@ -84,7 +84,7 @@ echo "── wrote $out/latest.json"
 cat "$out/latest.json"
 
 if [[ "${PUBLISH:-}" == "1" ]]; then
-  echo "── publishing GitHub release $tag…"
+  echo "-- publishing GitHub release ${tag} ..."
   assets=( "$out"/Minion-*.app.tar.gz "$out/latest.json" "$out"/Minion-*.zip )
   if gh release view "$tag" -R "$repo" >/dev/null 2>&1; then
     gh release upload "$tag" "${assets[@]}" -R "$repo" --clobber

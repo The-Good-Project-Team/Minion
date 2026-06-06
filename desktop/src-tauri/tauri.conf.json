@@ -50,7 +50,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZGRUM1OTMwOUJEOEIwNDUKUldSRnNOaWJNRm5zLzAzTWxKTytYUVRIRmtiRnlyd1pSdmZORUUwUFNjM1puTC8rUkZucXEyU0UK",
       "endpoints": [
-        "https://github.com/reif-is-a-foofie/Minion/releases/latest/download/latest.json"
+        "https://github.com/goodindustries/Minion/releases/latest/download/latest.json"
       ]
     }
   }
