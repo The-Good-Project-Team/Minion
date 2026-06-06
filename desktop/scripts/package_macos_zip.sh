@@ -9,8 +9,9 @@ set -euo pipefail
 # The guide ships *inside* the zip so a non-technical recipient sees the app and
 # the instructions side by side. Run after `tauri build` + the sanitize step.
 #
-# Usage: package_macos_zip.sh [/path/to/Minion 2.app]
-#   With no arg, auto-detects the freshly built bundle.
+# Usage: package_macos_zip.sh [/path/to/Minion 2.app] [/path/to/output.zip]
+#   arg1: the built .app (auto-detected if omitted/invalid)
+#   arg2: output zip path (defaults to "<app dir>/Minion 2.zip")
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 desktop_dir="$(cd "$here/.." && pwd)"
@@ -49,7 +50,8 @@ mkdir -p "$folder"
 ditto "$app_path" "$folder/Minion 2.app"
 cp "$guide" "$folder/Install Minion 2.rtf"
 
-out_zip="$(dirname "$app_path")/Minion 2.zip"
+out_zip="${2:-$(dirname "$app_path")/Minion 2.zip}"
+mkdir -p "$(dirname "$out_zip")"
 rm -f "$out_zip"
 # --keepParent so the archive expands to the "Minion 2" folder, not loose files.
 ditto -c -k --sequesterRsrc --keepParent "$folder" "$out_zip"
