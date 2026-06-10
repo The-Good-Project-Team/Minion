@@ -17,7 +17,9 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 
 import {
+  apiErrorDetail,
   connectClaudeDesktop,
+  fetchClaudeDesktopStatus,
   fetchGraphStats,
   fetchSources,
   fetchStatus,
@@ -29,6 +31,7 @@ import {
   reindexEmbeddings,
   revealInFinder,
   type Active,
+  type ClaudeDesktopStatus,
   type ConnState,
   type EventMsg,
   type GraphStats,
@@ -56,6 +59,13 @@ function localFlag(id: string): boolean {
 function setLocalFlag(id: string) {
   try {
     localStorage.setItem(FLAG_PREFIX + id, "1");
+  } catch {
+    /* ignore */
+  }
+}
+function clearLocalFlag(id: string) {
+  try {
+    localStorage.removeItem(FLAG_PREFIX + id);
   } catch {
     /* ignore */
   }
@@ -159,14 +169,17 @@ export function App() {
   const [graphBusy, setGraphBusy] = useState(false);
   const [graphStats, setGraphStats] = useState<GraphStats | null>(null);
   const [reindexMsg, setReindexMsg] = useState("");
+  const [claudeStatus, setClaudeStatus] = useState<ClaudeDesktopStatus | null>(null);
+  const [claudeMsg, setClaudeMsg] = useState("");
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
 
   const load = useCallback(async () => {
     try {
-      const [st, srcs, gs] = await Promise.all([
+      const [st, srcs, gs, claude] = await Promise.all([
         fetchStatus().catch(() => null),
         fetchSources({ limit: 500 }).then((r) => r.sources).catch(() => [] as Source[]),
         fetchGraphStats().catch(() => null),
+        fetchClaudeDesktopStatus().catch(() => null),
       ]);
       if (st) {
         setCounts(st.counts);
@@ -174,6 +187,10 @@ export function App() {
       }
       setSources(srcs);
       if (gs) setGraphStats(gs);
+      if (claude) {
+        setClaudeStatus(claude);
+        if (!claude.connected) clearLocalFlag("claude");
+      }
     } catch {
       /* ignore */
     }
@@ -210,7 +227,10 @@ export function App() {
     let cleanup: (() => void) | undefined;
     void openEvents(
       (e: EventMsg) => {
-        if ("active" in e && e.active) setActive(e.active);
+        if ("active" in e && e.active) {
+          const a = e.active;
+          setActive(a.total > 0 ? a : EMPTY_ACTIVE);
+        }
         switch (e.type) {
           case "snapshot":
           case "ready":
@@ -235,6 +255,8 @@ export function App() {
             break;
           }
           case "tree_done":
+            setFeed([]);
+            setActive(EMPTY_ACTIVE);
             void load();
             break;
         }
@@ -393,18 +415,32 @@ export function App() {
       },
       {
         id: "claude",
-        label: "Connect Claude Desktop (MCP)",
-        detail: localFlag("claude") ? "Claude can read your memory" : "Let Claude query your memory",
-        done: localFlag("claude"),
+        label: "Connect Claude Desktop (optional)",
+        detail:
+          claudeMsg ||
+          (claudeStatus?.connected
+            ? "Claude can read your memory"
+            : claudeStatus?.configured && !claudeStatus?.installed
+              ? "Config saved — install Claude Desktop to use it"
+              : "Optional — lets Claude query your memory via MCP"),
+        done: Boolean(claudeStatus?.connected),
         action: {
-          label: "Connect",
+          label: claudeStatus?.connected ? "Connected" : "Connect",
           run: async () => {
+            setClaudeMsg("");
             try {
-              await connectClaudeDesktop({});
+              const r = await connectClaudeDesktop({});
               setLocalFlag("claude");
-              setSources((s) => [...s]); // nudge re-render
-            } catch {
-              /* surfaced by status */
+              setClaudeStatus({
+                installed: r.installed,
+                configured: r.configured,
+                connected: r.installed && r.configured,
+                config_path: r.config_path,
+              });
+              setClaudeMsg(r.message);
+            } catch (e) {
+              clearLocalFlag("claude");
+              setClaudeMsg(apiErrorDetail(e));
             }
           },
         },
@@ -421,7 +457,7 @@ export function App() {
         action: counts.sources > 0 ? { label: graphBusy ? "Rebuilding…" : "Rebuild", run: runGraphBuild } : undefined,
       },
     ];
-  }, [name, counts.sources, sources, graphMsg, graphBusy]);
+  }, [name, counts.sources, sources, graphMsg, graphBusy, claudeStatus, claudeMsg]);
 
   const doneCount = checklist.filter((c) => c.done).length;
   const pct = active.total > 0 ? Math.round((active.done / active.total) * 100) : 0;
@@ -572,8 +608,17 @@ export function App() {
                 {ingesting ? "Building your memory" : "Memory up to date"}
               </span>
               <span className="text-muted-foreground">
-                {active.done}/{active.total} learned
-                {active.skipped > 0 && <span className="ml-1 text-slate-400">· {active.skipped} skipped</span>}
+                {active.total > 0 ? (
+                  <>
+                    {active.done}/{active.total} learned
+                    {active.skipped > 0 && <span className="ml-1 text-slate-400">· {active.skipped} skipped</span>}
+                  </>
+                ) : (
+                  <>
+                    {counts.sources} source{counts.sources === 1 ? "" : "s"} indexed
+                    {active.skipped > 0 && <span className="ml-1 text-slate-400">· {active.skipped} skipped</span>}
+                  </>
+                )}
               </span>
             </div>
             <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
@@ -625,12 +670,23 @@ export function App() {
                 )}
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">{item.label}</p>
-                  <p className="truncate text-xs text-muted-foreground">{item.detail}</p>
+                  <p
+                    className={`text-xs ${
+                      item.id === "claude" && claudeMsg && !claudeStatus?.connected
+                        ? "text-amber-700 dark:text-amber-400"
+                        : item.id === "claude" && claudeStatus?.connected
+                          ? "text-emerald-700 dark:text-emerald-400"
+                          : "truncate text-muted-foreground"
+                    }`}
+                  >
+                    {item.detail}
+                  </p>
                 </div>
                 {item.action && (
                   <button
                     onClick={() => void item.action!.run()}
-                    className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-xs hover:bg-accent"
+                    disabled={item.id === "claude" && Boolean(claudeStatus?.connected)}
+                    className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-xs hover:bg-accent disabled:cursor-default disabled:opacity-60"
                   >
                     {item.action.label}
                   </button>

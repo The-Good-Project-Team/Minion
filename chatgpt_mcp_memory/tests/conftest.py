@@ -243,6 +243,7 @@ def _spawn_sidecar(
     env["MINION_DISABLE_AMBIENT_SCHEDULER"] = "1"
     env["MINION_DISABLE_PLAYWRIGHT_DOM"] = "1"
     env["CLAUDE_DESKTOP_CONFIG"] = str(claude_cfg_path)
+    env["MINION_SKIP_CLAUDE_APP_CHECK"] = "1"
     env["PYTHONPATH"] = str(API_SCRIPT.parent) + os.pathsep + env.get("PYTHONPATH", "")
 
     process = subprocess.Popen(
