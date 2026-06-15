@@ -451,6 +451,18 @@ def test_connect_claude_desktop_writes_config(sidecar) -> None:
     assert entry["env"]["MINION_DATA_DIR"] == str(sidecar.data_dir)
 
 
+def test_connect_claude_desktop_status(sidecar) -> None:
+    body = sidecar.get("/connect/claude-desktop/status").json()
+    assert body["installed"] is True  # skipped in test env
+    assert body["configured"] is False
+    assert body["connected"] is False
+
+    sidecar.post("/connect/claude-desktop", {}).raise_for_status()
+    body = sidecar.get("/connect/claude-desktop/status").json()
+    assert body["configured"] is True
+    assert body["connected"] is True
+
+
 def test_connect_claude_desktop_merges_existing(sidecar) -> None:
     """An existing config with other servers must be preserved + backed up."""
     existing = {

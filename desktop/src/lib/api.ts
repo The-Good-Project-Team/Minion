@@ -629,16 +629,45 @@ export async function ingestText(body: { title?: string; text: string }): Promis
   });
 }
 
+export type ClaudeDesktopStatus = {
+  installed: boolean;
+  configured: boolean;
+  connected: boolean;
+  config_path: string | null;
+};
+
+export async function fetchClaudeDesktopStatus(): Promise<ClaudeDesktopStatus> {
+  return apiFetch("/connect/claude-desktop/status");
+}
+
 export async function connectClaudeDesktop(body: { server_name?: string; config_path?: string } = {}): Promise<{
   config_path: string;
   backup_path: string | null;
   server_name: string;
   restart_required: boolean;
+  installed: boolean;
+  configured: boolean;
+  message: string;
 }> {
   return apiFetch("/connect/claude-desktop", {
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/** Pull a human-readable message out of apiFetch's `status text: {"detail":...}` errors. */
+export function apiErrorDetail(e: unknown): string {
+  if (!(e instanceof Error)) return String(e);
+  const jsonTail = e.message.match(/:\s*(\{[\s\S]*\})\s*$/);
+  if (jsonTail) {
+    try {
+      const parsed = JSON.parse(jsonTail[1]) as { detail?: unknown };
+      if (typeof parsed.detail === "string" && parsed.detail.trim()) return parsed.detail.trim();
+    } catch {
+      /* ignore */
+    }
+  }
+  return e.message;
 }
 
 export async function deleteSource(body: {

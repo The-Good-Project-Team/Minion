@@ -266,6 +266,22 @@ def _schedule_broadcast(event: Dict[str, Any]) -> None:
     asyncio.run_coroutine_threadsafe(_broadcast(event), loop)
 
 
+def _public_active() -> Dict[str, Any]:
+    """Snapshot for /status and WS clients.
+
+    When no batch is in flight (total <= 0), stale file_done events can leave
+    done > 0 without a matching total; never expose that pair to the UI.
+    """
+    idle = {"root": None, "total": 0, "done": 0, "added": 0, "skipped": 0}
+    with State.active_lock:
+        active = dict(State.active)
+        if int(active.get("total") or 0) <= 0:
+            if any(int(active.get(k) or 0) > 0 for k in ("done", "added", "skipped")):
+                State.active = dict(idle)
+            return dict(idle)
+    return active
+
+
 def _watcher_event_bridge(kind: str, payload: Dict[str, Any]) -> None:
     """Translate watcher/reconcile events into the WebSocket schema the UI expects."""
     if kind == "batch_started":
@@ -298,11 +314,15 @@ def _watcher_event_bridge(kind: str, payload: Dict[str, Any]) -> None:
     elif kind == "file_done":
         skipped = bool(payload.get("skipped"))
         with State.active_lock:
-            State.active["done"] = int(payload.get("index", State.active["done"]))
-            if skipped:
-                State.active["skipped"] += 1
-            elif payload.get("source_id"):
-                State.active["added"] += 1
+            if int(State.active.get("total") or 0) <= 0:
+                snap = {"root": None, "total": 0, "done": 0, "added": 0, "skipped": 0}
+            else:
+                State.active["done"] = int(payload.get("index", State.active["done"]))
+                if skipped:
+                    State.active["skipped"] += 1
+                elif payload.get("source_id"):
+                    State.active["added"] += 1
+                snap = dict(State.active)
         if not skipped:
             try:
                 from librarian_queue import enqueue_graph_infer
@@ -315,16 +335,20 @@ def _watcher_event_bridge(kind: str, payload: Dict[str, Any]) -> None:
             "type": "ingest_skipped" if skipped else "source_updated",
             "result": payload,
             "counts": _counts(),
-            "active": dict(State.active),
+            "active": snap,
         })
     elif kind == "file_failed":
         with State.active_lock:
-            State.active["done"] = int(payload.get("index", State.active["done"]))
-            State.active["skipped"] += 1
+            if int(State.active.get("total") or 0) <= 0:
+                snap = {"root": None, "total": 0, "done": 0, "added": 0, "skipped": 0}
+            else:
+                State.active["done"] = int(payload.get("index", State.active["done"]))
+                State.active["skipped"] += 1
+                snap = dict(State.active)
         _schedule_broadcast({
             "type": "ingest_failed",
             "path": payload.get("path"),
-            "active": dict(State.active),
+            "active": snap,
         })
     elif kind == "batch_done":
         snap = None
@@ -1062,8 +1086,7 @@ def reconcile_endpoint(body: ReconcileBody) -> Dict[str, Any]:
 
 @app.get("/status")
 def status() -> Dict[str, Any]:
-    with State.active_lock:
-        active = dict(State.active)
+    active = _public_active()
     return {
         "version": __version__,
         "data_dir": str(State.data_dir),
@@ -3387,6 +3410,45 @@ def _default_claude_cfg_path() -> Optional[Path]:
     return Path.home() / ".config/Claude/claude_desktop_config.json"
 
 
+def _claude_desktop_installed() -> bool:
+    """True when the Claude Desktop app appears installed on this machine."""
+    if os.environ.get("MINION_SKIP_CLAUDE_APP_CHECK"):
+        return True
+    if sys.platform == "darwin":
+        return any(
+            p.is_dir()
+            for p in (
+                Path("/Applications/Claude.app"),
+                Path.home() / "Applications" / "Claude.app",
+            )
+        )
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            exe = Path(local) / "AnthropicClaude" / "claude.exe"
+            if exe.is_file():
+                return True
+        pf = os.environ.get("ProgramFiles", "")
+        if pf:
+            exe = Path(pf) / "Claude" / "claude.exe"
+            if exe.is_file():
+                return True
+        return False
+    return False
+
+
+def _claude_mcp_configured(cfg_path: Path, server_name: str = "minion") -> bool:
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return False
+        config = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return False
+    servers = config.get("mcpServers") if isinstance(config, dict) else None
+    return isinstance(servers, dict) and server_name in servers
+
+
 def _mcp_build_sha() -> str:
     """Short content hash of everything that shapes Claude's view of Minion:
     tool descriptions (mcp_server.py) and the retrieval policy (injected into
@@ -3511,10 +3573,34 @@ def _refresh_mcp_on_launch() -> None:
         )
 
 
+@app.get("/connect/claude-desktop/status")
+def connect_claude_desktop_status() -> Dict[str, Any]:
+    """Whether Claude Desktop is installed and Minion is registered in its MCP config."""
+    cfg_path = _default_claude_cfg_path()
+    installed = _claude_desktop_installed()
+    configured = bool(cfg_path and _claude_mcp_configured(cfg_path))
+    return {
+        "installed": installed,
+        "configured": configured,
+        "connected": installed and configured,
+        "config_path": str(cfg_path) if cfg_path else None,
+    }
+
+
 @app.post("/connect/claude-desktop")
 def connect_claude_desktop(body: ConnectBody) -> Dict[str, Any]:
     """Merge the Minion MCP entry into Claude Desktop's config. Same behaviour
     as `minion mcp-config` — lets the UI do it with one click."""
+    if not _claude_desktop_installed():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Claude Desktop is not installed on this Mac. "
+                "Install it from https://claude.ai/download, then click Connect again. "
+                "Minion still works on its own — or use LAN MCP with Cursor and other clients."
+            ),
+        )
+
     if body.config_path:
         cfg_path = Path(body.config_path).expanduser().resolve()
     else:
@@ -3533,11 +3619,20 @@ def connect_claude_desktop(body: ConnectBody) -> Dict[str, Any]:
         # Avoid leaking stack traces into the UI; keep it actionable.
         raise HTTPException(status_code=500, detail=f"connect failed: {e.__class__.__name__}: {e}")
 
+    restart_required = result["action"] != "noop"
+    message = (
+        "Minion is connected. Fully quit and reopen Claude Desktop so it picks up memory tools."
+        if restart_required
+        else "Claude Desktop is already connected to Minion."
+    )
     return {
         "config_path": result["config_path"],
         "backup_path": result.get("backup_path"),
         "server_name": result["server_name"],
-        "restart_required": result["action"] != "noop",
+        "restart_required": restart_required,
+        "installed": True,
+        "configured": True,
+        "message": message,
     }
 
 
@@ -3548,12 +3643,10 @@ async def events_ws(ws: WebSocket) -> None:
         State.subscribers.add(ws)
     # Send a snapshot on connect so the UI hydrates without a separate fetch.
     try:
-        with State.active_lock:
-            active = dict(State.active)
         await ws.send_json({
             "type": "snapshot",
             "counts": _counts(),
-            "active": active,
+            "active": _public_active(),
         })
         while True:
             # We don't expect client messages; drain to keep the connection alive.
