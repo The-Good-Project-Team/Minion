@@ -30,6 +30,7 @@ import {
   openEvents,
   reindexEmbeddings,
   revealInFinder,
+  resolveRevealPath,
   type Active,
   type ClaudeDesktopStatus,
   type ConnState,
@@ -171,6 +172,7 @@ export function App() {
   const [reindexMsg, setReindexMsg] = useState("");
   const [claudeStatus, setClaudeStatus] = useState<ClaudeDesktopStatus | null>(null);
   const [claudeMsg, setClaudeMsg] = useState("");
+  const [revealError, setRevealError] = useState<string | null>(null);
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
 
   const load = useCallback(async () => {
@@ -387,6 +389,20 @@ export function App() {
       setReindexMsg(`Re-embedding under ${r.model}. ${r.note ?? ""}`);
     } catch (e) {
       setReindexMsg(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function handleReveal(sourcePath: string) {
+    setRevealError(null);
+    try {
+      const resolved = await resolveRevealPath(sourcePath);
+      if (resolved.error) {
+        setRevealError(resolved.error);
+        return;
+      }
+      await revealInFinder(resolved.reveal_path);
+    } catch (e) {
+      setRevealError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -706,13 +722,16 @@ export function App() {
         {sources.length > 0 && (
           <section className="mt-6">
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">Recent sources</h2>
+            {revealError && (
+              <p className="mb-2 text-xs text-amber-700 dark:text-amber-400">Reveal failed: {revealError}</p>
+            )}
             <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-card">
               {sources.slice(0, 12).map((s) => (
                 <li key={s.source_id} className="flex items-center gap-3 px-4 py-2 text-sm">
                   <span className="truncate">{baseName(s.path)}</span>
                   <span className="ml-auto shrink-0 text-xs text-muted-foreground">{s.kind}</span>
                   <button
-                    onClick={() => void revealInFinder(s.path)}
+                    onClick={() => void handleReveal(s.path)}
                     className="shrink-0 text-xs text-primary hover:underline"
                   >
                     reveal

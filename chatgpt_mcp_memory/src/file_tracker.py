@@ -129,3 +129,26 @@ def _append_ambient_event(data_dir: Path, event: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def find_original_path(data_dir: Path, staged_path: Path) -> Optional[str]:
+    """Look up the original path for a given staged path from file_tracking.jsonl.
+    
+    Used to resolve reveal paths when temporary ingest deletes the inbox copy.
+    Returns None if no matching entry is found.
+    """
+    staged = Path(staged_path).expanduser().resolve()
+    path = Path(data_dir) / TRACKING_JSONL
+    if not path.is_file():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        row_staged = row.get("staged_path")
+        if row_staged and Path(row_staged).expanduser().resolve() == staged:
+            original = row.get("original_path")
+            if original:
+                return str(original)
+    return None

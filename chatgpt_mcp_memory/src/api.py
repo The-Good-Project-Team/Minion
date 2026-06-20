@@ -1348,6 +1348,41 @@ def list_sources_endpoint(
     return {"sources": rows, "counts": _counts()}
 
 
+@app.get("/sources/reveal-path")
+def reveal_path(path: str) -> Dict[str, Any]:
+    """Resolve the actual path to reveal in Finder.
+    
+    If the source.path exists, use it. Otherwise, look up the original path
+    from file_tracking.jsonl (for temporary ingests where the inbox copy was deleted).
+    """
+    from file_tracker import find_original_path
+    
+    p = Path(path).expanduser().resolve()
+    if p.exists():
+        return {"reveal_path": str(p), "resolved_via": "direct"}
+    
+    # Path doesn't exist - try to find original from file_tracking.jsonl
+    original = find_original_path(State.data_dir, p)
+    if original:
+        orig_path = Path(original).expanduser().resolve()
+        if orig_path.exists():
+            return {"reveal_path": str(orig_path), "resolved_via": "file_tracking"}
+        else:
+            return {
+                "reveal_path": str(orig_path),
+                "resolved_via": "file_tracking",
+                "exists": False,
+                "error": "original file also missing",
+            }
+    
+    return {
+        "reveal_path": str(p),
+        "resolved_via": "none",
+        "exists": False,
+        "error": "path not found and no tracking record",
+    }
+
+
 @app.get("/sources/{source_id}")
 def source_info(source_id: str) -> Dict[str, Any]:
     src = get_source(State.conn(), source_id)
