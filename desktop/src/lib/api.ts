@@ -962,6 +962,18 @@ export async function revealInFinder(path: string): Promise<void> {
   await invoke("reveal_in_finder", { path });
 }
 
+export type RevealPathResponse = {
+  reveal_path: string;
+  resolved_via: "direct" | "file_tracking" | "none";
+  exists?: boolean;
+  error?: string;
+};
+
+export async function resolveRevealPath(path: string): Promise<RevealPathResponse> {
+  const q = new URLSearchParams({ path });
+  return apiFetch(`/sources/reveal-path?${q}`);
+}
+
 /** Loopback Minion sidecar discovered via GET /capabilities. */
 export type DiagnosticsInstance = {
   port: number;
