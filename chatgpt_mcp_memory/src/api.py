@@ -3445,6 +3445,13 @@ def _default_claude_cfg_path() -> Optional[Path]:
     return Path.home() / ".config/Claude/claude_desktop_config.json"
 
 
+def _default_cursor_cfg_path() -> Optional[Path]:
+    env = os.environ.get("CURSOR_MCP_CONFIG")
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path.home() / ".cursor" / "mcp.json"
+
+
 def _claude_desktop_installed() -> bool:
     """True when the Claude Desktop app appears installed on this machine."""
     if os.environ.get("MINION_SKIP_CLAUDE_APP_CHECK"):
@@ -3472,7 +3479,47 @@ def _claude_desktop_installed() -> bool:
     return False
 
 
+def _cursor_installed() -> bool:
+    """True when Cursor appears installed on this machine."""
+    if os.environ.get("MINION_SKIP_CURSOR_APP_CHECK"):
+        return True
+    if sys.platform == "darwin":
+        return any(
+            p.is_dir()
+            for p in (
+                Path("/Applications/Cursor.app"),
+                Path.home() / "Applications" / "Cursor.app",
+            )
+        )
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            exe = Path(local) / "Cursor" / "Cursor.exe"
+            if exe.is_file():
+                return True
+        pf = os.environ.get("ProgramFiles", "")
+        if pf:
+            exe = Path(pf) / "Cursor" / "Cursor.exe"
+            if exe.is_file():
+                return True
+        return False
+    return False
+
+
 def _claude_mcp_configured(cfg_path: Path, server_name: str = "minion") -> bool:
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return False
+        config = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return False
+    servers = config.get("mcpServers") if isinstance(config, dict) else None
+    return isinstance(servers, dict) and server_name in servers
+
+
+def _cursor_mcp_configured(cfg_path: Path, server_name: str = "minion") -> bool:
+    """Check if Minion is configured in Cursor's MCP config."""
     try:
         raw = cfg_path.read_text(encoding="utf-8")
         if not raw.strip():
@@ -3622,6 +3669,20 @@ def connect_claude_desktop_status() -> Dict[str, Any]:
     }
 
 
+@app.get("/connect/cursor/status")
+def connect_cursor_status() -> Dict[str, Any]:
+    """Whether Cursor is installed and Minion is registered in its MCP config."""
+    cfg_path = _default_cursor_cfg_path()
+    installed = _cursor_installed()
+    configured = bool(cfg_path and _cursor_mcp_configured(cfg_path))
+    return {
+        "installed": installed,
+        "configured": configured,
+        "connected": installed and configured,
+        "config_path": str(cfg_path) if cfg_path else None,
+    }
+
+
 @app.post("/connect/claude-desktop")
 def connect_claude_desktop(body: ConnectBody) -> Dict[str, Any]:
     """Merge the Minion MCP entry into Claude Desktop's config. Same behaviour
@@ -3659,6 +3720,55 @@ def connect_claude_desktop(body: ConnectBody) -> Dict[str, Any]:
         "Minion is connected. Fully quit and reopen Claude Desktop so it picks up memory tools."
         if restart_required
         else "Claude Desktop is already connected to Minion."
+    )
+    return {
+        "config_path": result["config_path"],
+        "backup_path": result.get("backup_path"),
+        "server_name": result["server_name"],
+        "restart_required": restart_required,
+        "installed": True,
+        "configured": True,
+        "message": message,
+    }
+
+
+@app.post("/connect/cursor")
+def connect_cursor(body: ConnectBody) -> Dict[str, Any]:
+    """Merge the Minion MCP entry into Cursor's config. Same behaviour
+    as Claude Desktop connect — lets the UI do it with one click."""
+    if not _cursor_installed():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cursor is not installed on this Mac. "
+                "Install it from https://cursor.sh, then click Connect again. "
+                "Minion still works on its own — or use LAN MCP with other clients."
+            ),
+        )
+
+    if body.config_path:
+        cfg_path = Path(body.config_path).expanduser().resolve()
+    else:
+        cfg_path = _default_cursor_cfg_path()
+        if cfg_path is None:
+            raise HTTPException(status_code=400, detail="could not resolve Cursor config path")
+
+    try:
+        result = _upsert_mcp_entry(cfg_path, body.server_name, create_if_missing=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OSError as e:
+        detail = f"cannot write {cfg_path}: {e.strerror or 'os error'}"
+        raise HTTPException(status_code=403, detail=detail)
+    except Exception as e:
+        # Avoid leaking stack traces into the UI; keep it actionable.
+        raise HTTPException(status_code=500, detail=f"connect failed: {e.__class__.__name__}: {e}")
+
+    restart_required = result["action"] != "noop"
+    message = (
+        "Minion is connected. Fully quit and reopen Cursor so it picks up memory tools."
+        if restart_required
+        else "Cursor is already connected to Minion."
     )
     return {
         "config_path": result["config_path"],

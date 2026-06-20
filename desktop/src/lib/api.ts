@@ -655,6 +655,32 @@ export async function connectClaudeDesktop(body: { server_name?: string; config_
   });
 }
 
+export type CursorStatus = {
+  installed: boolean;
+  configured: boolean;
+  connected: boolean;
+  config_path: string | null;
+};
+
+export async function fetchCursorStatus(): Promise<CursorStatus> {
+  return apiFetch("/connect/cursor/status");
+}
+
+export async function connectCursor(body: { server_name?: string; config_path?: string } = {}): Promise<{
+  config_path: string;
+  backup_path: string | null;
+  server_name: string;
+  restart_required: boolean;
+  installed: boolean;
+  configured: boolean;
+  message: string;
+}> {
+  return apiFetch("/connect/cursor", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 /** Pull a human-readable message out of apiFetch's `status text: {"detail":...}` errors. */
 export function apiErrorDetail(e: unknown): string {
   if (!(e instanceof Error)) return String(e);

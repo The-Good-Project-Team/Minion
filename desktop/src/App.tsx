@@ -19,7 +19,9 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   apiErrorDetail,
   connectClaudeDesktop,
+  connectCursor,
   fetchClaudeDesktopStatus,
+  fetchCursorStatus,
   fetchGraphStats,
   fetchSources,
   fetchStatus,
@@ -34,6 +36,7 @@ import {
   type Active,
   type ClaudeDesktopStatus,
   type ConnState,
+  type CursorStatus,
   type EventMsg,
   type GraphStats,
   type SidecarStatus,
@@ -172,16 +175,19 @@ export function App() {
   const [reindexMsg, setReindexMsg] = useState("");
   const [claudeStatus, setClaudeStatus] = useState<ClaudeDesktopStatus | null>(null);
   const [claudeMsg, setClaudeMsg] = useState("");
+  const [cursorStatus, setCursorStatus] = useState<CursorStatus | null>(null);
+  const [cursorMsg, setCursorMsg] = useState("");
   const [revealError, setRevealError] = useState<string | null>(null);
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
 
   const load = useCallback(async () => {
     try {
-      const [st, srcs, gs, claude] = await Promise.all([
+      const [st, srcs, gs, claude, cursor] = await Promise.all([
         fetchStatus().catch(() => null),
         fetchSources({ limit: 500 }).then((r) => r.sources).catch(() => [] as Source[]),
         fetchGraphStats().catch(() => null),
         fetchClaudeDesktopStatus().catch(() => null),
+        fetchCursorStatus().catch(() => null),
       ]);
       if (st) {
         setCounts(st.counts);
@@ -192,6 +198,10 @@ export function App() {
       if (claude) {
         setClaudeStatus(claude);
         if (!claude.connected) clearLocalFlag("claude");
+      }
+      if (cursor) {
+        setCursorStatus(cursor);
+        if (!cursor.connected) clearLocalFlag("cursor");
       }
     } catch {
       /* ignore */
@@ -462,6 +472,38 @@ export function App() {
         },
       },
       {
+        id: "cursor",
+        label: "Connect Cursor (optional)",
+        detail:
+          cursorMsg ||
+          (cursorStatus?.connected
+            ? "Cursor can read your memory"
+            : cursorStatus?.configured && !cursorStatus?.installed
+              ? "Config saved — install Cursor to use it"
+              : "Optional — lets Cursor query your memory via MCP"),
+        done: Boolean(cursorStatus?.connected),
+        action: {
+          label: cursorStatus?.connected ? "Connected" : "Connect",
+          run: async () => {
+            setCursorMsg("");
+            try {
+              const r = await connectCursor({});
+              setLocalFlag("cursor");
+              setCursorStatus({
+                installed: r.installed,
+                configured: r.configured,
+                connected: r.installed && r.configured,
+                config_path: r.config_path,
+              });
+              setCursorMsg(r.message);
+            } catch (e) {
+              clearLocalFlag("cursor");
+              setCursorMsg(apiErrorDetail(e));
+            }
+          },
+        },
+      },
+      {
         id: "graph",
         label: "Knowledge graph",
         detail:
@@ -692,7 +734,11 @@ export function App() {
                         ? "text-amber-700 dark:text-amber-400"
                         : item.id === "claude" && claudeStatus?.connected
                           ? "text-emerald-700 dark:text-emerald-400"
-                          : "truncate text-muted-foreground"
+                          : item.id === "cursor" && cursorMsg && !cursorStatus?.connected
+                            ? "text-amber-700 dark:text-amber-400"
+                            : item.id === "cursor" && cursorStatus?.connected
+                              ? "text-emerald-700 dark:text-emerald-400"
+                              : "truncate text-muted-foreground"
                     }`}
                   >
                     {item.detail}
@@ -701,7 +747,10 @@ export function App() {
                 {item.action && (
                   <button
                     onClick={() => void item.action!.run()}
-                    disabled={item.id === "claude" && Boolean(claudeStatus?.connected)}
+                    disabled={
+                      (item.id === "claude" && Boolean(claudeStatus?.connected)) ||
+                      (item.id === "cursor" && Boolean(cursorStatus?.connected))
+                    }
                     className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-xs hover:bg-accent disabled:cursor-default disabled:opacity-60"
                   >
                     {item.action.label}
