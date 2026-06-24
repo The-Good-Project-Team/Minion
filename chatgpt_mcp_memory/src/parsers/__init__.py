@@ -171,6 +171,8 @@ ALL_KINDS: Tuple[str, ...] = (
     "code",
     "chatgpt-export",
     "claude-export",
+    "gemini-export",
+    "copilot-export",
     "external",
 )
 
@@ -224,7 +226,7 @@ def choose_parser(path: Path) -> Optional[Tuple[str, str, str]]:
     return None
 
 
-def parse_file(path: Path, *, parser: Optional[str] = None, on_progress=None) -> ParseResult:
+def parse_file(path: Path, *, parser: Optional[str] = None, on_progress=None, cancel_flag: Optional[Dict[str, bool]] = None, existing_conv_ids: Optional[set] = None) -> ParseResult:
     """Dispatch to the right parser. Raises UnsupportedFile if nothing matches.
 
     If the concrete parser's `parse()` function accepts an `on_progress`
@@ -247,13 +249,16 @@ def parse_file(path: Path, *, parser: Optional[str] = None, on_progress=None) ->
     mod = importlib.import_module(module_path)
     fn: ParserFn = getattr(mod, fn_name)
     kwargs = {}
-    if on_progress is not None:
-        try:
-            sig = inspect.signature(fn)
-            if "on_progress" in sig.parameters:
-                kwargs["on_progress"] = on_progress
-        except (TypeError, ValueError):
-            pass
+    try:
+        sig = inspect.signature(fn)
+        if on_progress is not None and "on_progress" in sig.parameters:
+            kwargs["on_progress"] = on_progress
+        if cancel_flag is not None and "cancel_flag" in sig.parameters:
+            kwargs["cancel_flag"] = cancel_flag
+        if existing_conv_ids is not None and "existing_conv_ids" in sig.parameters:
+            kwargs["existing_conv_ids"] = existing_conv_ids
+    except (TypeError, ValueError):
+        pass
     result = fn(path, **kwargs)
     if not result.kind or result.kind == "unknown":
         result.kind = kind

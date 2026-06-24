@@ -84,7 +84,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from fastembed_cache import fastembed_cache_dir, register_fastembed_data_dir
-from ingest import ingest_file, ingest_webhook_payload, _looks_like_chatgpt_export
+from ingest import ingest_file, ingest_webhook_payload, _looks_like_chatgpt_export, _looks_like_claude_export, _looks_like_gemini_export, _looks_like_copilot_export
+from parsers.chatgpt_export import validate_export_structure, ExportValidationError
 from parser_extensions import manifest_path
 from parsers import ALL_KINDS, load_user_extensions, supported_extensions, user_extension_mappings
 from settings import apply_settings, load_settings, save_settings
@@ -191,6 +192,9 @@ class State:
     active_lock: threading.Lock = threading.Lock()
     # Set when connect/query fails; cleared on successful /status probe.
     db_error: Optional[str] = None
+    # Cancel flags for active ingest operations (path -> cancel_flag dict)
+    cancel_flags: Dict[str, Dict[str, bool]] = {}
+    cancel_flags_lock: threading.Lock = threading.Lock()
 
     @classmethod
     def conn(cls) -> sqlite3.Connection:
@@ -704,6 +708,15 @@ class IngestBody(BaseModel):
     move: bool = False  # if True, move into inbox; else copy
     recursive: bool = True  # used when `path` is a directory
     temporary: bool = False  # remove staged inbox copy after indexing; original remains tracked
+    refresh: bool = False  # for ChatGPT exports: only add new conversations (skip duplicates)
+
+
+class ValidateExportBody(BaseModel):
+    path: str
+
+
+class CancelIngestBody(BaseModel):
+    path: str
 
 
 class IngestTextBody(BaseModel):
@@ -3131,6 +3144,10 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
         # a duplicate dir-ingest from here would race the watcher on the
         # same source_id and blank out the DB on commit-collision.
         if _looks_like_chatgpt_export(inbox_root):
+            # Register cancel flag for this path
+            with State.cancel_flags_lock:
+                State.cancel_flags[str(inbox_root)] = {"cancelled": False}
+            
             await _broadcast({
                 "type": "ingest_started",
                 "path": str(inbox_root),
@@ -3163,7 +3180,7 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
             def _work_one(p: Path) -> Dict[str, Any]:
                 conn = connect(State.db_path)
                 try:
-                    res = ingest_file(conn, p)
+                    res = ingest_file(conn, p, refresh=body.refresh)
                     return {
                         "path": res.path,
                         "source_id": res.source_id,
@@ -3262,7 +3279,7 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
         def _work() -> Dict[str, Any]:
             conn = connect(State.db_path)
             try:
-                res = ingest_file(conn, dest)
+                res = ingest_file(conn, dest, refresh=body.refresh)
                 return {
                     "path": res.path,
                     "source_id": res.source_id,
@@ -3300,6 +3317,92 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
     }
 
 
+@app.post("/ingest/validate")
+async def validate_export_endpoint(body: ValidateExportBody) -> Dict[str, Any]:
+    """Validate a ChatGPT or Claude export structure before ingestion.
+    
+    Returns validation errors with file paths and line numbers.
+    Empty errors list means the export is valid.
+    """
+    src_path = Path(body.path).expanduser().resolve()
+    if not src_path.exists():
+        raise HTTPException(status_code=404, detail=f"path not found: {src_path}")
+
+    if not src_path.is_dir():
+        raise HTTPException(status_code=400, detail="path must be a directory (export)")
+
+    # Detect export type
+    export_type = None
+    if _looks_like_chatgpt_export(src_path):
+        export_type = "chatgpt-export"
+    elif _looks_like_claude_export(src_path):
+        export_type = "claude-export"
+    elif _looks_like_gemini_export(src_path):
+        export_type = "gemini-export"
+    elif _looks_like_copilot_export(src_path):
+        export_type = "copilot-export"
+    else:
+        return {
+            "valid": False,
+            "errors": [{
+                "file_path": str(src_path),
+                "line_number": None,
+                "message": "Not a recognized export (expected conversations*.json for ChatGPT, Claude, Gemini, or Copilot)"
+            }],
+            "export_type": None
+        }
+
+    # Validate based on export type
+    if export_type == "chatgpt-export":
+        errors = validate_export_structure(src_path)
+    elif export_type == "gemini-export":
+        # Gemini exports have simpler validation - just check for conversation JSON files
+        errors = []
+        if not list(src_path.glob("conversations.json")) and not list(src_path.glob("conversation*.json")):
+            errors.append({
+                "file_path": str(src_path),
+                "line_number": None,
+                "message": "No conversations.json or conversation*.json found"
+            })
+    elif export_type == "copilot-export":
+        # Copilot exports have simpler validation - just check for conversation JSON files
+        errors = []
+        if not list(src_path.glob("conversations.json")) and not list(src_path.glob("copilot*.json")) and not list(src_path.glob("conversation*.json")):
+            errors.append({
+                "file_path": str(src_path),
+                "line_number": None,
+                "message": "No conversations.json, copilot*.json, or conversation*.json found"
+            })
+    else:
+        # Claude exports have simpler validation - just check for conversations.json
+        errors = []
+        if not list(src_path.glob("conversations.json")) and not list(src_path.glob("conversations-*.json")):
+            errors.append({
+                "file_path": str(src_path),
+                "line_number": None,
+                "message": "No conversations.json or conversations-*.json found"
+            })
+
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "export_type": export_type
+    }
+
+
+@app.post("/ingest/cancel")
+async def cancel_ingest_endpoint(body: CancelIngestBody) -> Dict[str, Any]:
+    """Cancel an active ingest operation by path."""
+    src_path = str(Path(body.path).expanduser().resolve())
+    
+    with State.cancel_flags_lock:
+        if src_path in State.cancel_flags:
+            State.cancel_flags[src_path]["cancelled"] = True
+            return {"cancelled": True, "path": src_path}
+        else:
+            return {"cancelled": False, "reason": "No active ingest for this path"}
+
+
 @app.post("/ingest/text")
 async def ingest_text_endpoint(body: IngestTextBody) -> Dict[str, Any]:
     """Save pasted text as a Markdown file in the inbox, then ingest it."""
@@ -3319,7 +3422,7 @@ async def ingest_text_endpoint(body: IngestTextBody) -> Dict[str, Any]:
         def _work() -> Dict[str, Any]:
             conn = connect(State.db_path)
             try:
-                res = ingest_file(conn, dest)
+                res = ingest_file(conn, dest, refresh=False)
                 return {
                     "path": res.path,
                     "source_id": res.source_id,

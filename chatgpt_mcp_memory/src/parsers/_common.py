@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List
+from typing import List, Dict, Any
 
 # Default chunk ceiling, in characters. Sized to the embedder's context budget:
 # bge-base-en-v1.5 (and the ms-marco cross-encoder) cap at 512 tokens ≈ ~2000
@@ -98,4 +98,50 @@ def window_text(text: str, *, max_chars: int = 1200) -> List[str]:
             cur_len += len(line) + 1
     if cur:
         chunks.append("\n".join(cur))
+    return [c for c in chunks if c.strip()]
+
+
+def chunk_conversation(messages: List[Dict[str, Any]], *, max_chars: int | None = None) -> List[str]:
+    """Chunk a conversation thread while preserving message boundaries.
+    
+    Args:
+        messages: List of message dicts with 'role' and 'text' keys
+        max_chars: Maximum characters per chunk (defaults to MINION_CHUNK_MAX_CHARS)
+    
+    Returns:
+        List of chunked text strings, each containing complete messages where possible
+    """
+    if max_chars is None:
+        max_chars = _default_chunk_max_chars()
+    
+    if not messages:
+        return []
+    
+    chunks: List[str] = []
+    current_chunk: List[str] = []
+    current_len = 0
+    
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        text = msg.get("text", "").strip()
+        if not text:
+            continue
+        
+        # Format message with role prefix
+        formatted_msg = f"{role.capitalize()}: {text}"
+        msg_len = len(formatted_msg)
+        
+        # If adding this message would exceed the limit and we have content,
+        # finalize the current chunk
+        if current_chunk and current_len + msg_len + 2 > max_chars:
+            chunks.append("\n\n".join(current_chunk))
+            current_chunk = [formatted_msg]
+            current_len = msg_len
+        else:
+            current_chunk.append(formatted_msg)
+            current_len += msg_len + (2 if current_len > 0 else 0)
+    
+    if current_chunk:
+        chunks.append("\n\n".join(current_chunk))
+    
     return [c for c in chunks if c.strip()]

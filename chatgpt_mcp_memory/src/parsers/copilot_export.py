@@ -1,14 +1,12 @@
-"""Claude.ai export parser.
+"""Copilot export parser.
 
-Accepts either a .zip (Claude data export) or a directory that already
-contains `conversations.json`. Claude exports are small JSON manifests
-(`conversations.json`, `projects.json`, `users.json`); we extract only the
-JSON and ignore anything else.
+Accepts either a .zip (Copilot data export) or a directory that already
+contains conversation JSON files. Copilot exports can come from GitHub Copilot
+or Microsoft Copilot, with varying JSON structures.
 
-Shape differs from ChatGPT: a Claude export is a flat list of conversations,
-each with a `chat_messages` list. Every message carries a `sender`
-("human" / "assistant") and either a top-level `text` or a `content` array
-of typed parts. We index the human turns, mirroring the ChatGPT parser.
+The format differs from ChatGPT, Claude, and Gemini: Copilot exports typically
+contain conversation files with a structure that includes user and assistant
+messages with timestamps and content.
 """
 from __future__ import annotations
 
@@ -23,26 +21,26 @@ from . import ParsedChunk, ParseResult
 from ._common import chunk_text, normalize_text, chunk_conversation
 
 
-# Claude exports only ship JSON manifests; keep the same selective-extract
-# guard the ChatGPT parser uses so we never trip over odd filenames.
 _EXTRACT_EXTS = (".json",)
 _MAX_BASENAME_BYTES = 200
 
 
 def _find_export_root(root: Path) -> Path:
-    if list(root.glob("conversations.json")) or list(root.glob("conversations-*.json")):
+    """Find the root of a Copilot export directory."""
+    # Look for common Copilot export patterns
+    if list(root.glob("conversations.json")) or list(root.glob("copilot*.json")):
         return root
     for child in sorted(p for p in root.iterdir() if p.is_dir()):
-        if list(child.glob("conversations.json")) or list(child.glob("conversations-*.json")):
+        if list(child.glob("conversations.json")) or list(child.glob("copilot*.json")):
             return child
     for p in root.rglob("conversations.json"):
         return p.parent
-    raise FileNotFoundError(
-        f"No Claude export manifest under {root} (expected conversations.json)"
-    )
+    # If no specific pattern found, assume the root itself
+    return root
 
 
 def _selective_extract(zf: zipfile.ZipFile, dest: Path) -> int:
+    """Extract only JSON files from the zip."""
     count = 0
     for info in zf.infolist():
         if info.is_dir():
@@ -64,35 +62,62 @@ def _selective_extract(zf: zipfile.ZipFile, dest: Path) -> int:
 
 
 def _load_conversations(work_dir: Path) -> List[Dict[str, Any]]:
-    paths = sorted(work_dir.glob("conversations.json")) or sorted(
-        work_dir.glob("conversations-*.json")
-    )
+    """Load conversation JSON files from the export directory."""
     conversations: List[Dict[str, Any]] = []
+    
+    # Try different naming patterns
+    paths = (
+        sorted(work_dir.glob("conversations.json")) or
+        sorted(work_dir.glob("copilot*.json")) or
+        sorted(work_dir.glob("conversation*.json")) or
+        sorted(work_dir.glob("*.json"))
+    )
+    
     for p in paths:
-        with open(p, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        if isinstance(data, list):
-            conversations.extend(data)
-        elif isinstance(data, dict):
-            conversations.append(data)
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                conversations.extend(data)
+            elif isinstance(data, dict):
+                conversations.append(data)
+        except (json.JSONDecodeError, IOError):
+            continue
+    
     return conversations
 
 
 def _message_text(msg: Dict[str, Any]) -> str:
-    """Prefer the structured `content` parts; fall back to top-level `text`."""
-    parts = msg.get("content")
-    if isinstance(parts, list):
-        out: List[str] = []
-        for part in parts:
-            if isinstance(part, dict) and part.get("type") == "text":
-                t = part.get("text")
-                if isinstance(t, str) and t.strip():
-                    out.append(t.strip())
-        if out:
-            return normalize_text("\n".join(out))
-    text = msg.get("text")
-    if isinstance(text, str):
-        return normalize_text(text)
+    """Extract text from a Copilot message."""
+    # Handle different Copilot message formats
+    if "content" in msg:
+        content = msg["content"]
+        if isinstance(content, str):
+            return normalize_text(content)
+        if isinstance(content, list):
+            out: List[str] = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    text = item["text"]
+                    if isinstance(text, str) and text.strip():
+                        out.append(text.strip())
+                elif isinstance(item, str):
+                    if item.strip():
+                        out.append(item.strip())
+            if out:
+                return normalize_text("\n".join(out))
+    if "text" in msg:
+        text = msg["text"]
+        if isinstance(text, str):
+            return normalize_text(text)
+    if "message" in msg:
+        message = msg["message"]
+        if isinstance(message, str):
+            return normalize_text(message)
+    if "body" in msg:
+        body = msg["body"]
+        if isinstance(body, str):
+            return normalize_text(body)
     return ""
 
 
@@ -109,15 +134,15 @@ def parse(path: Path, *, on_progress=None, validate: bool = True, cancel_flag: O
         work_dir = _find_export_root(path)
     elif path.suffix.lower() == ".zip":
         emit("extract_start", {"path": str(path)})
-        tmp = tempfile.TemporaryDirectory(prefix="minion_claude_export_")
+        tmp = tempfile.TemporaryDirectory(prefix="minion_copilot_export_")
         with zipfile.ZipFile(path, "r") as zf:
             n = _selective_extract(zf, Path(tmp.name))
         emit("extract_done", {"files": n})
         if n == 0:
-            raise ValueError("zip contains no Claude export manifests (conversations.json etc.)")
+            raise ValueError("zip contains no Copilot export manifests (conversation*.json etc.)")
         work_dir = _find_export_root(Path(tmp.name))
     else:
-        raise ValueError(f"Unsupported Claude export path: {path}")
+        raise ValueError(f"Unsupported Copilot export path: {path}")
 
     chunks: List[ParsedChunk] = []
     seq = 0
@@ -143,11 +168,24 @@ def parse(path: Path, *, on_progress=None, validate: bool = True, cancel_flag: O
                 })
                 raise ValueError("Parsing cancelled by user")
             
-            messages = conv.get("chat_messages") or []
+            # Handle different conversation structures
+            messages = []
+            if "messages" in conv:
+                messages = conv["messages"]
+            elif "history" in conv:
+                messages = conv["history"]
+            elif "turns" in conv:
+                messages = conv["turns"]
+            elif "conversation" in conv:
+                conv_data = conv["conversation"]
+                if isinstance(conv_data, dict) and "messages" in conv_data:
+                    messages = conv_data["messages"]
+            
             if not isinstance(messages, list):
                 continue
-            title = conv.get("name") or "(untitled)"
-            conv_id = conv.get("uuid") or conv.get("conversation_id") or "unknown"
+                
+            title = conv.get("title") or conv.get("name") or conv.get("subject") or "(untitled)"
+            conv_id = conv.get("id") or conv.get("conversation_id") or conv.get("uuid") or f"conv-{ci}"
             
             # Skip already-ingested conversations in refresh mode
             if existing_conv_ids and conv_id in existing_conv_ids:
@@ -163,13 +201,40 @@ def parse(path: Path, *, on_progress=None, validate: bool = True, cancel_flag: O
                 text = _message_text(msg)
                 if not text:
                     continue
-                created_at = msg.get("created_at")
+                
+                # Determine role
+                role = "user"
+                if "author" in msg:
+                    author = msg["author"]
+                    if isinstance(author, str):
+                        role = author.lower()
+                    elif isinstance(author, dict):
+                        role = author.get("role", "user").lower()
+                elif "role" in msg:
+                    role = msg["role"].lower()
+                elif "sender" in msg:
+                    role = msg["sender"].lower()
+                elif "from" in msg:
+                    from_field = msg["from"]
+                    if isinstance(from_field, str):
+                        role = from_field.lower()
+                    elif isinstance(from_field, dict):
+                        role = from_field.get("role", "user").lower()
+                
+                # Normalize role names
+                if role in ("model", "assistant", "ai", "bot", "copilot", "system"):
+                    role = "assistant"
+                elif role in ("user", "human", "you"):
+                    role = "user"
+                
+                created_at = msg.get("timestamp") or msg.get("created_at") or msg.get("createTime") or msg.get("time")
                 if created_at:
                     create_times.append(created_at)
+                
                 conversation_messages.append({
-                    "role": msg.get("sender", "unknown"),
+                    "role": role,
                     "text": text,
-                    "message_id": str(msg.get("uuid") or seq),
+                    "message_id": str(msg.get("id") or seq),
                     "create_time": created_at,
                 })
             
@@ -237,7 +302,7 @@ def parse(path: Path, *, on_progress=None, validate: bool = True, cancel_flag: O
 
     source_meta = {
         "export_root": str(work_dir),
-        "roles_indexed": ["user"],
+        "roles_indexed": ["user", "assistant"],
     }
     
     # Include deduplication stats if any conversations were skipped
@@ -257,6 +322,6 @@ def parse(path: Path, *, on_progress=None, validate: bool = True, cancel_flag: O
     return ParseResult(
         chunks=chunks,
         source_meta=source_meta,
-        kind="claude-export",
-        parser="claude-export",
+        kind="copilot-export",
+        parser="copilot-export",
     )

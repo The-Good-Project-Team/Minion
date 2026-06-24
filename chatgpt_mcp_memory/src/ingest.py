@@ -88,7 +88,106 @@ def _looks_like_claude_export(path: Path) -> bool:
     if not path.is_dir():
         return False
     manifests = _claude_export_manifest_paths(path)
-    return bool(manifests) and _peek_is_claude_export(manifests[0])
+    if not manifests:
+        return False
+    # Sniff the first manifest for Claude's "chat_messages" key
+    try:
+        with open(manifests[0], "r", encoding="utf-8") as fh:
+            head = fh.read(2000)
+        return '"chat_messages"' in head
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def _looks_like_gemini_export(path: Path) -> bool:
+    """Detect Gemini exports by looking for conversation JSON files."""
+    if not path.is_dir():
+        return False
+    # Look for Gemini-specific patterns
+    if list(path.glob("conversations.json")) or list(path.glob("conversation*.json")):
+        # Sniff to confirm it's not ChatGPT, Claude, or Copilot
+        try:
+            for manifest in sorted(path.glob("*.json"))[:3]:
+                with open(manifest, "r", encoding="utf-8") as fh:
+                    head = fh.read(2000)
+                # Gemini exports typically have "messages", "history", or "turns" keys
+                # but not "mapping" (ChatGPT) or "chat_messages" (Claude)
+                if '"mapping"' in head or '"chat_messages"' in head:
+                    return False
+                if '"messages"' in head or '"history"' in head or '"turns"' in head:
+                    return True
+        except (OSError, UnicodeDecodeError):
+            pass
+    return False
+
+
+def _looks_like_copilot_export(path: Path) -> bool:
+    """Detect Copilot exports by looking for conversation JSON files."""
+    if not path.is_dir():
+        return False
+    # Look for Copilot-specific patterns
+    if list(path.glob("conversations.json")) or list(path.glob("copilot*.json")) or list(path.glob("conversation*.json")):
+        # Sniff to confirm it's not ChatGPT, Claude, or Gemini
+        try:
+            for manifest in sorted(path.glob("*.json"))[:3]:
+                with open(manifest, "r", encoding="utf-8") as fh:
+                    head = fh.read(2000)
+                # Copilot exports typically have "messages", "content", or "body" keys
+                # but not "mapping" (ChatGPT) or "chat_messages" (Claude)
+                if '"mapping"' in head or '"chat_messages"' in head:
+                    return False
+                # Copilot often has different structure - look for common patterns
+                if '"content"' in head or '"body"' in head or '"copilot"' in head.lower():
+                    return True
+        except (OSError, UnicodeDecodeError):
+            pass
+    return False
+
+
+def _copilot_export_manifest_paths(path: Path) -> List[Path]:
+    """Find all JSON manifest files in a Copilot export."""
+    paths = sorted(path.glob("conversations.json")) or sorted(path.glob("copilot*.json")) or sorted(path.glob("conversation*.json")) or sorted(path.glob("*.json"))
+    return [p for p in paths if p.is_file()]
+
+
+def _copilot_export_digest(path: Path, manifests: List[Path]) -> str:
+    """Compute a digest over the manifest files for change detection."""
+    import hashlib
+    h = hashlib.sha256()
+    for p in sorted(manifests):
+        stat = p.stat()
+        h.update(str(p.relative_to(path)).encode())
+        h.update(str(stat.st_size).encode())
+        h.update(str(stat.st_mtime).encode())
+    return h.hexdigest()
+
+
+def _gemini_export_manifest_paths(path: Path) -> List[Path]:
+    """Find all JSON manifest files in a Gemini export."""
+    paths = sorted(path.glob("conversations.json")) or sorted(path.glob("conversation*.json")) or sorted(path.glob("*.json"))
+    return [p for p in paths if p.is_file()]
+
+
+def _gemini_export_digest(path: Path, manifests: List[Path]) -> str:
+    """Compute a digest over the manifest files for change detection."""
+    import hashlib
+    h = hashlib.sha256()
+    for p in sorted(manifests):
+        stat = p.stat()
+        h.update(str(p.relative_to(path)).encode())
+        h.update(str(stat.st_size).encode())
+        h.update(str(stat.st_mtime).encode())
+    return h.hexdigest()
+
+
+def _peek_is_claude_export(manifest: Path) -> bool:
+    """Quick sniff to check if a manifest is a Claude export."""
+    try:
+        with open(manifest, "r", encoding="utf-8") as fh:
+            head = fh.read(2000)
+        return '"chat_messages"' in head
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def _claude_export_digest(root: Path, manifests: List[Path]) -> str:
@@ -327,6 +426,7 @@ class IngestResult:
     chunk_count: int
     skipped: bool
     reason: Optional[str] = None
+    cancelled: bool = False
 
 
 def _embed(
@@ -482,6 +582,8 @@ def ingest_file(
     model_name: Optional[str] = None,
     force: bool = False,
     on_progress: ProgressFn = _noop,
+    cancel_flag: Optional[Dict[str, bool]] = None,
+    refresh: bool = False,
 ) -> IngestResult:
     """Public ingest entrypoint. Wraps the pipeline with telemetry.
 
@@ -490,7 +592,7 @@ def ingest_file(
     whether it was triggered by the watcher, the CLI, or `bin/minion add`.
     """
     result = _ingest_file_inner(
-        conn, path, model_name=model_name, force=force, on_progress=on_progress
+        conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
     )
     try:
         telemetry.log_event(
@@ -519,6 +621,8 @@ def _ingest_file_inner(
     model_name: Optional[str] = None,
     force: bool = False,
     on_progress: ProgressFn = _noop,
+    cancel_flag: Optional[Dict[str, bool]] = None,
+    refresh: bool = False,
 ) -> IngestResult:
     """Parse + embed + upsert. Skips unchanged files (same sha256) unless force=True."""
     path = Path(path).expanduser().resolve()
@@ -526,19 +630,26 @@ def _ingest_file_inner(
     if not path.exists():
         return IngestResult(spath, None, "?", "?", 0, True, reason="missing")
 
-    # Directories are not ingestable in general, but ChatGPT and Claude
-    # exports ship as a directory of JSON manifests. Both name their file
-    # `conversations.json`, so we sniff content (Claude has `chat_messages`,
-    # ChatGPT has a `mapping` tree) and dispatch to the right parser; fall
-    # through for everything else.
+    # Directories are not ingestable in general, but ChatGPT, Claude, Gemini, and Copilot
+    # exports ship as a directory of JSON manifests. We sniff content to
+    # disambiguate (Claude has `chat_messages`, ChatGPT has a `mapping` tree,
+    # Gemini has `messages`/`history`/`turns`, Copilot has `content`/`body`) and dispatch to the right parser.
     if path.is_dir():
         if _looks_like_claude_export(path):
             return _ingest_claude_export_dir(
-                conn, path, model_name=model_name, force=force, on_progress=on_progress
+                conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
             )
         if _looks_like_chatgpt_export(path):
             return _ingest_chatgpt_export_dir(
-                conn, path, model_name=model_name, force=force, on_progress=on_progress
+                conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
+            )
+        if _looks_like_gemini_export(path):
+            return _ingest_gemini_export_dir(
+                conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
+            )
+        if _looks_like_copilot_export(path):
+            return _ingest_copilot_export_dir(
+                conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
             )
         return IngestResult(spath, None, "?", "?", 0, True, reason="directory (not a recognized export)")
 
@@ -633,6 +744,8 @@ def _ingest_chatgpt_export_dir(
     model_name: Optional[str],
     force: bool,
     on_progress: ProgressFn,
+    cancel_flag: Optional[Dict[str, bool]] = None,
+    refresh: bool = False,
 ) -> IngestResult:
     """Ingest a ChatGPT export directory as a single logical source.
 
@@ -643,17 +756,28 @@ def _ingest_chatgpt_export_dir(
     The whole export is represented by one `sources` row keyed by the
     directory path. sha256 is computed over the manifest (relpath, size,
     mtime) so re-running is a no-op unless a manifest changed.
+
+    If refresh=True, only add new conversations (skip already-ingested ones).
     """
     spath = str(path)
     manifests = _chatgpt_export_manifest_paths(path)
     digest = _chatgpt_export_digest(path, manifests)
 
-    if not force:
+    # Get existing source metadata for deduplication
+    existing_conv_ids: Set[str] = set()
+    if refresh or not force:
         row = conn.execute(
-            "SELECT sha256 FROM sources WHERE path=?", (spath,)
+            "SELECT sha256, meta_json FROM sources WHERE path=?", (spath,)
         ).fetchone()
-        if row and row["sha256"] == digest:
-            return IngestResult(spath, None, "chatgpt-export", "chatgpt-export", 0, True, reason="unchanged")
+        if row:
+            if row["sha256"] == digest and not force:
+                return IngestResult(spath, None, "chatgpt-export", "chatgpt-export", 0, True, reason="unchanged")
+            # Extract existing conversation IDs for refresh mode
+            try:
+                meta = json.loads(row["meta_json"]) if row["meta_json"] else {}
+                existing_conv_ids = set(meta.get("conversation_ids", []))
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     total_bytes = sum(p.stat().st_size for p in manifests)
     latest_mtime = max((p.stat().st_mtime for p in manifests), default=path.stat().st_mtime)
@@ -661,14 +785,28 @@ def _ingest_chatgpt_export_dir(
     on_progress("parse_start", {"suffix": "(dir)", "bytes": total_bytes, "manifests": len(manifests)})
     try:
         # Force the chatgpt_export parser since extension dispatch doesn't
-        # apply to directories.
-        result: ParseResult = parse_file(path, parser="parsers.chatgpt_export", on_progress=on_progress)
+        # apply to directories. Pass existing conversation IDs for deduplication.
+        result: ParseResult = parse_file(
+            path, 
+            parser="parsers.chatgpt_export", 
+            on_progress=on_progress, 
+            cancel_flag=cancel_flag,
+            existing_conv_ids=existing_conv_ids if refresh else None
+        )
     except UnsupportedFile as e:
         return IngestResult(spath, None, "chatgpt-export", "?", 0, True, reason=f"unsupported: {e}")
     except Exception as e:
         name = type(e).__name__
         msg = str(e) or name
-        return IngestResult(spath, None, "chatgpt-export", "?", 0, True, reason=f"parse-error: {name}: {msg}")
+        # Check if this is a cancellation
+        if "cancelled" in str(e).lower():
+            return IngestResult(spath, None, "chatgpt-export", "chatgpt-export", 0, True, reason=msg, cancelled=True)
+        # Include file path and line number if available from ExportValidationError
+        if hasattr(e, 'file_path') and e.file_path:
+            reason = f"parse-error: {msg}"
+        else:
+            reason = f"parse-error: {name}: {msg}"
+        return IngestResult(spath, None, "chatgpt-export", "?", 0, True, reason=reason)
 
     if not result.chunks:
         return IngestResult(
@@ -688,6 +826,25 @@ def _ingest_chatgpt_export_dir(
     source_meta.setdefault("suffix", "(dir)")
     source_meta.setdefault("model_name", name)
     source_meta.setdefault("manifest_count", len(manifests))
+    
+    # Track conversation IDs for future deduplication
+    conv_ids = set()
+    for chunk in result.chunks:
+        conv_id = chunk.meta.get("conversation_id")
+        if conv_id:
+            conv_ids.add(conv_id)
+    source_meta["conversation_ids"] = sorted(conv_ids)
+    
+    # Report deduplication stats if in refresh mode
+    if refresh and existing_conv_ids:
+        skipped_count = len(existing_conv_ids & conv_ids)
+        if skipped_count > 0:
+            source_meta["refresh_skipped"] = skipped_count
+            on_progress("dedup_stats", {
+                "skipped_conversations": skipped_count,
+                "total_conversations": len(conv_ids),
+                "new_conversations": len(conv_ids) - len(existing_conv_ids & conv_ids)
+            })
 
     source_id = upsert_source(
         conn,
@@ -719,35 +876,57 @@ def _ingest_claude_export_dir(
     model_name: Optional[str],
     force: bool,
     on_progress: ProgressFn,
+    cancel_flag: Optional[Dict[str, bool]] = None,
+    refresh: bool = False,
 ) -> IngestResult:
     """Ingest a Claude.ai export directory as a single logical source.
 
     One `sources` row keyed by the directory path. sha256 is computed over the
     manifest (relpath, size, mtime) so re-running is a no-op unless a manifest
     changed.
+
+    If refresh=True, only add new conversations (skip already-ingested ones).
     """
     spath = str(path)
     manifests = _claude_export_manifest_paths(path)
     digest = _claude_export_digest(path, manifests)
 
-    if not force:
+    # Get existing source metadata for deduplication
+    existing_conv_ids: Set[str] = set()
+    if refresh or not force:
         row = conn.execute(
-            "SELECT sha256 FROM sources WHERE path=?", (spath,)
+            "SELECT sha256, meta_json FROM sources WHERE path=?", (spath,)
         ).fetchone()
-        if row and row["sha256"] == digest:
-            return IngestResult(spath, None, "claude-export", "claude-export", 0, True, reason="unchanged")
+        if row:
+            if row["sha256"] == digest and not force:
+                return IngestResult(spath, None, "claude-export", "claude-export", 0, True, reason="unchanged")
+            # Extract existing conversation IDs for refresh mode
+            try:
+                meta = json.loads(row["meta_json"]) if row["meta_json"] else {}
+                existing_conv_ids = set(meta.get("conversation_ids", []))
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     total_bytes = sum(p.stat().st_size for p in manifests)
     latest_mtime = max((p.stat().st_mtime for p in manifests), default=path.stat().st_mtime)
 
     on_progress("parse_start", {"suffix": "(dir)", "bytes": total_bytes, "manifests": len(manifests)})
     try:
-        result: ParseResult = parse_file(path, parser="parsers.claude_export", on_progress=on_progress)
+        result: ParseResult = parse_file(
+            path, 
+            parser="parsers.claude_export", 
+            on_progress=on_progress, 
+            cancel_flag=cancel_flag,
+            existing_conv_ids=existing_conv_ids if refresh else None
+        )
     except UnsupportedFile as e:
         return IngestResult(spath, None, "claude-export", "?", 0, True, reason=f"unsupported: {e}")
     except Exception as e:
         name = type(e).__name__
         msg = str(e) or name
+        # Check if this is a cancellation
+        if "cancelled" in str(e).lower():
+            return IngestResult(spath, None, "claude-export", "claude-export", 0, True, reason=msg, cancelled=True)
         return IngestResult(spath, None, "claude-export", "?", 0, True, reason=f"parse-error: {name}: {msg}")
 
     if not result.chunks:
@@ -768,6 +947,25 @@ def _ingest_claude_export_dir(
     source_meta.setdefault("suffix", "(dir)")
     source_meta.setdefault("model_name", name)
     source_meta.setdefault("manifest_count", len(manifests))
+    
+    # Track conversation IDs for future deduplication
+    conv_ids = set()
+    for chunk in result.chunks:
+        conv_id = chunk.meta.get("conversation_id")
+        if conv_id:
+            conv_ids.add(conv_id)
+    source_meta["conversation_ids"] = sorted(conv_ids)
+    
+    # Report deduplication stats if in refresh mode
+    if refresh and existing_conv_ids:
+        skipped_count = len(existing_conv_ids & conv_ids)
+        if skipped_count > 0:
+            source_meta["refresh_skipped"] = skipped_count
+            on_progress("dedup_stats", {
+                "skipped_conversations": skipped_count,
+                "total_conversations": len(conv_ids),
+                "new_conversations": len(conv_ids) - len(existing_conv_ids & conv_ids)
+            })
 
     source_id = upsert_source(
         conn,
@@ -789,4 +987,249 @@ def _ingest_claude_export_dir(
         parser=result.parser or "claude-export",
         chunk_count=len(result.chunks),
         skipped=False,
+        reason=None,
+    )
+
+
+def _ingest_gemini_export_dir(
+    conn: sqlite3.Connection,
+    path: Path,
+    *,
+    model_name: Optional[str],
+    force: bool,
+    on_progress: ProgressFn,
+    cancel_flag: Optional[Dict[str, bool]] = None,
+    refresh: bool = False,
+) -> IngestResult:
+    """Ingest a Gemini export directory as a single logical source.
+
+    One `sources` row keyed by the directory path. sha256 is computed over the
+    manifest (relpath, size, mtime) so re-running is a no-op unless a manifest
+    changed.
+
+    If refresh=True, only add new conversations (skip already-ingested ones).
+    """
+    spath = str(path)
+    manifests = _gemini_export_manifest_paths(path)
+    digest = _gemini_export_digest(path, manifests)
+
+    # Get existing source metadata for deduplication
+    existing_conv_ids: Set[str] = set()
+    if refresh or not force:
+        row = conn.execute(
+            "SELECT sha256, meta_json FROM sources WHERE path=?", (spath,)
+        ).fetchone()
+        if row:
+            if row["sha256"] == digest and not force:
+                return IngestResult(spath, None, "gemini-export", "gemini-export", 0, True, reason="unchanged")
+            # Extract existing conversation IDs for refresh mode
+            try:
+                meta = json.loads(row["meta_json"]) if row["meta_json"] else {}
+                existing_conv_ids = set(meta.get("conversation_ids", []))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    total_bytes = sum(p.stat().st_size for p in manifests)
+    latest_mtime = max((p.stat().st_mtime for p in manifests), default=path.stat().st_mtime)
+
+    on_progress("parse_start", {"suffix": "(dir)", "bytes": total_bytes, "manifests": len(manifests)})
+    try:
+        result: ParseResult = parse_file(
+            path, 
+            parser="parsers.gemini_export", 
+            on_progress=on_progress, 
+            cancel_flag=cancel_flag,
+            existing_conv_ids=existing_conv_ids if refresh else None
+        )
+    except UnsupportedFile as e:
+        return IngestResult(spath, None, "gemini-export", "?", 0, True, reason=f"unsupported: {e}")
+    except Exception as e:
+        name = type(e).__name__
+        msg = str(e) or name
+        # Check if this is a cancellation
+        if "cancelled" in str(e).lower():
+            return IngestResult(spath, None, "gemini-export", "gemini-export", 0, True, reason=msg, cancelled=True)
+        return IngestResult(spath, None, "gemini-export", "?", 0, True, reason=f"parse-error: {name}: {msg}")
+
+    if not result.chunks:
+        return IngestResult(
+            spath, None, result.kind or "gemini-export", result.parser or "gemini-export", 0, True,
+            reason="export parsed but produced no message chunks",
+        )
+
+    on_progress("parsed", {"chunks": len(result.chunks), "kind": result.kind, "parser": result.parser})
+
+    name = model_name or os.environ.get("MINION_EMBED_MODEL", DEFAULT_MODEL)
+    model = _get_model(name)
+    texts = [c.text for c in result.chunks]
+    embeddings = _embed(model, texts, on_progress=on_progress)
+
+    chunk_tuples = [(c.text, c.role, c.meta) for c in result.chunks]
+    source_meta = dict(result.source_meta or {})
+    source_meta.setdefault("suffix", "(dir)")
+    source_meta.setdefault("model_name", name)
+    source_meta.setdefault("manifest_count", len(manifests))
+    
+    # Track conversation IDs for future deduplication
+    conv_ids = set()
+    for chunk in result.chunks:
+        conv_id = chunk.meta.get("conversation_id")
+        if conv_id:
+            conv_ids.add(conv_id)
+    source_meta["conversation_ids"] = sorted(conv_ids)
+    
+    # Report deduplication stats if in refresh mode
+    if refresh and existing_conv_ids:
+        skipped_count = len(existing_conv_ids & conv_ids)
+        if skipped_count > 0:
+            source_meta["refresh_skipped"] = skipped_count
+            on_progress("dedup_stats", {
+                "skipped_conversations": skipped_count,
+                "total_conversations": len(conv_ids),
+                "new_conversations": len(conv_ids) - len(existing_conv_ids & conv_ids)
+            })
+
+    source_id = upsert_source(
+        conn,
+        path=spath,
+        kind=result.kind or "gemini-export",
+        sha256=digest,
+        mtime=latest_mtime,
+        bytes_=total_bytes,
+        parser=result.parser or "gemini-export",
+        source_meta=source_meta,
+        chunks=chunk_tuples,
+        embeddings=embeddings,
+    )
+
+    return IngestResult(
+        path=spath,
+        source_id=source_id,
+        kind=result.kind or "gemini-export",
+        parser=result.parser or "gemini-export",
+        chunk_count=len(result.chunks),
+        skipped=False,
+        reason=None,
+    )
+
+
+def _ingest_copilot_export_dir(
+    conn: sqlite3.Connection,
+    path: Path,
+    *,
+    model_name: Optional[str],
+    force: bool,
+    on_progress: ProgressFn,
+    cancel_flag: Optional[Dict[str, bool]] = None,
+    refresh: bool = False,
+) -> IngestResult:
+    """Ingest a Copilot export directory as a single logical source.
+
+    One `sources` row keyed by the directory path. sha256 is computed over the
+    manifest (relpath, size, mtime) so re-running is a no-op unless a manifest
+    changed.
+
+    If refresh=True, only add new conversations (skip already-ingested ones).
+    """
+    spath = str(path)
+    manifests = _copilot_export_manifest_paths(path)
+    digest = _copilot_export_digest(path, manifests)
+
+    # Get existing source metadata for deduplication
+    existing_conv_ids: Set[str] = set()
+    if refresh or not force:
+        row = conn.execute(
+            "SELECT sha256, meta_json FROM sources WHERE path=?", (spath,)
+        ).fetchone()
+        if row:
+            if row["sha256"] == digest and not force:
+                return IngestResult(spath, None, "copilot-export", "copilot-export", 0, True, reason="unchanged")
+            # Extract existing conversation IDs for refresh mode
+            try:
+                meta = json.loads(row["meta_json"]) if row["meta_json"] else {}
+                existing_conv_ids = set(meta.get("conversation_ids", []))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    total_bytes = sum(p.stat().st_size for p in manifests)
+    latest_mtime = max((p.stat().st_mtime for p in manifests), default=path.stat().st_mtime)
+
+    on_progress("parse_start", {"suffix": "(dir)", "bytes": total_bytes, "manifests": len(manifests)})
+    try:
+        result: ParseResult = parse_file(
+            path, 
+            parser="parsers.copilot_export", 
+            on_progress=on_progress, 
+            cancel_flag=cancel_flag,
+            existing_conv_ids=existing_conv_ids if refresh else None
+        )
+    except UnsupportedFile as e:
+        return IngestResult(spath, None, "copilot-export", "?", 0, True, reason=f"unsupported: {e}")
+    except Exception as e:
+        name = type(e).__name__
+        msg = str(e) or name
+        # Check if this is a cancellation
+        if "cancelled" in str(e).lower():
+            return IngestResult(spath, None, "copilot-export", "copilot-export", 0, True, reason=msg, cancelled=True)
+        return IngestResult(spath, None, "copilot-export", "?", 0, True, reason=f"parse-error: {name}: {msg}")
+
+    if not result.chunks:
+        return IngestResult(
+            spath, None, result.kind or "copilot-export", result.parser or "copilot-export", 0, True,
+            reason="export parsed but produced no message chunks",
+        )
+
+    on_progress("parsed", {"chunks": len(result.chunks), "kind": result.kind, "parser": result.parser})
+
+    name = model_name or os.environ.get("MINION_EMBED_MODEL", DEFAULT_MODEL)
+    model = _get_model(name)
+    texts = [c.text for c in result.chunks]
+    embeddings = _embed(model, texts, on_progress=on_progress)
+
+    chunk_tuples = [(c.text, c.role, c.meta) for c in result.chunks]
+    source_meta = dict(result.source_meta or {})
+    source_meta.setdefault("suffix", "(dir)")
+    source_meta.setdefault("model_name", name)
+    source_meta.setdefault("manifest_count", len(manifests))
+    
+    # Track conversation IDs for future deduplication
+    conv_ids = set()
+    for chunk in result.chunks:
+        conv_id = chunk.meta.get("conversation_id")
+        if conv_id:
+            conv_ids.add(conv_id)
+    source_meta["conversation_ids"] = sorted(conv_ids)
+    
+    # Report deduplication stats if in refresh mode
+    if refresh and existing_conv_ids:
+        skipped_count = len(existing_conv_ids & conv_ids)
+        if skipped_count > 0:
+            source_meta["refresh_skipped"] = skipped_count
+            on_progress("dedup_stats", {
+                "skipped_conversations": skipped_count,
+                "total_conversations": len(conv_ids),
+                "new_conversations": len(conv_ids) - len(existing_conv_ids & conv_ids)
+            })
+
+    source_id = upsert_source(
+        conn,
+        path=spath,
+        kind=result.kind or "copilot-export",
+        sha256=digest,
+        mtime=latest_mtime,
+        bytes_=total_bytes,
+        parser=result.parser or "copilot-export",
+        source_meta=source_meta,
+        chunks=chunk_tuples,
+        embeddings=embeddings,
+    )
+
+    return IngestResult(
+        path=spath,
+        source_id=source_id,
+        kind=result.kind or "copilot-export",
+        parser=result.parser or "copilot-export",
+        chunk_count=len(result.chunks),
+        skipped=False,
+        reason=None,
     )
