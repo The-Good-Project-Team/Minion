@@ -13,6 +13,8 @@ import {
   Plug,
   RefreshCw,
   Upload,
+  Filter,
+  Clock,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -166,6 +168,8 @@ export function App() {
   const [active, setActive] = useState<Active>(EMPTY_ACTIVE);
   const [feed, setFeed] = useState<FeedLine[]>([]);
   const [conn, setConn] = useState<ConnState>("connecting");
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<"file" | "chat_export" | "external" | "ambient" | "all">("all");
+  const [timeRangeFilter, setTimeRangeFilter] = useState<"last_hour" | "last_day" | "last_week" | "all">("all");
   const [sidecar, setSidecar] = useState<SidecarStatus | null>(null);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -181,10 +185,15 @@ export function App() {
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
 
   const load = useCallback(async () => {
+    setConn("connecting");
     try {
       const [st, srcs, gs, claude, cursor] = await Promise.all([
         fetchStatus().catch(() => null),
-        fetchSources({ limit: 500 }).then((r) => r.sources).catch(() => [] as Source[]),
+        fetchSources({ 
+          limit: 500,
+          source_type: sourceTypeFilter === "all" ? undefined : sourceTypeFilter,
+          time_range: timeRangeFilter === "all" ? undefined : timeRangeFilter,
+        }).then((r) => r.sources).catch(() => [] as Source[]),
         fetchGraphStats().catch(() => null),
         fetchClaudeDesktopStatus().catch(() => null),
         fetchCursorStatus().catch(() => null),
@@ -206,7 +215,7 @@ export function App() {
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [sourceTypeFilter, timeRangeFilter]);
 
   // Coalesce the per-file refreshes the ingest stream triggers. The backend
   // emits one `source_updated` per file; on a big corpus (100k+ chunks) calling
@@ -768,28 +777,57 @@ export function App() {
         </section>
 
         {/* sources library (compact) */}
-        {sources.length > 0 && (
-          <section className="mt-6">
-            <h2 className="mb-2 text-sm font-medium text-muted-foreground">Recent sources</h2>
-            {revealError && (
-              <p className="mb-2 text-xs text-amber-700 dark:text-amber-400">Reveal failed: {revealError}</p>
-            )}
+        <section className="mt-6">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-sm font-medium text-muted-foreground">Recent sources</h2>
+            <div className="flex gap-2">
+              <select
+                value={sourceTypeFilter}
+                onChange={(e) => setSourceTypeFilter(e.target.value as any)}
+                className="text-xs rounded border border-border bg-background px-2 py-1"
+              >
+                <option value="all">All types</option>
+                <option value="file">Files</option>
+                <option value="chat_export">Chat exports</option>
+                <option value="external">External</option>
+                <option value="ambient">Ambient</option>
+              </select>
+              <select
+                value={timeRangeFilter}
+                onChange={(e) => setTimeRangeFilter(e.target.value as any)}
+                className="text-xs rounded border border-border bg-background px-2 py-1"
+              >
+                <option value="all">All time</option>
+                <option value="last_hour">Last hour</option>
+                <option value="last_day">Last day</option>
+                <option value="last_week">Last week</option>
+              </select>
+            </div>
+          </div>
+          {revealError && (
+            <p className="mb-2 text-xs text-amber-700 dark:text-amber-400">Reveal failed: {revealError}</p>
+          )}
+          {sources.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No sources match the current filters.</p>
+          ) : (
             <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-card">
               {sources.slice(0, 12).map((s) => (
                 <li key={s.source_id} className="flex items-center gap-3 px-4 py-2 text-sm">
                   <span className="truncate">{baseName(s.path)}</span>
                   <span className="ml-auto shrink-0 text-xs text-muted-foreground">{s.kind}</span>
-                  <button
-                    onClick={() => void handleReveal(s.path)}
-                    className="shrink-0 text-xs text-primary hover:underline"
-                  >
-                    reveal
-                  </button>
+                  {!s.kind.includes('ambient') && !s.path.startsWith('ambient/') && (
+                    <button
+                      onClick={() => void handleReveal(s.path)}
+                      className="shrink-0 text-xs text-primary hover:underline"
+                    >
+                      reveal
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
-          </section>
-        )}
+          )}
+        </section>
       </div>
     </div>
   );

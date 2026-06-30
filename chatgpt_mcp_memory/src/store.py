@@ -1140,6 +1140,8 @@ def list_sources(
     path_glob: Optional[str] = None,
     since: Optional[float] = None,
     limit: int = 500,
+    source_type: Optional[str] = None,
+    time_range: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     sql = [
         "SELECT s.source_id, s.path, s.kind, s.sha256, s.mtime, s.bytes, s.parser, "
@@ -1154,9 +1156,41 @@ def list_sources(
     if path_glob:
         sql.append("AND s.path GLOB ?")
         params.append(path_glob)
+    # Handle time_range presets (converts to since timestamp)
+    if time_range:
+        import time
+        now = time.time()
+        if time_range == "last_hour":
+            since = now - 3600
+        elif time_range == "last_day":
+            since = now - 86400
+        elif time_range == "last_week":
+            since = now - 604800
+        # time_range="all" or unknown values are ignored (no time filter)
     if since is not None:
         sql.append("AND s.mtime >= ?")
         params.append(float(since))
+    if source_type:
+        # Map source_type to kind groups
+        if source_type == "file":
+            # Regular file types: text, html, pdf, docx, image, audio, video, code
+            file_kinds = ("text", "html", "pdf", "docx", "image", "audio", "video", "code")
+            placeholders = ",".join("?" * len(file_kinds))
+            sql.append(f"AND s.kind IN ({placeholders})")
+            params.extend(file_kinds)
+        elif source_type == "chat_export":
+            # AI chat exports
+            export_kinds = ("chatgpt-export", "claude-export", "gemini-export", "copilot-export")
+            placeholders = ",".join("?" * len(export_kinds))
+            sql.append(f"AND s.kind IN ({placeholders})")
+            params.extend(export_kinds)
+        elif source_type == "external":
+            # Webhook/external sources
+            sql.append("AND s.kind=?")
+            params.append("external")
+        elif source_type == "ambient":
+            # Ambient sources (identified by parser prefix or path pattern)
+            sql.append("AND (s.parser LIKE 'ambient%' OR s.path GLOB '*/ambient/*' OR s.kind='ambient-summary')")
     sql.append("ORDER BY s.mtime DESC LIMIT ?")
     params.append(int(limit))
 

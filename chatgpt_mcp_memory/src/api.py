@@ -1354,9 +1354,17 @@ def list_sources_endpoint(
     path_glob: Optional[str] = None,
     since: Optional[float] = None,
     limit: int = 500,
+    source_type: Optional[str] = None,
+    time_range: Optional[str] = None,
 ) -> Dict[str, Any]:
     rows = list_sources(
-        State.conn(), kind=kind, path_glob=path_glob, since=since, limit=limit
+        State.conn(), 
+        kind=kind, 
+        path_glob=path_glob, 
+        since=since, 
+        limit=limit,
+        source_type=source_type,
+        time_range=time_range,
     )
     return {"sources": rows, "counts": _counts()}
 

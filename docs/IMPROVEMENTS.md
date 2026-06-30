@@ -10,13 +10,14 @@ This document tracks all potential improvements for Minion beyond the core ChatG
   - Added TypeScript API client functions
   - Added UI checklist item for Cursor connect
 
-## High Priority
+- **Faceted Search with Time-Based Filtering** - UI filters for sources
+  - Added `source_type` filter (file, chat_export, external, ambient) to `GET /sources`
+  - Added `time_range` filter (last_hour, last_day, last_week, all) to `GET /sources`
+  - Updated TypeScript API client with new filter parameters
+  - Added dropdown filter UI in desktop app sources section
+  - Backend filters map source_type to kind groups and convert time_range to timestamps
 
-### 1. Faceted Search with Time-Based Filtering
-- Add UI filters for source type (ambient, file, chat export, etc.)
-- Add time range picker (last hour, day, week, custom range)
-- Add kind filter (code, markdown, pdf, etc.)
-- Implementation: Extend `GET /sources` with query params, add filter UI in desktop
+## High Priority
 
 ### 2. Tiered Storage (Hot/Warm/Cold)
 - Implement storage tiers in `store.py` with `storage_tier` column

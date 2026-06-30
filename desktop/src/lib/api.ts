@@ -275,6 +275,8 @@ export async function fetchSources(
     path_glob?: string;
     since?: number;
     limit?: number;
+    source_type?: "file" | "chat_export" | "external" | "ambient";
+    time_range?: "last_hour" | "last_day" | "last_week" | "all";
   } = {},
   init?: RequestInit,
 ): Promise<{ sources: Source[]; counts: { sources: number; chunks: number } }> {
@@ -283,6 +285,8 @@ export async function fetchSources(
   if (params.path_glob) q.set("path_glob", params.path_glob);
   if (params.since) q.set("since", String(params.since));
   if (params.limit) q.set("limit", String(params.limit));
+  if (params.source_type) q.set("source_type", params.source_type);
+  if (params.time_range) q.set("time_range", params.time_range);
   const qs = q.toString();
   const cfg = await getConfig();
   const res = await fetch(`${cfg.api_base}/sources${qs ? `?${qs}` : ""}`, {
