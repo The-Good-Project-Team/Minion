@@ -143,6 +143,10 @@ from store import (
     sqlite_storage_fingerprint,
     count_chunks_stale_source_tier_promotion_candidates,
     promote_chunks_for_stale_sources,
+    consolidate_chunks_to_warm,
+    offload_chunks_to_cold,
+    deduplicate_chunks_by_fingerprint,
+    vacuum_database,
     validate_stale_tier_promotion,
     keyword_search as store_keyword_search,
     list_sources,
@@ -873,6 +877,25 @@ class StorageTierPromoteStaleBody(BaseModel):
     dry_run: bool = True
     from_tier: str = Field(default="hot", max_length=16)
     to_tier: str = Field(default="warm", max_length=16)
+
+
+class StorageTierConsolidateWarmBody(BaseModel):
+    """Consolidate chunks from a source into warm-tier summaries."""
+
+    source_id: str = Field(..., min_length=1)
+
+
+class StorageTierOffloadColdBody(BaseModel):
+    """Offload warm chunks to cold tier (sparse file storage)."""
+
+    source_id: str = Field(..., min_length=1)
+
+
+class ChunkDeduplicateBody(BaseModel):
+    """Deduplicate chunks by content fingerprint."""
+
+    min_chunk_age_days: float = Field(default=7.0, ge=1.0, le=365.0)
+    dry_run: bool = True
 
 
 class DestructiveConfirmBody(BaseModel):
@@ -2938,6 +2961,127 @@ def maintenance_storage_tier_promote_stale(body: StorageTierPromoteStaleBody) ->
         "source_kinds": kinds,
         "from_tier": f_t,
         "to_tier": t_t,
+        "chunk_storage_tiers": chunk_storage_tier_counts(conn),
+    }
+
+
+@app.post("/maintenance/storage-tier-consolidate-warm")
+def maintenance_storage_tier_consolidate_warm(body: StorageTierConsolidateWarmBody) -> Dict[str, Any]:
+    """Consolidate chunks from a source into warm-tier summaries via LLM."""
+    conn = State.conn()
+    result = consolidate_chunks_to_warm(conn, source_id=body.source_id, data_dir=State.data_dir)
+    identity_audit_log_append(
+        conn,
+        action="storage_tier_consolidate_warm",
+        detail={
+            "source_id": body.source_id,
+            "original_count": result["original_count"],
+            "summary_count": result["summary_count"],
+            "promoted": result["promoted"],
+        },
+    )
+    conn.commit()
+    return {
+        "source_id": body.source_id,
+        **result,
+        "chunk_storage_tiers": chunk_storage_tier_counts(conn),
+    }
+
+
+@app.post("/maintenance/storage-tier-offload-cold")
+def maintenance_storage_tier_offload_cold(body: StorageTierOffloadColdBody) -> Dict[str, Any]:
+    """Offload warm chunks to cold tier (sparse file storage)."""
+    conn = State.conn()
+    result = offload_chunks_to_cold(conn, source_id=body.source_id, data_dir=State.data_dir)
+    identity_audit_log_append(
+        conn,
+        action="storage_tier_offload_cold",
+        detail={
+            "source_id": body.source_id,
+            "offloaded": result.get("offloaded", 0),
+            "file_path": result.get("file_path", ""),
+        },
+    )
+    conn.commit()
+    return {
+        "source_id": body.source_id,
+        **result,
+        "chunk_storage_tiers": chunk_storage_tier_counts(conn),
+    }
+
+
+@app.post("/maintenance/chunk-deduplicate")
+def maintenance_chunk_deduplicate(body: ChunkDeduplicateBody) -> Dict[str, Any]:
+    """Deduplicate chunks by content fingerprint."""
+    conn = State.conn()
+    result = deduplicate_chunks_by_fingerprint(
+        conn, min_chunk_age_days=body.min_chunk_age_days
+    )
+    identity_audit_log_append(
+        conn,
+        action="chunk_deduplicate",
+        detail={
+            "duplicates_found": result["duplicates_found"],
+            "duplicates_removed": result["duplicates_removed"],
+            "min_chunk_age_days": body.min_chunk_age_days,
+        },
+    )
+    conn.commit()
+    return {
+        **result,
+        "chunk_storage_tiers": chunk_storage_tier_counts(conn),
+    }
+
+
+@app.post("/maintenance/vacuum")
+def maintenance_vacuum() -> Dict[str, Any]:
+    """Run SQLite VACUUM to reclaim free space."""
+    conn = State.conn()
+    result = vacuum_database(conn)
+    identity_audit_log_append(
+        conn,
+        action="vacuum",
+        detail={
+            "before_bytes": result["before_bytes"],
+            "after_bytes": result["after_bytes"],
+            "reclaimed_bytes": result["reclaimed_bytes"],
+        },
+    )
+    conn.commit()
+    return result
+
+
+@app.post("/maintenance/run-compaction")
+def maintenance_run_compaction() -> Dict[str, Any]:
+    """Run all compaction jobs: ambient consolidation, chunk deduplication."""
+    from ambient_consolidation import run_ambient_consolidation
+    
+    conn = State.conn()
+    results = {}
+    
+    # Ambient consolidation
+    try:
+        ambient_result = run_ambient_consolidation(conn, State.data_dir, force=True)
+        results["ambient_consolidation"] = ambient_result
+    except Exception as e:
+        results["ambient_consolidation"] = {"error": str(e)}
+    
+    # Chunk deduplication
+    try:
+        dedup_result = deduplicate_chunks_by_fingerprint(conn, min_chunk_age_days=7.0)
+        results["chunk_deduplication"] = dedup_result
+    except Exception as e:
+        results["chunk_deduplication"] = {"error": str(e)}
+    
+    identity_audit_log_append(
+        conn,
+        action="run_compaction",
+        detail=results,
+    )
+    conn.commit()
+    
+    return {
+        "results": results,
         "chunk_storage_tiers": chunk_storage_tier_counts(conn),
     }
 

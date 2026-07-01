@@ -1414,11 +1414,21 @@ def search(
         # cos_sim = 1 - dist^2 / 2, which maps to [-1, 1] and matches the
         # cosine-similarity convention callers expect.
         score = 1.0 - (dist * dist) / 2.0
+        
+        # Hydrate cold chunks
+        chunk_text = r["text"]
+        storage_tier = str(r["storage_tier"] or "hot")
+        if storage_tier == "cold" and chunk_text.startswith("[COLD:"):
+            hydrated = hydrate_cold_chunk(conn, chunk_id=r["chunk_id"], data_dir=data_dir)
+            if hydrated is not None:
+                chunk_text = hydrated
+                storage_tier = "warm"  # Promoted to warm after hydration
+        
         hits.append(
             Hit(
                 chunk_id=r["chunk_id"],
                 score=score,
-                text=r["text"],
+                text=chunk_text,
                 role=r["role"],
                 source_id=r["source_id"],
                 path=r["path"],
@@ -1426,7 +1436,7 @@ def search(
                 mtime=r["mtime"],
                 meta=json.loads(r["meta_json"] or "{}"),
                 source_meta=json.loads(r["source_meta_json"] or "{}"),
-                storage_tier=str(r["storage_tier"] or "hot"),
+                storage_tier=storage_tier,
             )
         )
     return hits
@@ -1590,11 +1600,21 @@ def keyword_search(
         # bm25 returns lower-is-better; invert sign and clamp to a friendly 0..1-ish score.
         raw = float(r["rank"])
         score = 1.0 / (1.0 + max(0.0, raw))
+        
+        # Hydrate cold chunks
+        chunk_text = r["text"]
+        storage_tier = str(r["storage_tier"] or "hot")
+        if storage_tier == "cold" and chunk_text.startswith("[COLD:"):
+            hydrated = hydrate_cold_chunk(conn, chunk_id=r["chunk_id"], data_dir=data_dir)
+            if hydrated is not None:
+                chunk_text = hydrated
+                storage_tier = "warm"  # Promoted to warm after hydration
+        
         hits.append(
             Hit(
                 chunk_id=r["chunk_id"],
                 score=score,
-                text=r["text"],
+                text=chunk_text,
                 role=r["role"],
                 source_id=r["source_id"],
                 path=r["path"],
@@ -1602,7 +1622,7 @@ def keyword_search(
                 mtime=r["mtime"],
                 meta=json.loads(r["meta_json"] or "{}"),
                 source_meta=json.loads(r["source_meta_json"] or "{}"),
-                storage_tier=str(r["storage_tier"] or "hot"),
+                storage_tier=storage_tier,
             )
         )
     return hits
@@ -2354,6 +2374,349 @@ def count_chunks_stale_source_tier_promotion_candidates(
             (ft, float(source_updated_before)),
         ).fetchone()
     return int(row["n"]) if row and row["n"] is not None else 0
+
+
+def promote_chunks_for_stale_sources(
+    conn: sqlite3.Connection,
+    *,
+    source_updated_before: float,
+    source_kinds: Optional[Sequence[str]] = None,
+    from_tier: str,
+    to_tier: str,
+) -> int:
+    """Bump ``storage_tier`` from ``from_tier`` to ``to_tier`` when sources are stale. Returns rows changed."""
+    f_norm, t_norm = validate_stale_tier_promotion(from_tier, to_tier)
+    kinds_norm: Optional[List[str]] = None
+    if source_kinds:
+        kinds_norm = [k.strip().lower() for k in source_kinds if k and k.strip()]
+        if not kinds_norm:
+            kinds_norm = None
+    before = int(conn.total_changes)
+    sub = [
+        "SELECT c.chunk_id FROM chunks c ",
+        "JOIN sources s ON s.source_id = c.source_id ",
+        "WHERE COALESCE(c.storage_tier, 'hot') = ? AND s.updated_at < ? ",
+    ]
+
+
+def consolidate_chunks_to_warm(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    data_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Consolidate chunks from a source into a warm-tier summary.
+    
+    Groups chunks by source, summarizes them via LLM, and replaces
+    the original chunks with a single summary chunk marked as 'warm'.
+    
+    Returns: {"original_count": int, "summary_count": int, "promoted": int}
+    """
+    from gemini_client import gemini_chat
+    
+    # Get all hot chunks for this source
+    rows = conn.execute(
+        "SELECT chunk_id, text, meta_json FROM chunks "
+        "WHERE source_id = ? AND COALESCE(storage_tier, 'hot') = 'hot' "
+        "ORDER BY seq",
+        (source_id,),
+    ).fetchall()
+    
+    if len(rows) <= 1:
+        # Nothing to consolidate
+        return {"original_count": len(rows), "summary_count": 0, "promoted": 0}
+    
+    original_count = len(rows)
+    
+    # Group chunks into batches for summarization
+    batch_size = 10
+    batches = [rows[i:i + batch_size] for i in range(0, len(rows), batch_size)]
+    
+    promoted = 0
+    summary_count = 0
+    
+    for batch in batches:
+        # Combine texts for summarization
+        texts = [r["text"] for r in batch]
+        combined = "\n\n---\n\n".join(texts)
+        
+        # Truncate if too long for LLM
+        if len(combined) > 8000:
+            combined = combined[:8000] + "..."
+        
+        # Generate summary
+        try:
+            summary = gemini_chat(
+                system=(
+                    "You condense multiple text chunks into a single concise summary. "
+                    "Preserve key facts, entities, and relationships. "
+                    "Output only the summary text, no JSON or formatting."
+                ),
+                messages=[{"role": "user", "content": combined}],
+                data_dir=data_dir,
+                max_output_tokens=500,
+            )
+            summary = str(summary).strip()
+            
+            if not summary:
+                continue
+            
+            # Create summary chunk
+            summary_chunk_id = f"warm-{source_id}-{promoted}"
+            summary_meta = json.dumps({
+                "consolidated_from": [r["chunk_id"] for r in batch],
+                "original_count": len(batch),
+                "consolidated_at": time.time(),
+            })
+            
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, source_id, seq, text, meta_json, storage_tier) "
+                "VALUES (?, ?, ?, ?, ?, 'warm')",
+                (summary_chunk_id, source_id, promoted, summary, summary_meta),
+            )
+            
+            # Mark original chunks as warm (they're now superseded)
+            for r in batch:
+                conn.execute(
+                    "UPDATE chunks SET storage_tier = 'warm' WHERE chunk_id = ?",
+                    (r["chunk_id"],),
+                )
+            
+            promoted += len(batch)
+            summary_count += 1
+            
+        except Exception as e:
+            log.warning(f"Failed to consolidate batch for source {source_id}: {e}")
+            continue
+    
+    conn.commit()
+    
+    return {
+        "original_count": original_count,
+        "summary_count": summary_count,
+        "promoted": promoted,
+    }
+
+
+def offload_chunks_to_cold(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    data_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Offload warm chunks to cold tier (sparse file storage).
+    
+    Moves chunk text to external files in data_dir/cold/ and replaces
+    with a reference. Returns: {"offloaded": int, "file_path": str}
+    """
+    if data_dir is None:
+        return {"offloaded": 0, "file_path": "", "error": "data_dir required"}
+    
+    cold_dir = data_dir / "cold"
+    cold_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Get all warm chunks for this source (or hot if no warm)
+    rows = conn.execute(
+        "SELECT chunk_id, text, meta_json FROM chunks "
+        "WHERE source_id = ? AND COALESCE(storage_tier, 'hot') IN ('warm', 'hot') "
+        "ORDER BY seq",
+        (source_id,),
+    ).fetchall()
+    
+    if not rows:
+        return {"offloaded": 0, "file_path": "", "error": "no warm or hot chunks found"}
+    
+    # Create cold storage file for this source
+    cold_file = cold_dir / f"{source_id}.cold"
+    cold_data = {}
+    
+    for r in rows:
+        chunk_id = r["chunk_id"]
+        text = r["text"]
+        meta = json.loads(r["meta_json"] or "{}")
+        cold_data[chunk_id] = {
+            "text": text,
+            "meta": meta,
+        }
+    
+    # Write to cold file
+    try:
+        import gzip
+        with gzip.open(cold_file, "wt", encoding="utf-8") as f:
+            json.dump(cold_data, f, ensure_ascii=False)
+    except Exception as e:
+        return {"offloaded": 0, "file_path": str(cold_file), "error": str(e)}
+    
+    # Update chunks to cold tier with reference
+    offloaded = 0
+    for r in rows:
+        chunk_id = r["chunk_id"]
+        meta = json.loads(r["meta_json"] or "{}")
+        meta["cold_file"] = str(cold_file.name)
+        meta["cold_offloaded_at"] = time.time()
+        
+        conn.execute(
+            "UPDATE chunks SET text = ?, meta_json = ?, storage_tier = 'cold' WHERE chunk_id = ?",
+            (f"[COLD: {chunk_id}]", json.dumps(meta), chunk_id),
+        )
+        offloaded += 1
+    
+    conn.commit()
+    
+    return {
+        "offloaded": offloaded,
+        "file_path": str(cold_file),
+    }
+
+
+def hydrate_cold_chunk(
+    conn: sqlite3.Connection,
+    *,
+    chunk_id: str,
+    data_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Hydrate a cold chunk by loading its text from the cold file.
+    
+    Returns the hydrated text, or None if hydration fails.
+    """
+    if data_dir is None:
+        return None
+    
+    # Get chunk metadata to find cold file
+    row = conn.execute(
+        "SELECT meta_json, storage_tier FROM chunks WHERE chunk_id = ?",
+        (chunk_id,),
+    ).fetchone()
+    
+    if not row:
+        return None
+    
+    if row["storage_tier"] != "cold":
+        # Not a cold chunk, return current text
+        text_row = conn.execute("SELECT text FROM chunks WHERE chunk_id = ?", (chunk_id,)).fetchone()
+        return text_row["text"] if text_row else None
+    
+    meta = json.loads(row["meta_json"] or "{}")
+    cold_file_name = meta.get("cold_file")
+    
+    if not cold_file_name:
+        return None
+    
+    cold_file = data_dir / "cold" / cold_file_name
+    
+    if not cold_file.exists():
+        return None
+    
+    try:
+        import gzip
+        with gzip.open(cold_file, "rt", encoding="utf-8") as f:
+            cold_data = json.load(f)
+        
+        chunk_data = cold_data.get(chunk_id)
+        if not chunk_data:
+            return None
+        
+        hydrated_text = chunk_data.get("text", "")
+        
+        # Update chunk with hydrated text (promote back to warm)
+        meta["cold_hydrated_at"] = time.time()
+        conn.execute(
+            "UPDATE chunks SET text = ?, meta_json = ?, storage_tier = 'warm' WHERE chunk_id = ?",
+            (hydrated_text, json.dumps(meta), chunk_id),
+        )
+        conn.commit()
+        
+        return hydrated_text
+        
+    except Exception as e:
+        log.warning(f"Failed to hydrate cold chunk {chunk_id}: {e}")
+        return None
+
+
+def _chunk_fingerprint(text: str) -> str:
+    """Generate a content fingerprint for deduplication (first 400 chars, whitespace-normalized)."""
+    normalized = " ".join(text[:400].split())
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+
+def deduplicate_chunks_by_fingerprint(
+    conn: sqlite3.Connection,
+    *,
+    min_chunk_age_days: float = 7.0,
+) -> Dict[str, Any]:
+    """Deduplicate chunks by content fingerprint.
+    
+    Keeps the newest chunk per fingerprint and marks older duplicates for deletion.
+    Returns: {"duplicates_found": int, "duplicates_removed": int, "fingerprints": int}
+    """
+    cutoff = time.time() - min_chunk_age_days * 86400.0
+    
+    # Get all chunks older than cutoff
+    rows = conn.execute(
+        "SELECT chunk_id, source_id, text, seq, mtime FROM chunks "
+        "WHERE source_id IN (SELECT source_id FROM sources WHERE updated_at < ?)",
+        (cutoff,),
+    ).fetchall()
+    
+    fingerprint_map: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        fp = _chunk_fingerprint(r["text"])
+        fingerprint_map[fp].append({
+            "chunk_id": r["chunk_id"],
+            "source_id": r["source_id"],
+            "seq": r["seq"],
+            "mtime": r["mtime"],
+        })
+    
+    duplicates_found = 0
+    duplicates_removed = 0
+    
+    for fp, chunks in fingerprint_map.items():
+        if len(chunks) <= 1:
+            continue
+        
+        duplicates_found += len(chunks) - 1
+        # Keep the newest chunk (highest mtime)
+        chunks.sort(key=lambda c: c["mtime"], reverse=True)
+        keep = chunks[0]
+        remove = chunks[1:]
+        
+        for c in remove:
+            conn.execute("DELETE FROM chunks WHERE chunk_id = ?", (c["chunk_id"],))
+            duplicates_removed += 1
+    
+    conn.commit()
+    
+    return {
+        "duplicates_found": duplicates_found,
+        "duplicates_removed": duplicates_removed,
+        "fingerprints": len(fingerprint_map),
+        "min_chunk_age_days": min_chunk_age_days,
+    }
+
+
+def vacuum_database(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Run SQLite VACUUM to reclaim free space.
+    
+    This is a blocking operation that rebuilds the entire database.
+    Returns: {"before_bytes": int, "after_bytes": int, "reclaimed_bytes": int}
+    """
+    before = sqlite_storage_fingerprint(conn)
+    before_bytes = before.get("db_file_bytes", 0)
+    
+    # VACUUM requires no other connections to the database
+    conn.execute("VACUUM")
+    
+    after = sqlite_storage_fingerprint(conn)
+    after_bytes = after.get("db_file_bytes", 0)
+    
+    reclaimed = max(0, before_bytes - after_bytes)
+    
+    return {
+        "before_bytes": before_bytes,
+        "after_bytes": after_bytes,
+        "reclaimed_bytes": reclaimed,
+    }
 
 
 def promote_chunks_for_stale_sources(
