@@ -26,6 +26,7 @@ import re
 import shutil
 import sqlite3
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -2651,10 +2652,11 @@ def deduplicate_chunks_by_fingerprint(
     """
     cutoff = time.time() - min_chunk_age_days * 86400.0
     
-    # Get all chunks older than cutoff
+    # Get all chunks older than cutoff with source updated_at
     rows = conn.execute(
-        "SELECT chunk_id, source_id, text, seq, mtime FROM chunks "
-        "WHERE source_id IN (SELECT source_id FROM sources WHERE updated_at < ?)",
+        "SELECT c.chunk_id, c.source_id, c.text, c.seq, s.updated_at AS source_mtime "
+        "FROM chunks c JOIN sources s ON s.source_id = c.source_id "
+        "WHERE s.updated_at < ?",
         (cutoff,),
     ).fetchall()
     
@@ -2665,7 +2667,7 @@ def deduplicate_chunks_by_fingerprint(
             "chunk_id": r["chunk_id"],
             "source_id": r["source_id"],
             "seq": r["seq"],
-            "mtime": r["mtime"],
+            "mtime": r["source_mtime"],
         })
     
     duplicates_found = 0
@@ -2676,7 +2678,7 @@ def deduplicate_chunks_by_fingerprint(
             continue
         
         duplicates_found += len(chunks) - 1
-        # Keep the newest chunk (highest mtime)
+        # Keep the newest chunk (highest source mtime)
         chunks.sort(key=lambda c: c["mtime"], reverse=True)
         keep = chunks[0]
         remove = chunks[1:]
