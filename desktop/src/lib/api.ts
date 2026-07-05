@@ -1156,13 +1156,16 @@ export type SystemIssue = {
 
 export type ConsentPolicy = {
   schema_version: number;
-  readers: {
-    mcp: {
-      deny_chunk_source_kinds: string[];
-      deny_path_substrings: string[];
-      allow_screen_context_tools: boolean;
-    };
-  };
+  readers: Record<string, {
+    allowed_strata?: string[];
+    max_release_level?: number;
+    deny_chunk_source_kinds?: string[];
+    deny_path_substrings?: string[];
+    allow_screen_context_tools?: boolean;
+    release_without_ok_level?: number;
+    release_notice_threshold?: number;
+    releasable_chunk_kinds?: string[];
+  }>;
 };
 
 export async function fetchToday(): Promise<TodayBundle> {

@@ -15,6 +15,7 @@ import {
   Upload,
   Filter,
   Clock,
+  Settings,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 
@@ -24,6 +25,7 @@ import {
   connectCursor,
   fetchClaudeDesktopStatus,
   fetchCursorStatus,
+  fetchConsentPolicy,
   fetchGraphStats,
   fetchSources,
   fetchStatus,
@@ -35,9 +37,11 @@ import {
   reindexEmbeddings,
   revealInFinder,
   resolveRevealPath,
+  updateConsentPolicy,
   type Active,
   type ClaudeDesktopStatus,
   type ConnState,
+  type ConsentPolicy,
   type CursorStatus,
   type EventMsg,
   type GraphStats,
@@ -160,6 +164,173 @@ type ChecklistItem = {
   action?: { label: string; run: () => void | Promise<void> };
 };
 
+function SettingsView({
+  consentPolicy,
+  setConsentPolicy,
+  consentError,
+}: {
+  consentPolicy: ConsentPolicy | null;
+  setConsentPolicy: (policy: ConsentPolicy) => void;
+  consentError: string | null;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+
+  const strata = [
+    { id: "raw_evidence", label: "Raw Evidence", desc: "Full ambient/screen chunk text" },
+    { id: "summaries", label: "Summaries", desc: "Rolled-up ambient summaries" },
+    { id: "graph_facts", label: "Graph Facts", desc: "Durable graph nodes and edges" },
+    { id: "work_context", label: "Work Context", desc: "Releasable current-work summaries" },
+    { id: "preferences", label: "Preferences", desc: "Identity preference claims" },
+    { id: "projections", label: "Projections", desc: "Composed context bundles" },
+  ];
+
+  const readers = ["local_ui", "mcp", "connector_builder", "export_bundle"];
+
+  const getReaderSummary = (readerId: string) => {
+    if (!consentPolicy) return "";
+    const reader = consentPolicy.readers[readerId];
+    if (!reader) return "No policy set";
+    const allowedStrataIds = reader.allowed_strata || [];
+    const maxLevel = reader.max_release_level ?? 3;
+    const strataLabels = allowedStrataIds
+      .map(stratumId => strata.find(st => st.id === stratumId)?.label || stratumId)
+      .join(", ");
+    return `Access: ${strataLabels || "None"} · Max Level: ${maxLevel}/5`;
+  };
+
+  const toggleStratum = async (readerId: string, stratumId: string) => {
+    if (!consentPolicy) return;
+    const updated = { ...consentPolicy };
+    const currentStrata = updated.readers[readerId]?.allowed_strata || [];
+    const newStrata = currentStrata.includes(stratumId)
+      ? currentStrata.filter((s) => s !== stratumId)
+      : [...currentStrata, stratumId];
+    updated.readers[readerId] = {
+      ...updated.readers[readerId],
+      allowed_strata: newStrata,
+    };
+    setConsentPolicy(updated);
+    setSaving(true);
+    setSaveMsg("");
+    try {
+      await updateConsentPolicy(updated);
+      setSaveMsg("Saved");
+    } catch (e) {
+      setSaveMsg(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const updateReleaseLevel = async (readerId: string, level: number) => {
+    if (!consentPolicy) return;
+    const updated = { ...consentPolicy };
+    updated.readers[readerId] = {
+      ...updated.readers[readerId],
+      max_release_level: level,
+    };
+    setConsentPolicy(updated);
+    setSaving(true);
+    setSaveMsg("");
+    try {
+      await updateConsentPolicy(updated);
+      setSaveMsg("Saved");
+    } catch (e) {
+      setSaveMsg(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!consentPolicy) {
+    return (
+      <div className="mt-6">
+        <p className="text-sm text-muted-foreground">Loading consent policy…</p>
+        {consentError && <p className="mt-2 text-sm text-red-600">{consentError}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-6 space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-medium">Consent Policy</h2>
+        {saveMsg && (
+          <span className={`text-sm ${saveMsg === "Saved" ? "text-green-600" : "text-red-600"}`}>
+            {saveMsg}
+          </span>
+        )}
+      </div>
+
+      <p className="text-sm text-muted-foreground">
+        Control what each reader can access. Local UI sees everything by default. MCP tools are restricted to summaries and graph facts.
+      </p>
+
+      {/* Real-time preview */}
+      <section className="rounded-2xl border border-border bg-card p-4">
+        <h3 className="mb-3 font-medium">Real-time Preview</h3>
+        <div className="space-y-2">
+          {readers.map((readerId) => (
+            <div key={readerId} className="rounded-lg bg-muted/50 p-3">
+              <p className="text-sm font-medium capitalize">{readerId.replace("_", " ")}</p>
+              <p className="text-xs text-muted-foreground">{getReaderSummary(readerId)}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {readers.map((readerId) => (
+        <section key={readerId} className="rounded-2xl border border-border bg-card p-4">
+          <h3 className="mb-3 font-medium capitalize">{readerId.replace("_", " ")}</h3>
+          <div className="mb-4">
+            <label className="text-xs text-muted-foreground">Max Release Level (0-5)</label>
+            <div className="mt-1 flex gap-2">
+              {[0, 1, 2, 3, 4, 5].map((level) => (
+                <button
+                  key={level}
+                  onClick={() => void updateReleaseLevel(readerId, level)}
+                  className={`rounded px-2 py-1 text-xs ${
+                    (consentPolicy.readers[readerId]?.max_release_level ?? 3) === level
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted hover:bg-muted/80"
+                  }`}
+                >
+                  {level}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-2">
+            {strata.map((stratum) => {
+              const allowed = consentPolicy.readers[readerId]?.allowed_strata?.includes(stratum.id) ?? false;
+              return (
+                <div key={stratum.id} className="flex items-center justify-between rounded-lg p-2 hover:bg-accent/40">
+                  <div>
+                    <p className="text-sm font-medium">{stratum.label}</p>
+                    <p className="text-xs text-muted-foreground">{stratum.desc}</p>
+                  </div>
+                  <button
+                    onClick={() => void toggleStratum(readerId, stratum.id)}
+                    disabled={saving}
+                    className={`shrink-0 rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                      allowed
+                        ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                        : "bg-muted text-muted-foreground hover:bg-muted/80"
+                    }`}
+                  >
+                    {allowed ? "Allowed" : "Blocked"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 export function App() {
   const [name, setName] = useState(storedName());
   const [nameDraft, setNameDraft] = useState("");
@@ -182,14 +353,17 @@ export function App() {
   const [cursorStatus, setCursorStatus] = useState<CursorStatus | null>(null);
   const [cursorMsg, setCursorMsg] = useState("");
   const [revealError, setRevealError] = useState<string | null>(null);
+  const [currentTab, setCurrentTab] = useState<"home" | "settings">("home");
+  const [consentPolicy, setConsentPolicy] = useState<ConsentPolicy | null>(null);
+  const [consentError, setConsentError] = useState<string | null>(null);
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
 
   const load = useCallback(async () => {
     setConn("connecting");
     try {
-      const [st, srcs, gs, claude, cursor] = await Promise.all([
+      const [st, srcs, gs, claude, cursor, consent] = await Promise.all([
         fetchStatus().catch(() => null),
-        fetchSources({ 
+        fetchSources({
           limit: 500,
           source_type: sourceTypeFilter === "all" ? undefined : sourceTypeFilter,
           time_range: timeRangeFilter === "all" ? undefined : timeRangeFilter,
@@ -197,6 +371,7 @@ export function App() {
         fetchGraphStats().catch(() => null),
         fetchClaudeDesktopStatus().catch(() => null),
         fetchCursorStatus().catch(() => null),
+        fetchConsentPolicy().catch(() => null),
       ]);
       if (st) {
         setCounts(st.counts);
@@ -210,10 +385,20 @@ export function App() {
       }
       if (cursor) {
         setCursorStatus(cursor);
-        if (!cursor.connected) clearLocalFlag("cursor");
+        if (cursor.connected) {
+          setLocalFlag("cursor");
+        } else {
+          clearLocalFlag("cursor");
+        }
       }
-    } catch {
-      /* ignore */
+      if (consent) {
+        setConsentPolicy(consent);
+        setConsentError(null);
+      } else {
+        setConsentError("Failed to load consent policy");
+      }
+    } catch (e) {
+      setConsentError(e instanceof Error ? e.message : "Failed to load consent policy");
     }
   }, [sourceTypeFilter, timeRangeFilter]);
 
@@ -594,17 +779,37 @@ export function App() {
             </p>
             </div>
           </div>
-          <button
-            onClick={runReindex}
-            title="Re-embed corpus under the current model"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-accent"
-          >
-            <RefreshCw className="size-4" /> Reindex
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setCurrentTab("home")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm hover:bg-accent ${
+                currentTab === "home" ? "bg-accent" : ""
+              }`}
+            >
+              <Brain className="size-4" /> Home
+            </button>
+            <button
+              onClick={() => setCurrentTab("settings")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm hover:bg-accent ${
+                currentTab === "settings" ? "bg-accent" : ""
+              }`}
+            >
+              <Settings className="size-4" /> Settings
+            </button>
+            <button
+              onClick={runReindex}
+              title="Re-embed corpus under the current model"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-accent"
+            >
+              <RefreshCw className="size-4" /> Reindex
+            </button>
+          </div>
         </header>
 
-        {/* live dashboard */}
-        <section className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {currentTab === "home" && (
+          <>
+            {/* live dashboard */}
+            <section className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <StatTile icon={<FileText className="size-4" />} label="Sources" value={counts.sources} tint="text-sky-500" />
           <StatTile icon={<Database className="size-4" />} label="Chunks" value={counts.chunks} tint="text-blue-500" />
           <StatTile
@@ -828,6 +1033,16 @@ export function App() {
             </ul>
           )}
         </section>
+          </>
+        )}
+
+        {currentTab === "settings" && (
+          <SettingsView
+            consentPolicy={consentPolicy}
+            setConsentPolicy={setConsentPolicy}
+            consentError={consentError}
+          />
+        )}
       </div>
     </div>
   );
