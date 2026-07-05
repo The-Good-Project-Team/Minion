@@ -57,14 +57,14 @@ def test_trims_noise_keeps_user_content(conn, tmp_path: Path) -> None:
         conn, path="/docs/journal.md", kind="text", sha256="a", mtime=now - 400 * DAY,
         bytes_=10, parser="text", source_meta={},
         chunks=[("my private reflections", None, {})],
-        embeddings=np.ones((1, 384), dtype=np.float32),
+        embeddings=np.ones((1, 768), dtype=np.float32),
     )
     # DERIVED: an old ambient-summary source — must be PRUNED (>90d).
     upsert_source(
         conn, path="ambient/summary/old.md", kind="ambient-summary", sha256="b",
         mtime=now - 100 * DAY, bytes_=10, parser="ambient", source_meta={},
         chunks=[("app activity rollup", "summary", {})],
-        embeddings=np.ones((1, 384), dtype=np.float32),
+        embeddings=np.ones((1, 768), dtype=np.float32),
     )
     conn.execute(
         "INSERT INTO screen_memory_events(event_id, occurred_at, app, created_at, updated_at) "

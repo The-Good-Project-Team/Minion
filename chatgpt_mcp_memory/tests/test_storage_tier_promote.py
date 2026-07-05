@@ -25,7 +25,7 @@ from store import (  # noqa: E402
 def test_count_and_promote_stale_hot_to_warm(tmp_path: Path) -> None:
     db = tmp_path / "memory.db"
     conn = connect(db)
-    emb = np.zeros((1, 384), dtype=np.float32)
+    emb = np.zeros((1, 768), dtype=np.float32)
     upsert_source(
         conn,
         path="/stale-note.md",
@@ -65,7 +65,7 @@ def test_count_and_promote_stale_hot_to_warm(tmp_path: Path) -> None:
 def test_count_and_promote_stale_warm_to_cold(tmp_path: Path) -> None:
     db = tmp_path / "memory.db"
     conn = connect(db)
-    emb = np.zeros((1, 384), dtype=np.float32)
+    emb = np.zeros((1, 768), dtype=np.float32)
     upsert_source(
         conn,
         path="/stale-cold.md",
@@ -118,7 +118,7 @@ def test_count_and_promote_stale_warm_to_cold(tmp_path: Path) -> None:
 def test_kind_filter_excludes_non_matching_sources(tmp_path: Path) -> None:
     db = tmp_path / "memory.db"
     conn = connect(db)
-    emb = np.zeros((1, 384), dtype=np.float32)
+    emb = np.zeros((1, 768), dtype=np.float32)
     upsert_source(
         conn,
         path="/a.md",

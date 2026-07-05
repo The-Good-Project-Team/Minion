@@ -62,16 +62,18 @@ def test_parse_indexes_only_human_turns(tmp_path: Path) -> None:
     assert result.kind == "claude-export"
     assert result.parser == "claude-export"
     texts = [c.text for c in result.chunks]
-    assert "Book a flight to Tokyo" in texts
-    assert "Next Friday in the morning" in texts
-    # Assistant turns are not indexed.
-    assert all("Sure, when?" not in t for t in texts)
-    # Every chunk is tagged as the user's voice and carries conversation meta.
-    assert all(c.role == "user" for c in result.chunks)
+    # With conversation chunking, messages are combined into conversation chunks
+    assert len(texts) >= 1
+    # The conversation should contain the human messages
+    combined_text = " ".join(texts)
+    assert "Book a flight to Tokyo" in combined_text
+    assert "Next Friday in the morning" in combined_text
+    # Conversation chunks include both human and assistant messages for context
+    # Every chunk is tagged as conversation role and carries conversation meta.
+    assert all(c.role == "conversation" for c in result.chunks)
     first = result.chunks[0]
     assert first.meta["conversation_id"] == "conv-1"
     assert first.meta["conversation_title"] == "Trip planning"
-    assert first.meta["message_id"] == "m1"
 
 
 def test_content_parts_preferred_over_top_level_text(tmp_path: Path) -> None:

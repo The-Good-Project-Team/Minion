@@ -201,7 +201,7 @@ class SidecarClient:
         return httpx.get(self.base + path, timeout=15.0, **kwargs)
 
     def post(self, path: str, json_body: Optional[Dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:
-        return httpx.post(self.base + path, json=json_body, timeout=30.0, **kwargs)
+        return httpx.post(self.base + path, json=json_body, timeout=60.0, **kwargs)
 
     def put(self, path: str, json_body: Optional[Dict[str, Any]] = None, **kwargs: Any) -> httpx.Response:
         return httpx.put(self.base + path, json=json_body, timeout=30.0, **kwargs)

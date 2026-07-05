@@ -3,3 +3,4 @@
 pytest>=8
 httpx>=0.27
 websockets>=12
+networkx
