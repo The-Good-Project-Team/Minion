@@ -41,6 +41,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
+      - name: Sync sidecar resources
+        working-directory: desktop/src-tauri
+        run: bash scripts/sync_sidecar.sh
       - name: Cargo test (desktop shell)
         working-directory: desktop/src-tauri
         run: cargo test
