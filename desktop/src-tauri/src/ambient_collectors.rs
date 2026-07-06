@@ -65,27 +65,25 @@ pub fn browser_visit_record(
     }))
 }
 
+#[cfg(target_os = "macos")]
 pub fn spawn_collectors(data_dir: PathBuf) {
-    #[cfg(target_os = "macos")]
+    if crate::ambient_stream::collector_enabled(&data_dir, "process_snapshot") {
+        let dd = data_dir.clone();
+        thread::spawn(move || process_snapshot_loop(dd));
+    }
+    if crate::ambient_stream::collector_enabled(&data_dir, "clipboard_event") {
+        let dd = data_dir.clone();
+        thread::spawn(move || clipboard_loop(dd));
+    }
+    if crate::ambient_stream::collector_enabled(&data_dir, "mouse_event")
+        || crate::ambient_stream::collector_enabled(&data_dir, "keyboard_event")
     {
-        if crate::ambient_stream::collector_enabled(&data_dir, "process_snapshot") {
-            let dd = data_dir.clone();
-            thread::spawn(move || process_snapshot_loop(dd));
-        }
-        if crate::ambient_stream::collector_enabled(&data_dir, "clipboard_event") {
-            let dd = data_dir.clone();
-            thread::spawn(move || clipboard_loop(dd));
-        }
-        if crate::ambient_stream::collector_enabled(&data_dir, "mouse_event")
-            || crate::ambient_stream::collector_enabled(&data_dir, "keyboard_event")
-        {
-            let dd = data_dir.clone();
-            thread::spawn(move || input_event_loop(dd));
-        }
-        if crate::ambient_stream::collector_enabled(&data_dir, "rolling_video_clip") {
-            let dd = data_dir.clone();
-            thread::spawn(move || rolling_video_loop(dd));
-        }
+        let dd = data_dir.clone();
+        thread::spawn(move || input_event_loop(dd));
+    }
+    if crate::ambient_stream::collector_enabled(&data_dir, "rolling_video_clip") {
+        let dd = data_dir.clone();
+        thread::spawn(move || rolling_video_loop(dd));
     }
 }
 
