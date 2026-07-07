@@ -322,6 +322,7 @@ export type IdentityClaim = {
   created_at: number;
   updated_at: number;
   superseded_by?: string | null;
+  superseded_at?: number | null;
   meta?: Record<string, unknown>;
 };
 
@@ -419,6 +420,39 @@ export async function fetchIdentityMirror(params: { limit_history?: number } = {
   if (params.limit_history != null) q.set("limit_history", String(params.limit_history));
   const qs = q.toString();
   return apiFetch(`/identity/mirror${qs ? `?${qs}` : ""}`);
+}
+
+export type IdentityHistoryResponse = {
+  history: IdentityClaim[];
+  count: number;
+};
+
+/** Revision history for identity claims with supersession tracking. */
+export async function fetchIdentityHistory(params: {
+  claim_id?: string;
+  status?: string;
+  limit?: number;
+} = {}): Promise<IdentityHistoryResponse> {
+  const q = new URLSearchParams();
+  if (params.claim_id) q.set("claim_id", params.claim_id);
+  if (params.status) q.set("status", params.status);
+  if (params.limit != null) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return apiFetch(`/identity/history${qs ? `?${qs}` : ""}`);
+}
+
+export type IdentityRevertResponse = {
+  ok: boolean;
+  reverted_claim: IdentityClaim;
+  superseded_claim: IdentityClaim;
+};
+
+/** Revert to a previous identity claim version. */
+export async function revertIdentityClaim(body: { claim_id: string }): Promise<IdentityRevertResponse> {
+  return apiFetch("/identity/revert", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export type IdentityCompanionPillar = {

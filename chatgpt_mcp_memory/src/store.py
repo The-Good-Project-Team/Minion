@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS identity_claims (
     created_at    REAL NOT NULL,
     updated_at    REAL NOT NULL,
     superseded_by TEXT,
+    superseded_at REAL,
     meta_json     TEXT NOT NULL DEFAULT '{}',
     FOREIGN KEY (superseded_by) REFERENCES identity_claims(claim_id)
 );
@@ -273,6 +274,12 @@ def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
     if cols and "storage_tier" not in cols:
         conn.execute(
             "ALTER TABLE chunks ADD COLUMN storage_tier TEXT NOT NULL DEFAULT 'hot'"
+        )
+
+    identity_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(identity_claims)").fetchall()}
+    if identity_cols and "superseded_at" not in identity_cols:
+        conn.execute(
+            "ALTER TABLE identity_claims ADD COLUMN superseded_at REAL"
         )
 
     conn.execute(
@@ -1781,6 +1788,7 @@ def _row_identity_claim(row: sqlite3.Row) -> Dict[str, Any]:
         "created_at": float(row["created_at"]),
         "updated_at": float(row["updated_at"]),
         "superseded_by": row["superseded_by"],
+        "superseded_at": float(row["superseded_at"]) if row["superseded_at"] else None,
         "meta": json.loads(row["meta_json"] or "{}"),
     }
 
@@ -1818,7 +1826,7 @@ def identity_claim_insert(
 def identity_claim_get(conn: sqlite3.Connection, claim_id: str) -> Optional[Dict[str, Any]]:
     row = conn.execute(
         "SELECT claim_id, kind, text, status, confidence, source_agent, "
-        "created_at, updated_at, superseded_by, meta_json "
+        "created_at, updated_at, superseded_by, superseded_at, meta_json "
         "FROM identity_claims WHERE claim_id=?",
         (claim_id,),
     ).fetchone()
@@ -1834,7 +1842,7 @@ def identity_claim_list(
 ) -> List[Dict[str, Any]]:
     sql = (
         "SELECT claim_id, kind, text, status, confidence, source_agent, "
-        "created_at, updated_at, superseded_by, meta_json "
+        "created_at, updated_at, superseded_by, superseded_at, meta_json "
         "FROM identity_claims WHERE 1=1"
     )
     params: List[Any] = []
@@ -1859,7 +1867,7 @@ def identity_claim_patch_fields(
     meta_merge: Optional[Dict[str, Any]] = None,
 ) -> bool:
     row = conn.execute(
-        "SELECT text, status, superseded_by, meta_json FROM identity_claims WHERE claim_id=?",
+        "SELECT text, status, superseded_by, superseded_at, meta_json FROM identity_claims WHERE claim_id=?",
         (claim_id,),
     ).fetchone()
     if not row:
@@ -1867,17 +1875,21 @@ def identity_claim_patch_fields(
     new_text = text if text is not None else row["text"]
     new_status = status if status is not None else row["status"]
     new_sup = superseded_by if superseded_by is not None else row["superseded_by"]
+    new_sup_at = row["superseded_at"]
+    if superseded_by is not None and superseded_by != row["superseded_by"]:
+        new_sup_at = time.time()
     meta = json.loads(row["meta_json"] or "{}")
     if meta_merge:
         meta.update(meta_merge)
     now = time.time()
     conn.execute(
-        "UPDATE identity_claims SET text=?, status=?, superseded_by=?, "
+        "UPDATE identity_claims SET text=?, status=?, superseded_by=?, superseded_at=?, "
         "updated_at=?, meta_json=? WHERE claim_id=?",
         (
             new_text,
             new_status,
             new_sup,
+            new_sup_at,
             now,
             json.dumps(meta, ensure_ascii=False),
             claim_id,
@@ -2003,7 +2015,7 @@ def identity_claim_mirror_history(
     lim = int(max(1, min(limit, 500)))
     rows = conn.execute(
         "SELECT claim_id, kind, text, status, confidence, source_agent, "
-        "created_at, updated_at, superseded_by, meta_json FROM identity_claims "
+        "created_at, updated_at, superseded_by, superseded_at, meta_json FROM identity_claims "
         "WHERE status IN ('superseded', 'rejected') "
         "ORDER BY updated_at DESC LIMIT ?",
         (lim,),

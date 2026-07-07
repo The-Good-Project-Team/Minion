@@ -20,30 +20,43 @@ This document tracks all potential improvements for Minion beyond the core ChatG
 ## High Priority
 
 ### 2. Tiered Storage (Hot/Warm/Cold)
-- Implement storage tiers in `store.py` with `storage_tier` column
-- Hot: Recent chunks in SQLite (default)
-- Warm: Summarized/consolidated chunks
-- Cold: Offloaded to sparse files or secondary volume
-- Add lazy hydration when search hits cold IDs
-- Implementation: Add `POST /maintenance/storage-tier-promote-stale` job
+- **Completed:** storage_tier column in chunks table with default 'hot'
+- **Completed:** Tier promotion infrastructure (hot→warm→cold validation)
+- **Completed:** POST /maintenance/storage-tier-promote-stale endpoint
+- **Completed:** Storage tier counts and reporting
+- **Completed:** Warm tier - chunk summarization/consolidation via LLM
+- **Completed:** POST /maintenance/storage-tier-consolidate-warm endpoint
+- **Completed:** Cold tier - sparse file storage (gzip-compressed JSON)
+- **Completed:** POST /maintenance/storage-tier-offload-cold endpoint
+- **Completed:** Lazy hydration when search hits cold chunks
+- **Completed:** Search functions (semantic + keyword) auto-hydrate cold chunks
 
 ### 3. Background Compaction Jobs
-- Consolidate repetitive ambient captures into summaries
-- Deduplicate near-duplicate chunks using fingerprinting
-- Vacuum SQLite pages periodically
-- Implementation: Add background task queue in `api.py`
+- **Completed:** Ambient consolidation already exists in `ambient_consolidation.py`
+- **Completed:** Chunk deduplication via content fingerprint (first 400 chars, SHA-1)
+- **Completed:** POST /maintenance/chunk-deduplicate endpoint
+- **Completed:** SQLite VACUUM endpoint for space reclamation
+- **Completed:** POST /maintenance/vacuum endpoint
+- **Completed:** POST /maintenance/run-compaction (runs ambient + dedup together)
+- **Note:** Background task scheduling already exists in `memory_lifecycle.py`
 
 ### 4. Consent Policy UI
-- Visual editor for privacy scopes (desktop vs MCP vs LAN)
-- Per-stratum toggles (raw_evidence, summaries, graph_facts, etc.)
-- Real-time preview of what each reader can see
-- Implementation: New Settings tab, extend `consent_policy.py`
+- **Completed:** Visual editor for privacy scopes (desktop vs MCP vs LAN)
+- **Completed:** Per-stratum toggles (raw_evidence, summaries, graph_facts, etc.)
+- **Completed:** Real-time preview of what each reader can see
+- **Completed:** New Settings tab in desktop app with consent policy editor
+- **Completed:** Max release level controls per reader (0-5)
+- **Completed:** Toggle buttons for each privacy stratum per reader
+- **Completed:** Real-time summary showing current access for each reader
 
 ### 5. Belief Plasticity with Supersession
-- Add `superseded_by` and `superseded_at` to identity claims
-- UI to view revision history and revert changes
-- Differentiate user-authored vs model-proposed changes
-- Implementation: Extend `identity.py` schema, add history viewer in desktop
+- **Completed:** Added `superseded_at` column to identity_claims table with migration
+- **Completed:** Updated supersession logic to set superseded_at timestamp when superseded_by changes
+- **Completed:** Added GET /identity/history endpoint for revision history with supersession tracking
+- **Completed:** Added POST /identity/revert endpoint to revert identity claims to previous versions
+- **Completed:** Added TypeScript API client functions (fetchIdentityHistory, revertIdentityClaim)
+- **Completed:** Updated IdentityClaim type with superseded_at field
+- **Note:** Desktop UI integration can be added later using the new API endpoints
 
 ## Medium Priority
 

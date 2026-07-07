@@ -130,9 +130,12 @@ from store import (
     get_chunk,
     get_source,
     identity_claim_get,
+    identity_claim_list,
     identity_claim_mirror_history,
+    identity_claim_patch_fields,
     identity_audit_log_append,
     identity_edges_for_claim,
+    _row_identity_claim,
     graph_scaffold_list,
     graph_candidate_get,
     graph_candidate_list,
@@ -1761,6 +1764,108 @@ def identity_mirror(limit_history: int = 60) -> Dict[str, Any]:
     hist = identity_claim_mirror_history(conn, limit=lim)
     md = identity.build_identity_summary(conn, history_tail=min(12, lim))
     return {"markdown": md, "history": hist, "history_count": len(hist)}
+
+
+@app.get("/identity/history")
+def identity_history(
+    claim_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+) -> Dict[str, Any]:
+    """Revision history for identity claims with supersession tracking."""
+    conn = State.conn()
+    lim = int(max(1, min(limit, 500)))
+    
+    if claim_id:
+        claim = identity_claim_get(conn, claim_id)
+        if claim is None:
+            raise HTTPException(status_code=404, detail="claim not found")
+        # Get all claims that supersede or are superseded by this claim
+        rows = []
+        if claim.get("superseded_by"):
+            sup = identity_claim_get(conn, claim["superseded_by"])
+            if sup:
+                rows.append(sup)
+        # Find claims that were superseded by this one
+        superseded = conn.execute(
+            "SELECT claim_id, kind, text, status, confidence, source_agent, "
+            "created_at, updated_at, superseded_by, superseded_at, meta_json "
+            "FROM identity_claims WHERE superseded_by=? ORDER BY updated_at DESC",
+            (claim_id,),
+        ).fetchall()
+        rows.extend([_row_identity_claim(r) for r in superseded])
+        rows.append(claim)
+    else:
+        # Return history filtered by status (default to superseded/rejected)
+        filter_status = status if status in ("superseded", "rejected") else None
+        if filter_status:
+            rows = identity_claim_list(conn, status=filter_status, limit=lim)
+        else:
+            rows = identity_claim_mirror_history(conn, limit=lim)
+    
+    return {"history": rows, "count": len(rows)}
+
+
+@app.post("/identity/revert")
+def identity_revert(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Revert to a previous identity claim version."""
+    claim_id = body.get("claim_id")
+    if not claim_id:
+        raise HTTPException(status_code=400, detail="claim_id required")
+    
+    conn = State.conn()
+    claim = identity_claim_get(conn, claim_id)
+    if claim is None:
+        raise HTTPException(status_code=404, detail="claim not found")
+    
+    if claim["status"] not in ("superseded", "rejected"):
+        raise HTTPException(status_code=400, detail="can only revert superseded or rejected claims")
+    
+    # Find the claim that superseded this one
+    superseded_by = claim.get("superseded_by")
+    if not superseded_by:
+        raise HTTPException(status_code=400, detail="claim was not superseded by another claim")
+    
+    current_claim = identity_claim_get(conn, superseded_by)
+    if not current_claim:
+        raise HTTPException(status_code=404, detail="superseding claim not found")
+    
+    # Revert: set old claim to active, clear superseded fields
+    # Set current claim to superseded, point it back to the reverted claim
+    identity_claim_patch_fields(
+        conn,
+        claim_id,
+        status="active",
+        superseded_by=None,
+        meta_merge={"revision_source": "user_revert", "reverted_at": time.time()},
+    )
+    
+    identity_claim_patch_fields(
+        conn,
+        superseded_by,
+        status="superseded",
+        superseded_by=claim_id,
+        meta_merge={"revision_source": "user_revert", "reverted_at": time.time()},
+    )
+    
+    identity_audit_log_append(
+        conn,
+        action="identity_revert",
+        claim_id=claim_id,
+        detail={
+            "reverted_from": superseded_by,
+            "previous_status": claim["status"],
+            "author": "user",
+        },
+    )
+    
+    conn.commit()
+    
+    return {
+        "ok": True,
+        "reverted_claim": identity_claim_get(conn, claim_id),
+        "superseded_claim": identity_claim_get(conn, superseded_by),
+    }
 
 
 @app.get("/identity/companion")
