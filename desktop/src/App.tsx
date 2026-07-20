@@ -18,14 +18,17 @@ import {
   Settings,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { GraphVisualization } from "./components/GraphVisualization";
 
 import {
   apiErrorDetail,
   connectClaudeDesktop,
   connectCursor,
+  fetchAuditLog,
   fetchClaudeDesktopStatus,
   fetchCursorStatus,
   fetchConsentPolicy,
+  fetchFeed,
   fetchGraphStats,
   fetchSources,
   fetchStatus,
@@ -37,13 +40,20 @@ import {
   reindexEmbeddings,
   revealInFinder,
   resolveRevealPath,
+  rollbackAuditLog,
   updateConsentPolicy,
   type Active,
+  type ActivityFeedBundle,
+  type AuditLogEntry,
+  type AuditLogResponse,
   type ClaudeDesktopStatus,
   type ConnState,
   type ConsentPolicy,
+  type CouncilFeedItem,
   type CursorStatus,
   type EventMsg,
+  type FeedItem,
+  type FeedRow,
   type GraphStats,
   type SidecarStatus,
   type Source,
@@ -168,13 +178,24 @@ function SettingsView({
   consentPolicy,
   setConsentPolicy,
   consentError,
+  auditLog,
+  auditFilter,
+  setAuditFilter,
+  loadAuditLog,
+  formatFeedTime,
 }: {
   consentPolicy: ConsentPolicy | null;
   setConsentPolicy: (policy: ConsentPolicy) => void;
   consentError: string | null;
+  auditLog: AuditLogEntry[];
+  auditFilter: "all" | "identity" | "graph";
+  setAuditFilter: (filter: "all" | "identity" | "graph") => void;
+  loadAuditLog: () => void;
+  formatFeedTime: (ts: number) => string;
 }) {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
+  const [rollingBack, setRollingBack] = useState<number | null>(null);
 
   const strata = [
     { id: "raw_evidence", label: "Raw Evidence", desc: "Full ambient/screen chunk text" },
@@ -240,6 +261,22 @@ function SettingsView({
       setSaveMsg(e instanceof Error ? e.message : "Failed to save");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRollback = async (auditId: number) => {
+    setRollingBack(auditId);
+    try {
+      const result = await rollbackAuditLog(auditId);
+      if (result.ok) {
+        loadAuditLog();
+      } else {
+        console.error("Rollback failed:", result.error);
+      }
+    } catch (e) {
+      console.error("Rollback error:", e);
+    } finally {
+      setRollingBack(null);
     }
   };
 
@@ -327,6 +364,71 @@ function SettingsView({
           </div>
         </section>
       ))}
+
+      {/* Audit Log */}
+      <section className="rounded-2xl border border-border bg-card p-4">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="inline-flex items-center gap-1.5 font-medium">
+            <Clock className="size-4 text-primary" /> Audit Log
+          </h2>
+          <select
+            value={auditFilter}
+            onChange={(e) => {
+              setAuditFilter(e.target.value as any);
+              loadAuditLog();
+            }}
+            className="rounded-lg border border-border bg-background px-2 py-1 text-xs hover:bg-accent"
+          >
+            <option value="all">All Changes</option>
+            <option value="identity">Identity</option>
+            <option value="graph">Graph</option>
+          </select>
+        </div>
+
+        <div className="space-y-2 max-h-96 overflow-y-auto">
+          {auditLog.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-4">No audit log entries</p>
+          ) : (
+            auditLog.map((entry) => (
+              <div key={entry.id} className="rounded-lg bg-muted/30 p-3 text-xs">
+                <div className="flex items-center justify-between mb-1">
+                  <span className={`font-medium ${
+                    entry.entity_type === "identity" ? "text-blue-600" : "text-purple-600"
+                  }`}>
+                    {entry.entity_type}
+                  </span>
+                  <span className="text-muted-foreground">
+                    {formatFeedTime(entry.ts)}
+                  </span>
+                </div>
+                <div className="font-medium">{entry.action}</div>
+                {entry.entity_id && (
+                  <div className="text-muted-foreground truncate">ID: {entry.entity_id}</div>
+                )}
+                {Object.keys(entry.detail).length > 0 && (
+                  <details className="mt-1">
+                    <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                      Details
+                    </summary>
+                    <pre className="mt-1 text-xs bg-background p-2 rounded overflow-x-auto">
+                      {JSON.stringify(entry.detail, null, 2)}
+                    </pre>
+                  </details>
+                )}
+                {entry.entity_type === "identity" && entry.entity_id && (
+                  <button
+                    onClick={() => handleRollback(entry.id)}
+                    disabled={rollingBack === entry.id}
+                    className="mt-2 w-full rounded-lg border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-50"
+                  >
+                    {rollingBack === entry.id ? "Rolling back..." : "Rollback"}
+                  </button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </section>
     </div>
   );
 }
@@ -353,10 +455,50 @@ export function App() {
   const [cursorStatus, setCursorStatus] = useState<CursorStatus | null>(null);
   const [cursorMsg, setCursorMsg] = useState("");
   const [revealError, setRevealError] = useState<string | null>(null);
-  const [currentTab, setCurrentTab] = useState<"home" | "settings">("home");
+  const [currentTab, setCurrentTab] = useState<"home" | "graph" | "settings">("home");
   const [consentPolicy, setConsentPolicy] = useState<ConsentPolicy | null>(null);
   const [consentError, setConsentError] = useState<string | null>(null);
+  const [activityFeed, setActivityFeed] = useState<ActivityFeedBundle | null>(null);
+  const [activityFeedLoading, setActivityFeedLoading] = useState(true);
+  const [activityFeedError, setActivityFeedError] = useState<string | null>(null);
+  const [activityFeedFilter, setActivityFeedFilter] = useState<"all" | "ingest" | "ambient" | "graph" | "errors">("all");
+  const [activityTimeRange, setActivityTimeRange] = useState<"last_hour" | "last_day" | "last_week" | "all">("last_day");
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
+  const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
+  const [auditFilter, setAuditFilter] = useState<"all" | "identity" | "graph">("all");
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
+
+  const loadActivityFeed = useCallback(async (retryCount = 0) => {
+    setActivityFeedLoading(true);
+    setActivityFeedError(null);
+    try {
+      const sinceHours = activityTimeRange === "all" ? 168 : activityTimeRange === "last_week" ? 168 : activityTimeRange === "last_day" ? 24 : 1;
+      const feed = await fetchFeed({ limit: 100, since_hours: sinceHours });
+      setActivityFeed(feed);
+      setActivityFeedLoading(false);
+    } catch (e) {
+      console.error("Failed to load activity feed:", e);
+      if (retryCount < 2) {
+        // Retry automatically after a delay
+        setTimeout(() => loadActivityFeed(retryCount + 1), 1000 * (retryCount + 1));
+      } else {
+        setActivityFeedError("Failed to load activity feed");
+        setActivityFeedLoading(false);
+      }
+    }
+  }, [activityTimeRange]);
+
+  const loadAuditLog = useCallback(async () => {
+    try {
+      const response = await fetchAuditLog({ 
+        entity_type: auditFilter === "all" ? undefined : auditFilter, 
+        limit: 100 
+      });
+      setAuditLog(response.logs);
+    } catch (e) {
+      console.error("Failed to load audit log:", e);
+    }
+  }, [auditFilter]);
 
   const load = useCallback(async () => {
     setConn("connecting");
@@ -481,7 +623,14 @@ export function App() {
     }
     void load();
     void onSidecarStatus((s) => setSidecar(s));
-  }, [load]);
+    void loadActivityFeed();
+  }, [load, loadActivityFeed]);
+
+  useEffect(() => {
+    if (currentTab === "settings") {
+      void loadAuditLog();
+    }
+  }, [currentTab, loadAuditLog]);
 
   function pushFeed(path: string, stage: string, state: FeedLine["state"]) {
     setFeed((prev) => {
@@ -489,6 +638,37 @@ export function App() {
       next.unshift({ path, stage, state });
       return next.slice(0, 12);
     });
+  }
+
+  function toggleSection(sectionId: string) {
+    setCollapsedSections(prev => ({ ...prev, [sectionId]: !prev[sectionId] }));
+  }
+
+  function formatFeedTime(ts: number): string {
+    const now = Date.now() / 1000;
+    const diff = now - ts;
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  }
+
+  function isFeedItem(item: FeedRow): item is FeedItem {
+    return item.item_kind !== "council";
+  }
+
+  function isCouncilFeedItem(item: FeedRow): item is CouncilFeedItem {
+    return item.item_kind === "council";
+  }
+
+  function getFeedItemType(item: FeedRow): "ingest" | "ambient" | "graph" | "errors" | "other" {
+    if (item.item_kind === "council") return "graph";
+    const kind = item.kind?.toLowerCase() || "";
+    if (kind.includes("ingest") || kind.includes("source") || kind.includes("indexed")) return "ingest";
+    if (kind.includes("ambient") || kind.includes("screen") || kind.includes("focus")) return "ambient";
+    if (kind.includes("graph") || kind.includes("node") || kind.includes("edge")) return "graph";
+    if (kind.includes("error") || kind.includes("failed") || kind.includes("issue")) return "errors";
+    return "other";
   }
 
   // --- ingest actions (reuse the v1 path-based ingest) ---
@@ -789,6 +969,14 @@ export function App() {
               <Brain className="size-4" /> Home
             </button>
             <button
+              onClick={() => setCurrentTab("graph")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm hover:bg-accent ${
+                currentTab === "graph" ? "bg-accent" : ""
+              }`}
+            >
+              <Network className="size-4" /> Graph
+            </button>
+            <button
               onClick={() => setCurrentTab("settings")}
               className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm hover:bg-accent ${
                 currentTab === "settings" ? "bg-accent" : ""
@@ -922,6 +1110,177 @@ export function App() {
           </section>
         )}
 
+        {/* activity feed */}
+        <section className="mt-6 rounded-2xl border border-border bg-card p-4">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="inline-flex items-center gap-1.5 font-medium">
+              <Clock className="size-4 text-primary" /> Activity Feed
+            </h2>
+            <div className="flex items-center gap-2">
+              <select
+                value={activityFeedFilter}
+                onChange={(e) => setActivityFeedFilter(e.target.value as any)}
+                className="rounded-lg border border-border bg-background px-2 py-1 text-xs hover:bg-accent"
+              >
+                <option value="all">All Events</option>
+                <option value="ingest">Ingest</option>
+                <option value="ambient">Ambient</option>
+                <option value="graph">Graph</option>
+                <option value="errors">Errors</option>
+              </select>
+              <select
+                value={activityTimeRange}
+                onChange={(e) => setActivityTimeRange(e.target.value as any)}
+                className="rounded-lg border border-border bg-background px-2 py-1 text-xs hover:bg-accent"
+              >
+                <option value="last_hour">Last Hour</option>
+                <option value="last_day">Last Day</option>
+                <option value="last_week">Last Week</option>
+                <option value="all">All Time</option>
+              </select>
+            </div>
+          </div>
+
+          {activityFeedLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="size-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : activityFeedError ? (
+            <div className="text-center py-8">
+              <p className="text-sm text-muted-foreground">{activityFeedError}</p>
+              <button
+                onClick={loadActivityFeed}
+                className="mt-2 text-sm text-primary hover:underline"
+              >
+                Retry
+              </button>
+            </div>
+          ) : activityFeed ? (
+            <>
+              {activityFeed.now && (
+              <div className="mb-4 rounded-lg bg-muted/50 p-3">
+                <p className="text-xs font-medium text-muted-foreground mb-1">Now</p>
+                <p className="text-sm">{activityFeed.now.title}</p>
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {["ingest", "ambient", "graph", "errors"].map((sectionType) => {
+                const sectionItems = activityFeed.items.filter(item => {
+                  const itemType = getFeedItemType(item);
+                  if (activityFeedFilter !== "all" && itemType !== activityFeedFilter) return false;
+                  return itemType === sectionType;
+                });
+
+                if (sectionItems.length === 0) return null;
+
+                const sectionId = `activity-${sectionType}`;
+                const isCollapsed = collapsedSections[sectionId];
+
+                return (
+                  <div key={sectionId} className="rounded-lg border border-border bg-muted/30">
+                    <button
+                      onClick={() => toggleSection(sectionId)}
+                      className="flex w-full items-center justify-between p-3 hover:bg-accent/40 transition-colors"
+                    >
+                      <span className="text-sm font-medium capitalize">{sectionType} ({sectionItems.length})</span>
+                      <span className="text-muted-foreground">
+                        {isCollapsed ? "▶" : "▼"}
+                      </span>
+                    </button>
+                    {!isCollapsed && (
+                      <div className="border-t border-border p-3 space-y-2">
+                        {sectionItems.slice(0, 10).map((item, idx) => {
+                          const itemId = isFeedItem(item) ? item.feed_id : `${item.proposal.proposal_id}-${idx}`;
+                          const title = isFeedItem(item) ? item.title : item.proposal.title;
+                          const body = isFeedItem(item) ? item.body : item.proposal.summary;
+                          const refs = isFeedItem(item) ? item.refs : {};
+
+                          return (
+                            <div
+                              key={`${itemId}-${idx}`}
+                              className="flex items-start gap-2 text-xs hover:bg-accent/40 p-2 rounded cursor-pointer"
+                              onClick={() => {
+                                // Handle click to jump to source or graph node
+                                if (refs?.source_id) {
+                                  const source = sources.find(s => s.source_id === refs?.source_id);
+                                  if (source?.path) {
+                                    void handleReveal(source.path);
+                                  }
+                                } else if (refs?.node_id) {
+                                  // Navigate to graph node
+                                  setCurrentTab("graph");
+                                } else if (refs?.path) {
+                                  void handleReveal(refs.path);
+                                }
+                              }}
+                            >
+                              <span className="text-muted-foreground shrink-0">{formatFeedTime(item.ts)}</span>
+                              <div className="min-w-0 flex-1">
+                                <p className="font-medium truncate">{title}</p>
+                                {body && <p className="text-muted-foreground truncate">{body}</p>}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {sectionItems.length > 10 && (
+                          <p className="text-xs text-muted-foreground text-center">
+                            +{sectionItems.length - 10} more
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {activityFeed.items.filter(item => {
+                if (activityFeedFilter !== "all" && getFeedItemType(item) !== activityFeedFilter) return false;
+                return getFeedItemType(item) === "other";
+              }).length > 0 && (
+                <div className="rounded-lg border border-border bg-muted/30">
+                  <button
+                    onClick={() => toggleSection("activity-other")}
+                    className="flex w-full items-center justify-between p-3 hover:bg-accent/40 transition-colors"
+                  >
+                    <span className="text-sm font-medium">Other ({activityFeed.items.filter(item => getFeedItemType(item) === "other").length})</span>
+                    <span className="text-muted-foreground">
+                      {collapsedSections["activity-other"] ? "▶" : "▼"}
+                    </span>
+                  </button>
+                  {!collapsedSections["activity-other"] && (
+                    <div className="border-t border-border p-3 space-y-2">
+                      {activityFeed.items.filter(item => getFeedItemType(item) === "other").slice(0, 10).map((item, idx) => {
+                        const itemId = isFeedItem(item) ? item.feed_id : `${item.proposal.proposal_id}-${idx}`;
+                        const title = isFeedItem(item) ? item.title : item.proposal.title;
+                        const body = isFeedItem(item) ? item.body : item.proposal.summary;
+
+                        return (
+                          <div
+                            key={`${itemId}-${idx}`}
+                            className="flex items-start gap-2 text-xs hover:bg-accent/40 p-2 rounded"
+                          >
+                            <span className="text-muted-foreground shrink-0">{formatFeedTime(item.ts)}</span>
+                            <div className="min-w-0 flex-1">
+                              <p className="font-medium truncate">{title}</p>
+                              {body && <p className="text-muted-foreground truncate">{body}</p>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {activityFeed.items.length === 0 && (
+              <p className="text-sm text-muted-foreground text-center py-4">No recent activity</p>
+            )}
+            </>
+          ) : null}
+        </section>
+
         {/* connector checklist */}
         <section className="mt-6 rounded-2xl border border-border bg-card p-4">
           <div className="flex items-center justify-between">
@@ -1036,11 +1395,23 @@ export function App() {
           </>
         )}
 
+        {currentTab === "graph" && (
+          <section className="mt-6 w-full">
+            <h2 className="text-lg font-medium mb-4">Knowledge Graph</h2>
+            <GraphVisualization />
+          </section>
+        )}
+
         {currentTab === "settings" && (
           <SettingsView
             consentPolicy={consentPolicy}
             setConsentPolicy={setConsentPolicy}
             consentError={consentError}
+            auditLog={auditLog}
+            auditFilter={auditFilter}
+            setAuditFilter={setAuditFilter}
+            loadAuditLog={loadAuditLog}
+            formatFeedTime={formatFeedTime}
           />
         )}
       </div>

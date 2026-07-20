@@ -257,17 +257,43 @@ def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
 
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS identity_audit_log (
+        CREATE TABLE IF NOT EXISTS audit_log (
+            audit_id      TEXT PRIMARY KEY,
+            entity_type   TEXT NOT NULL,
+            entity_id     TEXT NOT NULL,
+            action        TEXT NOT NULL,
+            actor         TEXT NOT NULL,
+            previous_state TEXT,
+            new_state     TEXT,
+            timestamp     REAL NOT NULL,
+            reason        TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log(entity_type, entity_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS graph_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts REAL NOT NULL,
             action TEXT NOT NULL,
-            claim_id TEXT,
+            node_id TEXT,
+            edge_id TEXT,
             detail_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_identity_audit_ts ON identity_audit_log(ts DESC)"
+        "CREATE INDEX IF NOT EXISTS idx_graph_audit_ts ON graph_audit_log(ts DESC)"
     )
 
     cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(chunks)").fetchall()}
@@ -2021,6 +2047,76 @@ def identity_claim_mirror_history(
         (lim,),
     ).fetchall()
     return [_row_identity_claim(r) for r in rows]
+
+
+def graph_audit_log_append(
+    conn: sqlite3.Connection,
+    *,
+    action: str,
+    node_id: Optional[str] = None,
+    edge_id: Optional[str] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO graph_audit_log(ts, action, node_id, edge_id, detail_json) VALUES (?,?,?,?,?)",
+        (
+            time.time(),
+            action.strip()[:128],
+            node_id,
+            edge_id,
+            json.dumps(detail or {}, ensure_ascii=False),
+        ),
+    )
+
+
+def audit_log_list(
+    conn: sqlite3.Connection,
+    *,
+    entity_type: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Unified audit log combining identity and graph changes."""
+    lim = int(max(1, min(limit, 500)))
+    out: List[Dict[str, Any]] = []
+
+    # Identity audit logs
+    if entity_type is None or entity_type == "identity":
+        rows = conn.execute(
+            "SELECT id, ts, action, claim_id, detail_json FROM identity_audit_log "
+            "ORDER BY ts DESC LIMIT ?",
+            (lim,),
+        ).fetchall()
+        for r in rows:
+            out.append({
+                "id": r["id"],
+                "ts": float(r["ts"]),
+                "entity_type": "identity",
+                "entity_id": r["claim_id"],
+                "action": r["action"],
+                "detail": json.loads(r["detail_json"] or "{}"),
+            })
+
+    # Graph audit logs
+    if entity_type is None or entity_type == "graph":
+        rows = conn.execute(
+            "SELECT id, ts, action, node_id, edge_id, detail_json FROM graph_audit_log "
+            "ORDER BY ts DESC LIMIT ?",
+            (lim,),
+        ).fetchall()
+        for r in rows:
+            entity_id = r["node_id"] or r["edge_id"]
+            out.append({
+                "id": r["id"],
+                "ts": float(r["ts"]),
+                "entity_type": "graph",
+                "entity_id": entity_id,
+                "action": r["action"],
+                "detail": json.loads(r["detail_json"] or "{}"),
+            })
+
+    # Sort by timestamp descending and limit
+    out.sort(key=lambda x: x["ts"], reverse=True)
+    return out[:lim]
 
 
 def ambient_events_recent(

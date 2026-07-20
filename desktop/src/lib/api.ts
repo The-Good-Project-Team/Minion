@@ -1811,6 +1811,32 @@ export async function resolveGraphCandidate(
   });
 }
 
+export type AuditLogEntry = {
+  id: number;
+  ts: number;
+  entity_type: "identity" | "graph";
+  entity_id: string;
+  action: string;
+  detail: Record<string, unknown>;
+};
+
+export type AuditLogResponse = {
+  logs: AuditLogEntry[];
+  count: number;
+};
+
+export async function fetchAuditLog(params: { entity_type?: "identity" | "graph"; limit?: number } = {}): Promise<AuditLogResponse> {
+  const q = new URLSearchParams();
+  if (params.entity_type) q.set("entity_type", params.entity_type);
+  if (params.limit != null) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return apiFetch(`/audit${qs ? `?${qs}` : ""}`);
+}
+
+export async function rollbackAuditLog(auditId: number): Promise<{ ok: boolean; error?: string }> {
+  return apiFetch(`/audit/${auditId}/rollback`, { method: "POST" });
+}
+
 export async function fetchMenuStatus(): Promise<MenuStatusResponse> {
   return apiFetch("/menu/status");
 }

@@ -61,22 +61,30 @@ This document tracks all potential improvements for Minion beyond the core ChatG
 ## Medium Priority
 
 ### 6. Improved Activity Feed
-- Collapsible sections by event type (ingest, ambient, graph, errors)
-- Filter by event type and time range
-- Click to jump to related source or graph node
-- Implementation: Extend WebSocket events, add filter UI
+- **Completed:** Collapsible sections by event type (ingest, ambient, graph, errors)
+- **Completed:** Filter by event type and time range
+- **Completed:** Click to jump to related source or graph node
+- **Completed:** Activity feed display component in desktop app
+- **Completed:** Integration with existing /feed API endpoint
 
 ### 7. Interactive Life Graph Visualization
-- Force-directed graph with node/edge filtering
-- Color-coding by node type (person, project, obligation)
-- Click to view evidence and edit relationships
-- Implementation: Use D3 or similar library in desktop
+- **Completed:** Force-directed graph with node/edge filtering
+- **Completed:** Color-coding by node type (person, project, obligation)
+- **Completed:** Click to view evidence and edit relationships
+- **Completed:** 3D graph visualization using react-force-graph-3d
+- **Completed:** Graph tab in desktop app with filtering controls
+- **Completed:** Node details panel showing relationships and evidence
+- **Note:** Requires knowledge graph to be built first via "Build graph" action to display nodes
 
 ### 8. Audit Log Viewer
-- Log all identity and graph changes with timestamps
-- Show who/what made the change (user vs model)
-- Allow rollback of specific changes
-- Implementation: Add audit table, viewer in Settings
+- **Completed:** Log all identity and graph changes with timestamps
+- **Completed:** Show who/what made the change (user vs model)
+- **Completed:** Allow rollback of specific changes
+- **Completed:** Added graph_audit_log table for graph changes
+- **Completed:** Added unified audit log API endpoint (GET /audit)
+- **Completed:** Added rollback API endpoint (POST /audit/{id}/rollback)
+- **Completed:** Audit log viewer UI in Settings with filtering
+- **Completed:** Rollback button for identity claim entries
 
 ### 9. Identity Summary Builder
 - Extract motifs from ambient and corpus data

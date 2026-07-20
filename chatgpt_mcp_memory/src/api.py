@@ -136,6 +136,8 @@ from store import (
     identity_audit_log_append,
     identity_edges_for_claim,
     _row_identity_claim,
+    graph_audit_log_append,
+    audit_log_list,
     graph_scaffold_list,
     graph_candidate_get,
     graph_candidate_list,
@@ -2043,6 +2045,50 @@ def council_approve(body: CouncilApproveBody) -> Dict[str, Any]:
         edited_payload=body.edited_payload,
         snooze_days=body.snooze_days,
     )
+
+
+@app.get("/audit")
+def audit_log(entity_type: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
+    """Retrieve unified audit log for identity and graph changes."""
+    logs = audit_log_list(State.conn(), entity_type=entity_type, limit=limit)
+    return {"logs": logs, "count": len(logs)}
+
+
+@app.post("/audit/{audit_id}/rollback")
+def audit_rollback(audit_id: int) -> Dict[str, Any]:
+    """Rollback a specific audit log entry (identity claim revert)."""
+    conn = State.conn()
+    
+    # Find the audit entry
+    row = conn.execute(
+        "SELECT entity_type, entity_id, action, detail_json FROM identity_audit_log WHERE id=?",
+        (audit_id,),
+    ).fetchone()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Audit entry not found")
+    
+    entity_type = row["entity_type"]
+    entity_id = row["entity_id"]
+    action = row["action"]
+    detail = json.loads(row["detail_json"] or "{}")
+    
+    # Only support identity claim rollback for now
+    if entity_type != "identity" or not entity_id:
+        return {"ok": False, "error": "Rollback only supported for identity claims"}
+    
+    try:
+        from store import identity_claim_patch_fields
+        identity_claim_patch_fields(
+            conn,
+            claim_id=entity_id,
+            status="proposed",
+            meta_merge={"revision_source": "audit_rollback", "rolled_back_at": time.time()},
+        )
+        conn.commit()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/graph/communities")
