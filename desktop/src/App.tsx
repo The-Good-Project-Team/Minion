@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { GraphVisualization } from "./components/GraphVisualization";
+import { IdentityMirror } from "./components/IdentityMirror";
 
 import {
   apiErrorDetail,
@@ -469,7 +470,10 @@ export function App() {
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
 
   const loadActivityFeed = useCallback(async (retryCount = 0) => {
-    setActivityFeedLoading(true);
+    // Only show loading state if we don't have data yet
+    if (!activityFeed) {
+      setActivityFeedLoading(true);
+    }
     setActivityFeedError(null);
     try {
       const sinceHours = activityTimeRange === "all" ? 168 : activityTimeRange === "last_week" ? 168 : activityTimeRange === "last_day" ? 24 : 1;
@@ -482,11 +486,14 @@ export function App() {
         // Retry automatically after a delay
         setTimeout(() => loadActivityFeed(retryCount + 1), 1000 * (retryCount + 1));
       } else {
-        setActivityFeedError("Failed to load activity feed");
+        // Only show error if we don't have any data
+        if (!activityFeed) {
+          setActivityFeedError("Failed to load activity feed");
+        }
         setActivityFeedLoading(false);
       }
     }
-  }, [activityTimeRange]);
+  }, [activityTimeRange, activityFeed]);
 
   const loadAuditLog = useCallback(async () => {
     try {
@@ -623,8 +630,14 @@ export function App() {
     }
     void load();
     void onSidecarStatus((s) => setSidecar(s));
-    void loadActivityFeed();
-  }, [load, loadActivityFeed]);
+  }, [load]);
+
+  useEffect(() => {
+    // Only load activity feed when sidecar is ready
+    if (sidecar?.state === "ready") {
+      void loadActivityFeed();
+    }
+  }, [sidecar?.state, loadActivityFeed]);
 
   useEffect(() => {
     if (currentTab === "settings") {
@@ -1149,7 +1162,7 @@ export function App() {
             <div className="text-center py-8">
               <p className="text-sm text-muted-foreground">{activityFeedError}</p>
               <button
-                onClick={loadActivityFeed}
+                onClick={() => loadActivityFeed()}
                 className="mt-2 text-sm text-primary hover:underline"
               >
                 Retry
@@ -1280,6 +1293,9 @@ export function App() {
             </>
           ) : null}
         </section>
+
+        {/* identity mirror */}
+        <IdentityMirror sidecarReady={sidecar?.state === "ready"} />
 
         {/* connector checklist */}
         <section className="mt-6 rounded-2xl border border-border bg-card p-4">

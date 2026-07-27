@@ -1754,8 +1754,8 @@ def identity_patch_claim(claim_id: str, body: IdentityPatchBody) -> Dict[str, An
 
 
 @app.get("/identity/summary")
-def identity_summary() -> Dict[str, Any]:
-    return {"markdown": identity.build_identity_summary(State.conn())}
+def identity_summary(include_evidence: bool = True) -> Dict[str, Any]:
+    return {"markdown": identity.build_identity_summary(State.conn(), include_evidence=include_evidence)}
 
 
 @app.get("/identity/mirror")

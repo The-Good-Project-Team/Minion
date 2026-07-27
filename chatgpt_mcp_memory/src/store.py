@@ -175,6 +175,17 @@ CREATE TABLE IF NOT EXISTS preference_clusters (
 );
 
 CREATE INDEX IF NOT EXISTS idx_preference_clusters_run ON preference_clusters(run_at);
+
+CREATE TABLE IF NOT EXISTS identity_audit_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           REAL NOT NULL,
+    action       TEXT NOT NULL,
+    claim_id     TEXT,
+    detail_json  TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_identity_audit_log_ts ON identity_audit_log(ts);
+CREATE INDEX IF NOT EXISTS idx_identity_audit_log_claim ON identity_audit_log(claim_id);
 """
 
 
@@ -303,6 +314,10 @@ def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
         )
 
     identity_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(identity_claims)").fetchall()}
+    if identity_cols and "updated_at" not in identity_cols:
+        conn.execute(
+            "ALTER TABLE identity_claims ADD COLUMN updated_at REAL NOT NULL DEFAULT 0"
+        )
     if identity_cols and "superseded_at" not in identity_cols:
         conn.execute(
             "ALTER TABLE identity_claims ADD COLUMN superseded_at REAL"

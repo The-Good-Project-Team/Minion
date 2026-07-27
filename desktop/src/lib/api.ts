@@ -415,9 +415,10 @@ export type IdentityMirrorResponse = {
 };
 
 /** Time-aware mirror digest + superseded/rejected claims (desktop Identity → Mirror). */
-export async function fetchIdentityMirror(params: { limit_history?: number } = {}): Promise<IdentityMirrorResponse> {
+export async function fetchIdentityMirror(params: { limit_history?: number; include_evidence?: boolean } = {}): Promise<IdentityMirrorResponse> {
   const q = new URLSearchParams();
   if (params.limit_history != null) q.set("limit_history", String(params.limit_history));
+  if (params.include_evidence != null) q.set("include_evidence", String(params.include_evidence));
   const qs = q.toString();
   return apiFetch(`/identity/mirror${qs ? `?${qs}` : ""}`);
 }

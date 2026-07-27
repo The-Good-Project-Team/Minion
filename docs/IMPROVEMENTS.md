@@ -87,10 +87,13 @@ This document tracks all potential improvements for Minion beyond the core ChatG
 - **Completed:** Rollback button for identity claim entries
 
 ### 9. Identity Summary Builder
-- Extract motifs from ambient and corpus data
-- Generate narrative summaries with evidence links
-- Show current stance vs historical changes
-- Implementation: Extend `identity.py`, add Mirror UI
+- **Completed:** Enhanced build_identity_summary to extract motifs from ambient and corpus data
+- **Completed:** Generate narrative summaries with evidence links
+- **Completed:** Show current stance vs historical changes with evolution tracking
+- **Completed:** Added include_evidence parameter to control evidence display
+- **Completed:** Updated API endpoint (GET /identity/summary) with include_evidence parameter
+- **Completed:** Created IdentityMirror UI component with markdown rendering
+- **Completed:** Added IdentityMirror to home tab in desktop app
 
 ### 10. Multi-Monitor Screen Capture
 - Detect all connected displays

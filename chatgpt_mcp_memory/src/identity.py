@@ -201,30 +201,73 @@ def build_identity_summary(
     max_claims: int = 40,
     max_clusters: int = 8,
     history_tail: int = 0,
+    include_evidence: bool = True,
 ) -> str:
     active = identity_claim_list(conn, status="active", limit=max_claims)
     proposed = identity_claim_list(conn, status="proposed", limit=min(20, max_claims))
     clusters = preference_clusters_list(conn)[:max_clusters]
 
-    lines: List[str] = ["## Identity snapshot (Minion)"]
+    lines: List[str] = ["## Identity Mirror (Minion)"]
+    
+    # Narrative introduction
+    lines.append("This mirror reflects your current identity stance based on active claims,")
+    lines.append("derived preference patterns, and recent attention signals.")
+    lines.append("")
+    
+    # Group active claims by kind for narrative structure
     if active:
-        lines.append("### Active claims")
+        lines.append("### Current Stance")
+        lines.append("")
+        
+        # Group by kind
+        by_kind: Dict[str, List[Dict[str, Any]]] = {}
         for c in active:
-            meta = c.get("meta") or {}
-            rel = meta.get("relation")
-            labels = meta.get("labels")
-            suffix = ""
-            if rel:
-                suffix += f" _(relation: {rel})_"
-            if isinstance(labels, list) and labels:
-                lab = ", ".join(str(x) for x in labels[:12])
-                suffix += f" `{lab}`"
-            lines.append(f"- **{c['kind']}**: {c['text']}{suffix}")
+            kind = c.get("kind", "other")
+            if kind not in by_kind:
+                by_kind[kind] = []
+            by_kind[kind].append(c)
+        
+        # Narrative per kind
+        for kind in ["preference", "value", "relationship", "goal", "boundary", "fact"]:
+            if kind not in by_kind:
+                continue
+            claims = by_kind[kind]
+            lines.append(f"#### {kind.capitalize()}s ({len(claims)})")
+            
+            for c in claims:
+                meta = c.get("meta") or {}
+                rel = meta.get("relation")
+                labels = meta.get("labels")
+                suffix = ""
+                if rel:
+                    suffix += f" _(relation: {rel})_"
+                if isinstance(labels, list) and labels:
+                    lab = ", ".join(str(x) for x in labels[:12])
+                    suffix += f" `{lab}`"
+                lines.append(f"- {c['text']}{suffix}")
+                
+                # Add evidence links if requested
+                if include_evidence:
+                    edges = identity_edges_for_claim(conn, c["claim_id"])
+                    if edges:
+                        lines.append(f"  _Evidence: {len(edges)} source(s)_")
+                        for e in edges[:3]:  # Show top 3 evidence sources
+                            chunk = get_chunk(conn, e.get("chunk_id"))
+                            if chunk:
+                                source_path = chunk.get("path", "?")
+                                lines.append(f"  - `{source_path}`")
+                        if len(edges) > 3:
+                            lines.append(f"  - _and {len(edges) - 3} more_")
+                lines.append("")
     else:
-        lines.append("### Active claims\n- _(none yet)_")
+        lines.append("### Current Stance")
+        lines.append("_No active claims yet. Your identity mirror will populate as you build preferences and values._")
+        lines.append("")
 
     if proposed:
-        lines.append("### Pending proposals (need user review)")
+        lines.append("### Pending Proposals")
+        lines.append(f"_{len(proposed)} proposal(s) awaiting your review._")
+        lines.append("")
         for c in proposed:
             who = f" — _via {c['source_agent']}_" if c.get("source_agent") else ""
             meta = c.get("meta") or {}
@@ -236,9 +279,18 @@ def build_identity_summary(
             if isinstance(labels, list) and labels:
                 sfx += f" `{', '.join(str(x) for x in labels[:12])}`"
             lines.append(f"- **{c['kind']}** (`{c['claim_id']}`){who}: {c['text']}{sfx}")
+            
+            # Add evidence for proposed claims
+            if include_evidence:
+                edges = identity_edges_for_claim(conn, c["claim_id"])
+                if edges:
+                    lines.append(f"  _Supported by {len(edges)} evidence source(s)_")
+            lines.append("")
 
     if clusters:
-        lines.append("### Preference clusters (derived)")
+        lines.append("### Derived Patterns")
+        lines.append("These patterns emerge from clustering your ambient and corpus data:")
+        lines.append("")
         seen_run: Optional[float] = None
         for cl in clusters:
             if seen_run is None:
@@ -246,38 +298,53 @@ def build_identity_summary(
             if cl["run_at"] != seen_run:
                 break
             lines.append(f"- **{cl['label']}**: {cl['summary']}")
+            # Add member count
+            members = cl.get("member_chunk_ids") or []
+            if members:
+                lines.append(f"  _Pattern strength: {len(members)} data points_")
+        lines.append("")
 
+    # Ambient attention motifs
     since_24h = time.time() - 86400.0
     ambient = ambient_events_since(conn, since_ts=since_24h, limit=120)
     if ambient:
-        lines.append("### Recent attention (24h)")
+        lines.append("### Recent Attention (24h)")
+        lines.append("")
         apps = Counter(
             str((e.get("payload") or {}).get("app_name") or "?") for e in ambient
         )
         if apps:
             top = ", ".join(f"{a} ({c})" for a, c in apps.most_common(6))
-            lines.append(f"- Apps: {top}")
+            lines.append(f"**Primary focus areas:** {top}")
+            lines.append("")
+        lines.append("**Recent activity:**")
         for e in ambient[:5]:
             p = e.get("payload") or {}
             title = p.get("window_title") or p.get("app_name") or "?"
             ts = e.get("captured_at")
             eid = e.get("event_id", "")
-            lines.append(f"- [{ts}] {title} _(event `{eid}`)_")
+            lines.append(f"- {title} _(event `{eid}`)_")
+        lines.append("")
 
+    # Historical changes comparison
     ht = int(max(0, min(history_tail, 500)))
     if ht > 0:
         hist = identity_claim_mirror_history(conn, limit=ht)
         if hist:
-            lines.append("### Recent revisions (superseded / rejected)")
+            lines.append("### Evolution of Stance")
+            lines.append("Recent changes to your identity claims:")
+            lines.append("")
             for c in hist:
                 meta = c.get("meta") or {}
                 rs = meta.get("revision_source") or "unknown"
                 who = f" — _source: {rs}_"
-                sup = f" → `{c['superseded_by']}`" if c.get("superseded_by") else ""
+                sup = f" → superseded by `{c['superseded_by']}`" if c.get("superseded_by") else ""
                 excerpt = c["text"][:280] + ("…" if len(c["text"]) > 280 else "")
+                status_emoji = "🔄" if c.get("status") == "superseded" else "❌"
                 lines.append(
-                    f"- **{c['kind']}** ({c['status']}){who}{sup}: {excerpt}"
+                    f"- {status_emoji} **{c['kind']}** ({c['status']}){who}{sup}: {excerpt}"
                 )
+            lines.append("")
 
     return "\n".join(lines) + "\n"
 
