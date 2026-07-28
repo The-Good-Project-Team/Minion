@@ -96,22 +96,26 @@ This document tracks all potential improvements for Minion beyond the core ChatG
 - **Completed:** Added IdentityMirror to home tab in desktop app
 
 ### 10. Multi-Monitor Screen Capture
-- Detect all connected displays
-- Allow per-monitor capture toggles
-- Support different capture settings per monitor
-- Implementation: Extend `screen_reader.rs` in Rust
+- **Completed:** Detect all connected displays using CGGetActiveDisplayList
+- **Completed:** Associate windows with their display based on window center position
+- **Completed:** Allow per-monitor capture toggles via environment variables (screen_reader_display_{display_id})
+- **Completed:** Support deny list file (display_deny.txt) for blocking specific displays
+- **Completed:** Include display_id in window snapshot records
+- **Implementation:** Extended `screen_reader.rs` with display enumeration and filtering
 
 ### 11. Local Whisper Audio Transcription
-- Integrate local Whisper model for ambient audio
-- Add transcription to ambient-audio chunks
-- Configurable quality/speed tradeoff
-- Implementation: Add to `ambient_pipeline.py`
+- **Completed:** Integrate faster-whisper for local audio transcription
+- **Completed:** Add transcription to ambient-audio chunks via listening_ingest.py
+- **Completed:** Configurable quality/speed tradeoff via MINION_WHISPER_MODEL environment variable (default: tiny.en)
+- **Completed:** CPU int8 compute type for efficiency
+- **Completed:** Integration with audio/video parsers and ambient pipeline
+- **Implementation:** Already exists in parsers/audio.py and listening_ingest.py
 
 ### 12. Enhanced MCP Tools
-- `working_context` - current active sources and recent attention
-- `wiki_proposal` - suggest wiki pages from graph
-- Better error handling and documentation
-- Implementation: Extend `mcp_server.py`
+- **Completed:** `working_context` - current active sources and recent attention (already existed in second_brain.py)
+- **Completed:** `wiki_proposal` - suggest wiki pages from graph nodes without pages or recent activity patterns
+- **Completed:** Better error handling and documentation throughout MCP server
+- **Implementation:** Extended `mcp_server.py` with wiki_proposal tool
 
 ## Low Priority
 

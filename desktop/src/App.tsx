@@ -510,7 +510,19 @@ export function App() {
   const load = useCallback(async () => {
     setConn("connecting");
     try {
-      const [st, srcs, gs, claude, cursor, consent] = await Promise.all([
+      const consent = await fetchConsentPolicy().catch(() => null);
+      if (consent) {
+        setConsentPolicy(consent);
+        setConsentError(null);
+      } else {
+        setConsentError("Failed to load consent policy");
+      }
+    } catch (e) {
+      setConsentError(e instanceof Error ? e.message : "Failed to load consent policy");
+    }
+
+    try {
+      const [st, srcs, gs, claude, cursor] = await Promise.all([
         fetchStatus().catch(() => null),
         fetchSources({
           limit: 500,
@@ -520,7 +532,6 @@ export function App() {
         fetchGraphStats().catch(() => null),
         fetchClaudeDesktopStatus().catch(() => null),
         fetchCursorStatus().catch(() => null),
-        fetchConsentPolicy().catch(() => null),
       ]);
       if (st) {
         setCounts(st.counts);
@@ -540,14 +551,8 @@ export function App() {
           clearLocalFlag("cursor");
         }
       }
-      if (consent) {
-        setConsentPolicy(consent);
-        setConsentError(null);
-      } else {
-        setConsentError("Failed to load consent policy");
-      }
     } catch (e) {
-      setConsentError(e instanceof Error ? e.message : "Failed to load consent policy");
+      console.error("Failed to load dashboard data:", e);
     }
   }, [sourceTypeFilter, timeRangeFilter]);
 

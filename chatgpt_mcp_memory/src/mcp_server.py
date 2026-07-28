@@ -1373,6 +1373,101 @@ def _tool_propose_wiki_update(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "ok", "page_id": pid, "page": wiki_page_get(conn, pid)}
 
 
+def _tool_wiki_proposal(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Suggest wiki pages from graph or content analysis.
+    
+    Returns candidate wiki page proposals based on:
+    - Graph nodes that don't have corresponding wiki pages
+    - High-confidence graph clusters that could become topics
+    - Recent activity patterns suggesting new topics
+    """
+    conn = _get_conn()
+    query = str(args.get("query") or "").strip()
+    limit = int(args.get("limit") or 5)
+    limit = max(1, min(20, limit))
+    
+    proposals: List[Dict[str, Any]] = []
+    
+    # Check for high-confidence graph nodes without wiki pages
+    try:
+        from graph_retrieval import graph_match_node_ids
+        
+        if query:
+            node_ids = graph_match_node_ids(conn, query, limit=limit * 2)
+        else:
+            # Get high-confidence nodes regardless of query
+            rows = conn.execute(
+                "SELECT node_id FROM graph_nodes WHERE confidence >= 0.6 "
+                "ORDER BY confidence DESC LIMIT ?",
+                (limit * 2,)
+            ).fetchall()
+            node_ids = [str(r["node_id"]) for r in rows]
+        
+        existing_pages = {str(p["page_id"]) for p in wiki_page_list(conn, limit=1000)}
+        
+        for node_id in node_ids[:limit]:
+            if node_id in existing_pages:
+                continue
+            row = conn.execute(
+                "SELECT node_id, node_kind, title, summary, confidence "
+                "FROM graph_nodes WHERE node_id=?",
+                (node_id,)
+            ).fetchone()
+            if row:
+                proposals.append({
+                    "page_id": node_id,
+                    "title": str(row["title"] or row["node_kind"] or "Untitled"),
+                    "page_type": str(row["node_kind"] or "topic"),
+                    "summary": str(row["summary"] or "")[:400],
+                    "confidence": float(row["confidence"] or 0),
+                    "reason": "High-confidence graph node without wiki page",
+                    "source": "graph"
+                })
+    except Exception:
+        pass
+    
+    # If no proposals from graph, suggest based on recent activity
+    if not proposals:
+        try:
+            import time as _time
+            from store import ambient_events_since
+            
+            since_24h = _time.time() - 86400.0
+            events = ambient_events_since(conn, since_ts=since_24h, limit=200)
+            
+            # Count app/window combinations
+            from collections import Counter
+            combos = Counter()
+            for e in events:
+                payload = e.get("payload") or {}
+                app = str(payload.get("app_name") or "")
+                title = str(payload.get("window_title") or "")
+                if app and title:
+                    combos[(app, title)] += 1
+            
+            # Suggest topics from frequently accessed windows
+            for (app, title), count in combos.most_common(limit):
+                if count >= 3 and len(title) > 5:
+                    page_id = f"topic:{title.lower().replace(' ', '_')[:40]}"
+                    proposals.append({
+                        "page_id": page_id,
+                        "title": title[:80],
+                        "page_type": "topic",
+                        "summary": f"Frequently accessed window in {app} ({count} times in 24h)",
+                        "confidence": min(0.7, 0.3 + count * 0.1),
+                        "reason": "Frequently accessed window pattern",
+                        "source": "activity"
+                    })
+        except Exception:
+            pass
+    
+    return {
+        "status": "ok",
+        "proposals": proposals[:limit],
+        "count": len(proposals[:limit])
+    }
+
+
 def _tool_list_inferred_work(args: Dict[str, Any]) -> Dict[str, Any]:
     conn = _get_conn()
     origin = args.get("origin")
@@ -1998,6 +2093,19 @@ TOOLS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "wiki_proposal",
+        "title": "Suggest wiki pages from graph",
+        "description": "Suggests wiki page proposals based on graph nodes without pages or recent activity patterns.",
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "query": {"type": "string", "description": "Optional query to find relevant graph nodes"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+            },
+        },
+    },
+    {
         "name": "list_inferred_work",
         "title": "List inferred work items",
         "inputSchema": {
@@ -2336,6 +2444,7 @@ _DISPATCH = {
     "list_wiki_pages": _tool_list_wiki_pages,
     "get_wiki_page": _tool_get_wiki_page,
     "propose_wiki_update": _tool_propose_wiki_update,
+    "wiki_proposal": _tool_wiki_proposal,
     "list_inferred_work": _tool_list_inferred_work,
     "get_work_item": _tool_get_work_item,
     "propose_work_item": _tool_propose_work_item,

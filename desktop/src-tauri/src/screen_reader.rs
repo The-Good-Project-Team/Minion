@@ -33,6 +33,9 @@ mod imp {
     use core_foundation::base::{TCFType, TCFTypeRef};
     use core_foundation::propertylist::create_data;
     use core_foundation::propertylist::kCFPropertyListXMLFormat_v1_0;
+    use core_graphics::display::{
+        CGDisplay, CGDisplayBounds, CGGetActiveDisplayList,
+    };
     use core_graphics::window::{
         copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
         kCGWindowListOptionOnScreenOnly,
@@ -55,6 +58,7 @@ mod imp {
         window_id: String,
         pid: i32,
         bounds: WindowBounds,
+        display_id: u32,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -63,6 +67,13 @@ mod imp {
         y: f64,
         w: f64,
         h: f64,
+    }
+
+    #[derive(Clone, Debug)]
+    struct DisplayInfo {
+        display_id: u32,
+        bounds: WindowBounds,
+        is_primary: bool,
     }
 
     fn ts_unix_float() -> f64 {
@@ -174,7 +185,95 @@ mod imp {
         }
     }
 
+    fn enumerate_displays() -> Vec<DisplayInfo> {
+        let mut displays = Vec::new();
+        
+        // Get all active displays
+        let max_displays = 32;
+        let mut display_ids: Vec<u32> = vec![0; max_displays];
+        
+        unsafe {
+            let count = CGGetActiveDisplayList(
+                max_displays as u32,
+                display_ids.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
+            
+            if count > 0 {
+                display_ids.truncate(count as usize);
+                
+                for &display_id in &display_ids {
+                    let display = CGDisplay::new(display_id);
+                    let bounds = CGDisplayBounds(display_id);
+                    let is_primary = display.is_main();
+                    
+                    displays.push(DisplayInfo {
+                        display_id,
+                        bounds: WindowBounds {
+                            x: bounds.origin.x,
+                            y: bounds.origin.y,
+                            w: bounds.size.width,
+                            h: bounds.size.height,
+                        },
+                        is_primary,
+                    });
+                }
+            }
+        }
+        
+        displays
+    }
+
+    fn display_for_window(window_bounds: &WindowBounds, displays: &[DisplayInfo]) -> Option<u32> {
+        // Find which display contains the window center
+        let window_center_x = window_bounds.x + window_bounds.w / 2.0;
+        let window_center_y = window_bounds.y + window_bounds.h / 2.0;
+        
+        for display in displays {
+            if window_center_x >= display.bounds.x 
+                && window_center_x < display.bounds.x + display.bounds.w
+                && window_center_y >= display.bounds.y 
+                && window_center_y < display.bounds.y + display.bounds.h
+            {
+                return Some(display.display_id);
+            }
+        }
+        
+        // Fallback to primary display if not found
+        displays.iter().find(|d| d.is_primary).map(|d| d.display_id)
+    }
+
+    fn is_display_capture_enabled(data_dir: &PathBuf, display_id: u32) -> bool {
+        // Check if specific display capture is disabled
+        let key = format!("screen_reader_display_{}", display_id);
+        let disabled = std::env::var(&key)
+            .ok()
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                t == "0" || t == "false" || t == "no" || t == "off"
+            })
+            .unwrap_or(false);
+        
+        if disabled {
+            return false;
+        }
+        
+        // Check if display is in deny list file
+        let deny_file = data_dir.join("ambient").join("display_deny.txt");
+        if let Ok(content) = std::fs::read_to_string(&deny_file) {
+            let display_str = display_id.to_string();
+            for line in content.lines() {
+                if line.trim() == display_str {
+                    return false;
+                }
+            }
+        }
+        
+        true
+    }
+
     fn enumerate_visible_windows() -> Vec<VisibleWindow> {
+        let displays = enumerate_displays();
         let option = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
         let Some(info) = copy_window_info(option, kCGNullWindowID) else {
             return Vec::new();
@@ -236,12 +335,14 @@ mod imp {
             if pid <= 0 {
                 continue;
             }
+            let display_id = display_for_window(&bounds, &displays).unwrap_or(0);
             out.push(VisibleWindow {
                 app_name: owner,
                 title,
                 window_id,
                 pid,
                 bounds,
+                display_id,
             });
         }
         out.sort_by(|a, b| {
@@ -308,6 +409,11 @@ mod imp {
                 crate::ambient_stream::collector_enabled(data_dir, "screenshot_fallback");
 
             for win in windows.into_iter().take(cap) {
+                // Skip if display capture is disabled for this window's display
+                if win.display_id > 0 && !is_display_capture_enabled(data_dir, win.display_id) {
+                    continue;
+                }
+                
                 if crate::capture_deny::capture_denied(data_dir, &win.app_name, &win.title) {
                     continue;
                 }
@@ -389,6 +495,7 @@ mod imp {
                         "w": win.bounds.w,
                         "h": win.bounds.h,
                     },
+                    "display_id": win.display_id,
                     "is_foreground": is_foreground,
                     "ax_text_sample": ax_text_sample,
                     "ax_hash": axh,
@@ -411,6 +518,7 @@ mod imp {
                         "app_name": win.app_name,
                         "window_title": title,
                         "window_id": win.window_id,
+                        "display_id": win.display_id,
                     });
                     crate::ambient_stream::append_ambient_record(data_dir, &shot);
                 }
