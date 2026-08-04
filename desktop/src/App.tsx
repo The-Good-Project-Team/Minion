@@ -1398,7 +1398,21 @@ export function App() {
             <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-card">
               {sources.slice(0, 12).map((s) => (
                 <li key={s.source_id} className="flex items-center gap-3 px-4 py-2 text-sm">
-                  <span className="truncate">{baseName(s.path)}</span>
+                  {looksLikeExport(s) && (
+                    <span className="shrink-0 rounded-full bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700 dark:bg-purple-900/30 dark:text-purple-300">
+                      AI Export
+                    </span>
+                  )}
+                  <div className="flex flex-1 flex-col">
+                    <span className="truncate">{baseName(s.path)}</span>
+                    {looksLikeExport(s) && s.meta && (
+                      <span className="truncate text-xs text-muted-foreground">
+                        {s.meta.indexed_conversations && `${s.meta.indexed_conversations} conversations`}
+                        {s.meta.indexed_conversations && s.meta.conversation_ids && ' · '}
+                        {s.meta.conversation_ids && `${s.meta.conversation_ids.length} unique IDs`}
+                      </span>
+                    )}
+                  </div>
                   <span className="ml-auto shrink-0 text-xs text-muted-foreground">{s.kind}</span>
                   {!s.kind.includes('ambient') && !s.path.startsWith('ambient/') && (
                     <button

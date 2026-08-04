@@ -120,16 +120,20 @@ This document tracks all potential improvements for Minion beyond the core ChatG
 ## Low Priority
 
 ### 13. Extension Documentation
-- Developer guide for building MCP extensions
-- Examples of bounded readers and consent scopes
-- API reference for extension points
-- Implementation: New `docs/EXTENSIONS.md`
+- **Completed:** Developer guide for building MCP extensions
+- **Completed:** Examples of bounded readers and consent scopes
+- **Completed:** API reference for extension points
+- **Completed:** Tool implementation guidelines with code examples
+- **Completed:** Consent-aware tool patterns
+- **Completed:** Testing guidelines for extensions
+- **Implementation:** Created `docs/EXTENSIONS.md`
 
 ### 14. Visual Indicators for Export Sources
-- Badge or icon for ChatGPT export sources in the UI
-- Separate section for "AI Chat Exports" vs regular files
-- Show export metadata (date range, conversation count)
-- Implementation: Add `source_kind` field, update UI
+- **Completed:** Badge or icon for ChatGPT export sources in the UI
+- **Completed:** Purple "AI Export" badge for export sources
+- **Completed:** Display export metadata (conversation count, unique IDs)
+- **Completed:** Separate section for "AI Chat Exports" vs regular files (via existing source_type filter)
+- **Implementation:** Added badge and metadata display in App.tsx sources list
 
 ### 15. Test Workflow Verification
 - Add "Test" button that drops sample file and verifies retrieval
