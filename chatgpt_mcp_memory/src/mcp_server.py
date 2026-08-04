@@ -42,6 +42,8 @@ from store import (
     keyword_search as store_keyword_search,
     list_conversations as store_list_conversations,
     list_sources as store_list_sources,
+    log_mcp_tool_usage,
+    mcp_tool_usage_recent,
     recent_db_rotation,
     search as store_search,
     wiki_page_list,
@@ -2470,6 +2472,8 @@ def handle_jsonrpc(req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _handle_tools_call(req: Dict[str, Any]) -> Dict[str, Any]:
+    import time as _time
+
     req_id = req.get("id")
     params = req.get("params") or {}
     name = params.get("name")
@@ -2479,10 +2483,33 @@ def _handle_tools_call(req: Dict[str, Any]) -> Dict[str, Any]:
     if fn is None:
         return _jsonrpc_error(req_id, -32602, f"Unknown tool: {name}")
 
+    start_time = _time.time()
+    success = True
+    error_message = None
+    result = None
+
     try:
         result = _tool_result(fn(arguments))
     except Exception as e:
-        result = _tool_result({"error": str(e)}, is_error=True)
+        success = False
+        error_message = str(e)
+        result = _tool_result({"error": error_message}, is_error=True)
+
+    # Log tool usage for activity feed
+    try:
+        duration_ms = (_time.time() - start_time) * 1000
+        conn = _get_conn()
+        log_mcp_tool_usage(
+            conn,
+            tool_name=name,
+            arguments=arguments,
+            success=success,
+            error_message=error_message,
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        log.debug("failed to log mcp tool usage", exc_info=True)
+
     return _jsonrpc_result(req_id, _maybe_inject_brief(result))
 
 

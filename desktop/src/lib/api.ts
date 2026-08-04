@@ -1897,6 +1897,27 @@ export async function createTaskFromScreen(params: {
   });
 }
 
+export type TestWorkflowResult = {
+  ok: boolean;
+  test_file: string;
+  source_id: string;
+  ingestion_time: number;
+  total_time: number;
+  semantic_search_found: boolean;
+  keyword_search_found: boolean;
+  semantic_hits: number;
+  keyword_hits: number;
+  query: string;
+  status: "passed" | "failed";
+};
+
+export async function testWorkflow(query = "test"): Promise<TestWorkflowResult> {
+  return apiFetch("/test/workflow", {
+    method: "POST",
+    body: JSON.stringify({ query }),
+  });
+}
+
 export async function fetchHealth(): Promise<{ sync_sources: unknown[]; open_issues: SystemIssue[] }> {
   return apiFetch("/health");
 }

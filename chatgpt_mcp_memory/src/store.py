@@ -613,6 +613,26 @@ def _migrate_council_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_capability_refs_key ON capability_refs(cap_key, status)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mcp_tool_usage (
+            usage_id TEXT PRIMARY KEY,
+            tool_name TEXT NOT NULL,
+            arguments_json TEXT NOT NULL DEFAULT '{}',
+            success INTEGER NOT NULL DEFAULT 1,
+            error_message TEXT,
+            duration_ms REAL,
+            created_at REAL NOT NULL,
+            meta_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mcp_tool_usage_created ON mcp_tool_usage(created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mcp_tool_usage_tool ON mcp_tool_usage(tool_name, created_at)"
+    )
 
 
 def _ensure_vec_table(conn: sqlite3.Connection, dim: int) -> None:
@@ -3684,6 +3704,76 @@ def sync_job_runs_recent(
             "finished_at": float(r["finished_at"]) if r["finished_at"] is not None else None,
             "items_count": int(r["items_count"]),
             "error": r["error"],
+        }
+        for r in rows
+    ]
+
+
+def log_mcp_tool_usage(
+    conn: sqlite3.Connection,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    success: bool = True,
+    error_message: Optional[str] = None,
+    duration_ms: Optional[float] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Log MCP tool usage for activity feed tracking."""
+    import time
+    import uuid
+
+    usage_id = str(uuid.uuid4())
+    conn.execute(
+        """
+        INSERT INTO mcp_tool_usage (
+            usage_id, tool_name, arguments_json, success, error_message,
+            duration_ms, created_at, meta_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            usage_id,
+            tool_name,
+            json.dumps(arguments),
+            1 if success else 0,
+            error_message,
+            duration_ms,
+            time.time(),
+            json.dumps(meta or {}),
+        ),
+    )
+    conn.commit()
+
+
+def mcp_tool_usage_recent(
+    conn: sqlite3.Connection,
+    limit: int = 50,
+    since_hours: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch recent MCP tool usage entries."""
+    since_ts = None
+    if since_hours is not None:
+        import time
+        since_ts = time.time() - (since_hours * 3600)
+
+    query = "SELECT * FROM mcp_tool_usage"
+    params: List[Any] = []
+    if since_ts is not None:
+        query += " WHERE created_at >= ?"
+        params.append(since_ts)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "usage_id": str(r["usage_id"]),
+            "tool_name": str(r["tool_name"]),
+            "arguments": json.loads(r["arguments_json"]),
+            "success": bool(r["success"]),
+            "error_message": r["error_message"],
+            "duration_ms": r["duration_ms"],
+            "created_at": float(r["created_at"]),
+            "meta": json.loads(r["meta_json"]),
         }
         for r in rows
     ]

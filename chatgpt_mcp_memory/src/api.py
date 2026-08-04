@@ -3821,6 +3821,144 @@ async def ingest_webhook(request: Request) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Test workflow verification
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowBody(BaseModel):
+    """Request body for POST /test/workflow."""
+
+    query: str = Field(default="test", min_length=1, max_length=200)
+
+
+@app.post("/test/workflow")
+def test_workflow(body: TestWorkflowBody = TestWorkflowBody()) -> Dict[str, Any]:
+    """Drop a sample file and verify retrieval.
+
+    End-to-end test:
+    1. Create a sample text file in the inbox
+    2. Wait for ingestion (up to 30 seconds)
+    3. Perform a search to verify retrieval
+    4. Return results with timing info
+    """
+    import time as _time
+
+    start_time = _time.time()
+    query = body.query
+
+    # Create a sample file with unique content
+    test_content = f"""Minion Test Workflow Verification
+Generated at: {_time.time()}
+Test query: {query}
+
+This is a sample document used to verify that the Minion ingest and retrieval pipeline is working correctly.
+It contains enough unique text to be searchable via semantic and keyword search.
+
+Key phrases to test retrieval:
+- workflow verification
+- test document
+- ingest pipeline
+- semantic search
+- keyword search
+"""
+    test_filename = f"minion_test_{int(_time.time())}.txt"
+    test_path = State.inbox / test_filename
+
+    try:
+        test_path.write_text(test_content, encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create test file: {e}")
+
+    # Wait for ingestion (poll for up to 30 seconds)
+    max_wait = 30.0
+    poll_interval = 0.5
+    waited = 0.0
+    source_id = None
+
+    while waited < max_wait:
+        _time.sleep(poll_interval)
+        waited += poll_interval
+
+        try:
+            conn = State.conn()
+            row = conn.execute(
+                "SELECT source_id FROM sources WHERE path = ? LIMIT 1",
+                (str(test_path),),
+            ).fetchone()
+            if row:
+                source_id = row["source_id"]
+                break
+        except Exception:
+            log.exception("poll for source_id failed")
+
+    if not source_id:
+        # Clean up the test file if ingestion failed
+        try:
+            test_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ingestion timeout after {max_wait}s - test file was not indexed",
+        )
+
+    # Verify retrieval via search
+    try:
+        conn = State.conn()
+        from ingest import DEFAULT_MODEL
+        from fastembed import TextEmbedding
+
+        # Use the same embedding model as the MCP
+        model_name = (
+            get_meta(conn, "model_name")
+            or os.environ.get("MINION_EMBED_MODEL")
+            or DEFAULT_MODEL
+        )
+        model = TextEmbedding(
+            model_name=model_name,
+            cache_dir=fastembed_cache_dir(data_dir=State.data_dir),
+        )
+        vec = np.asarray(next(iter(model.embed([query]))), dtype=np.float32)
+        norm = float(np.linalg.norm(vec))
+        if norm > 0:
+            vec = vec / norm
+
+        hits = store_search(conn, vec, top_k=5)
+        found = any(h.source_id == source_id for h in hits)
+
+        # Also try keyword search
+        keyword_hits = store_keyword_search(conn, query, top_k=5)
+        keyword_found = any(h.source_id == source_id for h in keyword_hits)
+
+        total_time = _time.time() - start_time
+
+        return {
+            "ok": True,
+            "test_file": str(test_path),
+            "source_id": source_id,
+            "ingestion_time": round(waited, 2),
+            "total_time": round(total_time, 2),
+            "semantic_search_found": found,
+            "keyword_search_found": keyword_found,
+            "semantic_hits": len(hits),
+            "keyword_hits": len(keyword_hits),
+            "query": query,
+            "status": "passed" if (found or keyword_found) else "failed",
+        }
+    except Exception as e:
+        log.exception("test workflow search failed")
+        raise HTTPException(status_code=500, detail=f"Search verification failed: {e}")
+    finally:
+        # Clean up the test file and source
+        try:
+            if source_id:
+                delete_source(State.conn(), source_id)
+            test_path.unlink(missing_ok=True)
+        except Exception:
+            log.exception("test cleanup failed")
+
+
+# ---------------------------------------------------------------------------
 # Claude Desktop MCP registration
 #
 # Two entry points share the same upserter:

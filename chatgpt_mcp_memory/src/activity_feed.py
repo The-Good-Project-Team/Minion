@@ -17,6 +17,7 @@ from store import (
     graph_candidate_list,
     graph_scaffold_list,
     identity_claim_list,
+    mcp_tool_usage_recent,
     sync_job_runs_recent,
     system_issues_open,
     task_list,
@@ -439,6 +440,49 @@ def _issue_suggestions(issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _mcp_tool_usage_items(usage: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert MCP tool usage entries to feed items."""
+    out: List[Dict[str, Any]] = []
+    for u in usage:
+        tool_name = str(u.get("tool_name") or "unknown")
+        success = bool(u.get("success", True))
+        duration_ms = u.get("duration_ms")
+        duration_str = f"{duration_ms:.0f}ms" if duration_ms else ""
+        
+        # Build a brief summary of arguments
+        args = u.get("arguments") or {}
+        args_summary = ""
+        if "query" in args:
+            args_summary = f"query: {str(args['query'])[:50]}..."
+        elif "node_id" in args:
+            args_summary = f"node: {str(args['node_id'])}"
+        elif "chunk_id" in args:
+            args_summary = f"chunk: {str(args['chunk_id'])}"
+        
+        title = f"MCP: {tool_name}"
+        if not success:
+            title += " (failed)"
+        
+        body_parts = []
+        if args_summary:
+            body_parts.append(args_summary)
+        if duration_str:
+            body_parts.append(duration_str)
+        
+        out.append(
+            _feed_item(
+                feed_id=f"mcp-{u.get('usage_id')}",
+                ts=float(u.get("created_at") or 0),
+                lane="observation",
+                kind="mcp_tool",
+                title=title,
+                body=" · ".join(body_parts),
+                refs={"tool_name": tool_name, "success": str(success)},
+            )
+        )
+    return out
+
+
 def build_activity_feed(
     conn,
     data_dir: Path,
@@ -486,6 +530,7 @@ def build_activity_feed(
     claims = identity_claim_list(conn, status="proposed", limit=30)
     issues = system_issues_open(conn, limit=10)
     candidates = graph_candidate_list(conn, status="open", limit=40)
+    mcp_usage = mcp_tool_usage_recent(conn, limit=min(40, lim), since_hours=since_hours)
 
     river: List[Dict[str, Any]] = []
     librarian_state: Dict[str, Any] = {
@@ -518,6 +563,7 @@ def build_activity_feed(
     river.extend(_claim_suggestions(claims))
     river.extend(_candidate_suggestions(candidates))
     river.extend(_issue_suggestions(issues))
+    river.extend(_mcp_tool_usage_items(mcp_usage))
 
     status = _graph_status_item(conn, data_dir)
     if status:

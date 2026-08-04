@@ -136,10 +136,10 @@ This document tracks all potential improvements for Minion beyond the core ChatG
 - **Implementation:** Added badge and metadata display in App.tsx sources list
 
 ### 15. Test Workflow Verification
-- Add "Test" button that drops sample file and verifies retrieval
-- Show MCP tool usage in Activity feed
-- End-to-end test: drop file → ask Claude → verify response
-- Implementation: Add test endpoint, UI test button
+- **Completed:** Add "Test" button that drops sample file and verifies retrieval
+- **Completed:** Show MCP tool usage in Activity feed
+- **Completed:** End-to-end test: drop file → ask Claude → verify response
+- **Implementation:** Added POST /test/workflow endpoint, UI test button, MCP tool usage tracking table and feed integration
 
 ## Future Considerations
 

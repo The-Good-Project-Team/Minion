@@ -42,6 +42,7 @@ import {
   revealInFinder,
   resolveRevealPath,
   rollbackAuditLog,
+  testWorkflow,
   updateConsentPolicy,
   type Active,
   type ActivityFeedBundle,
@@ -58,6 +59,7 @@ import {
   type GraphStats,
   type SidecarStatus,
   type Source,
+  type TestWorkflowResult,
 } from "./lib/api";
 
 const NAME_KEY = "minion:name";
@@ -467,6 +469,8 @@ export function App() {
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [auditFilter, setAuditFilter] = useState<"all" | "identity" | "graph">("all");
+  const [testRunning, setTestRunning] = useState(false);
+  const [testResult, setTestResult] = useState<TestWorkflowResult | null>(null);
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
 
   const loadActivityFeed = useCallback(async (retryCount = 0) => {
@@ -808,6 +812,32 @@ export function App() {
     }
   }
 
+  async function runTestWorkflow() {
+    setTestRunning(true);
+    setTestResult(null);
+    try {
+      const result = await testWorkflow("workflow verification");
+      setTestResult(result);
+    } catch (e) {
+      console.error("Test workflow failed:", e);
+      setTestResult({
+        ok: false,
+        test_file: "",
+        source_id: "",
+        ingestion_time: 0,
+        total_time: 0,
+        semantic_search_found: false,
+        keyword_search_found: false,
+        semantic_hits: 0,
+        keyword_hits: 0,
+        query: "test",
+        status: "failed",
+      });
+    } finally {
+      setTestRunning(false);
+    }
+  }
+
   const checklist: ChecklistItem[] = useMemo(() => {
     const exportCount = sources.filter(looksLikeExport).length;
     return [
@@ -1009,6 +1039,14 @@ export function App() {
             >
               <RefreshCw className="size-4" /> Reindex
             </button>
+            <button
+              onClick={runTestWorkflow}
+              title="Test workflow: drop sample file and verify retrieval"
+              disabled={testRunning}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-accent disabled:opacity-50"
+            >
+              {testRunning ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Test
+            </button>
           </div>
         </header>
 
@@ -1047,6 +1085,29 @@ export function App() {
         {sidecar && sidecar.state !== "ready" && (
           <div className="mt-4 rounded-lg border border-border bg-card p-3 text-sm text-muted-foreground">
             Starting up: {sidecar.state}…
+          </div>
+        )}
+
+        {testResult && (
+          <div className={`mt-4 rounded-lg border border-border bg-card p-4 text-sm ${
+            testResult.status === "passed" ? "border-green-500/50" : "border-red-500/50"
+          }`}>
+            <div className="flex items-center justify-between mb-2">
+              <span className={`font-medium ${testResult.status === "passed" ? "text-green-600" : "text-red-600"}`}>
+                {testResult.status === "passed" ? "✓ Test passed" : "✗ Test failed"}
+              </span>
+              <button
+                onClick={() => setTestResult(null)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                ×
+              </button>
+            </div>
+            <div className="space-y-1 text-xs text-muted-foreground">
+              <div>Ingestion: {testResult.ingestion_time}s · Total: {testResult.total_time}s</div>
+              <div>Semantic search: {testResult.semantic_search_found ? "✓" : "✗"} ({testResult.semantic_hits} hits)</div>
+              <div>Keyword search: {testResult.keyword_search_found ? "✓" : "✗"} ({testResult.keyword_hits} hits)</div>
+            </div>
           </div>
         )}
 
@@ -1405,13 +1466,17 @@ export function App() {
                   )}
                   <div className="flex flex-1 flex-col">
                     <span className="truncate">{baseName(s.path)}</span>
-                    {looksLikeExport(s) && s.meta && (
-                      <span className="truncate text-xs text-muted-foreground">
-                        {s.meta.indexed_conversations && `${s.meta.indexed_conversations} conversations`}
-                        {s.meta.indexed_conversations && s.meta.conversation_ids && ' · '}
-                        {s.meta.conversation_ids && `${s.meta.conversation_ids.length} unique IDs`}
-                      </span>
-                    )}
+                    {looksLikeExport(s) && s.meta && (() => {
+                      const indexedConversations = s.meta.indexed_conversations as number | undefined;
+                      const conversationIds = s.meta.conversation_ids as string[] | undefined;
+                      return (
+                        <span className="truncate text-xs text-muted-foreground">
+                          {indexedConversations && `${indexedConversations} conversations`}
+                          {indexedConversations && conversationIds && ' · '}
+                          {conversationIds && Array.isArray(conversationIds) && `${conversationIds.length} unique IDs`}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <span className="ml-auto shrink-0 text-xs text-muted-foreground">{s.kind}</span>
                   {!s.kind.includes('ambient') && !s.path.startsWith('ambient/') && (
