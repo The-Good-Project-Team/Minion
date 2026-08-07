@@ -11,10 +11,17 @@ import api as minion_api
 
 
 def test_connect_claude_desktop_rejects_when_app_missing(monkeypatch, tmp_path: Path) -> None:
+    from connector_base import ConnectorRegistry, initialize_connectors
+
     cfg = tmp_path / "claude_desktop_config.json"
     monkeypatch.setenv("CLAUDE_DESKTOP_CONFIG", str(cfg))
     monkeypatch.delenv("MINION_SKIP_CLAUDE_APP_CHECK", raising=False)
-    monkeypatch.setattr(minion_api, "_claude_desktop_installed", lambda: False)
+
+    ConnectorRegistry._connectors.clear()
+    initialize_connectors()
+    connector = ConnectorRegistry.get("claude-desktop")
+    assert connector is not None
+    monkeypatch.setattr(connector, "is_installed", lambda: False)
 
     with pytest.raises(HTTPException) as exc:
         minion_api.connect_claude_desktop(minion_api.ConnectBody())
