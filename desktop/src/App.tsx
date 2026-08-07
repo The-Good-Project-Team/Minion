@@ -38,6 +38,7 @@ import {
   graphBuild,
   ingestPath,
   ingestText,
+  type Profile,
   onSidecarStatus,
   openEvents,
   reindexEmbeddings,
@@ -183,6 +184,7 @@ function SettingsView({
   consentPolicy,
   setConsentPolicy,
   consentError,
+  activeProfileName,
   auditLog,
   auditFilter,
   setAuditFilter,
@@ -192,6 +194,7 @@ function SettingsView({
   consentPolicy: ConsentPolicy | null;
   setConsentPolicy: (policy: ConsentPolicy) => void;
   consentError: string | null;
+  activeProfileName?: string | null;
   auditLog: AuditLogEntry[];
   auditFilter: "all" | "identity" | "graph";
   setAuditFilter: (filter: "all" | "identity" | "graph") => void;
@@ -297,7 +300,12 @@ function SettingsView({
   return (
     <div className="mt-6 space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-medium">Consent Policy</h2>
+        <div>
+          <h2 className="text-lg font-medium">Consent Policy</h2>
+          {activeProfileName && (
+            <p className="text-xs text-muted-foreground">Profile: {activeProfileName}</p>
+          )}
+        </div>
         {saveMsg && (
           <span className={`text-sm ${saveMsg === "Saved" ? "text-green-600" : "text-red-600"}`}>
             {saveMsg}
@@ -468,6 +476,8 @@ export function App() {
   const [currentTab, setCurrentTab] = useState<"home" | "graph" | "settings">("home");
   const [consentPolicy, setConsentPolicy] = useState<ConsentPolicy | null>(null);
   const [consentError, setConsentError] = useState<string | null>(null);
+  const [activeProfile, setActiveProfile] = useState<Profile | null>(null);
+  const [profileRefreshing, setProfileRefreshing] = useState(false);
   const [activityFeed, setActivityFeed] = useState<ActivityFeedBundle | null>(null);
   const [activityFeedLoading, setActivityFeedLoading] = useState(true);
   const [activityFeedError, setActivityFeedError] = useState<string | null>(null);
@@ -518,25 +528,24 @@ export function App() {
     }
   }, [auditFilter]);
 
-  const load = useCallback(async () => {
-    setConn("connecting");
+  const refreshDashboard = useCallback(async () => {
     try {
-      const [st, srcs, gs, claude, cursor] = await Promise.all([
+      const [st, srcRes, gs, claude, cursor] = await Promise.all([
         fetchStatus().catch(() => null),
         fetchSources({
           limit: 500,
           source_type: sourceTypeFilter === "all" ? undefined : sourceTypeFilter,
           time_range: timeRangeFilter === "all" ? undefined : timeRangeFilter,
-        }).then((r) => r.sources).catch(() => [] as Source[]),
+        }).catch(() => ({ sources: [] as Source[], counts: { sources: 0, chunks: 0 } })),
         fetchGraphStats().catch(() => null),
         fetchClaudeDesktopStatus().catch(() => null),
         fetchCursorStatus().catch(() => null),
       ]);
       if (st) {
-        setCounts(st.counts);
         setActive(st.active ?? EMPTY_ACTIVE);
       }
-      setSources(srcs);
+      setSources(srcRes.sources);
+      setCounts(srcRes.counts ?? st?.counts ?? { sources: 0, chunks: 0 });
       if (gs) setGraphStats(gs);
       if (claude) {
         setClaudeStatus(claude);
@@ -555,25 +564,45 @@ export function App() {
     }
   }, [sourceTypeFilter, timeRangeFilter]);
 
-  const loadConsent = useCallback(async (retryCount = 0) => {
+  const load = useCallback(async () => {
+    setConn("connecting");
+    await refreshDashboard();
+  }, [refreshDashboard]);
+
+  const loadConsent = useCallback(async (profileId?: string, retryCount = 0) => {
     if (retryCount === 0) {
       setConsentError(null);
     }
     try {
-      const consent = await fetchConsentPolicy();
+      const consent = await fetchConsentPolicy(profileId);
       setConsentPolicy(consent);
       setConsentError(null);
     } catch (e) {
       console.error("Failed to load consent policy:", e);
       if (retryCount < 5) {
         window.setTimeout(() => {
-          void loadConsent(retryCount + 1);
+          void loadConsent(profileId, retryCount + 1);
         }, 1000 * (retryCount + 1));
         return;
       }
       setConsentError(e instanceof Error ? e.message : "Failed to load consent policy");
     }
   }, []);
+
+  const handleProfileChange = useCallback(async (profile: Profile) => {
+    setActiveProfile(profile);
+    setProfileRefreshing(true);
+    setTestResult(null);
+    try {
+      await Promise.all([
+        loadConsent(profile.profile_id),
+        refreshDashboard(),
+        loadActivityFeed(),
+      ]);
+    } finally {
+      setProfileRefreshing(false);
+    }
+  }, [loadConsent, refreshDashboard, loadActivityFeed]);
 
   const apiReady = conn === "open" || sidecar?.state === "ready";
 
@@ -587,9 +616,9 @@ export function App() {
     if (loadTimer.current) clearTimeout(loadTimer.current);
     loadTimer.current = setTimeout(() => {
       loadTimer.current = null;
-      void load();
+      void refreshDashboard();
     }, 1500);
-  }, [load]);
+  }, [refreshDashboard]);
   useEffect(() => () => {
     if (loadTimer.current) clearTimeout(loadTimer.current);
   }, []);
@@ -638,14 +667,14 @@ export function App() {
           case "tree_done":
             setFeed([]);
             setActive(EMPTY_ACTIVE);
-            void load();
+            void refreshDashboard();
             break;
         }
       },
       (s) => setConn(s),
     ).then((c) => (cleanup = c));
     return () => cleanup?.();
-  }, [load, scheduleLoad]);
+  }, [refreshDashboard, scheduleLoad]);
 
   useEffect(() => {
     // A clean mount means we're past any crash loop; reset the reload guard.
@@ -665,19 +694,13 @@ export function App() {
   }, [sidecar?.state, loadActivityFeed]);
 
   useEffect(() => {
-    if (apiReady) {
-      void loadConsent();
-    }
-  }, [apiReady, loadConsent]);
-
-  useEffect(() => {
     if (currentTab === "settings") {
       void loadAuditLog();
-      if (!consentPolicy || consentError) {
-        void loadConsent();
+      if (activeProfile && (!consentPolicy || consentError)) {
+        void loadConsent(activeProfile.profile_id);
       }
     }
-  }, [currentTab, loadAuditLog, consentPolicy, consentError, loadConsent]);
+  }, [currentTab, loadAuditLog, activeProfile, consentPolicy, consentError, loadConsent]);
 
   function pushFeed(path: string, stage: string, state: FeedLine["state"]) {
     setFeed((prev) => {
@@ -1025,11 +1048,20 @@ export function App() {
               <img src="/logo.png" alt="Minion" className="size-10 shrink-0 rounded-xl" />
               <h1 className="truncate font-serif text-2xl">Minion</h1>
             </div>
-            <ProfileSwitcher apiReady={apiReady} onProfileChange={() => void load()} />
+            <ProfileSwitcher
+              apiReady={apiReady}
+              onProfileChange={(profile) => void handleProfileChange(profile)}
+            />
           </div>
           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
             <p className="shrink-0 text-sm text-muted-foreground">
               {counts.sources} sources · {counts.chunks} chunks
+              {activeProfile && (
+                <span className="ml-2 text-foreground/80">· {activeProfile.name}</span>
+              )}
+              {profileRefreshing && (
+                <Loader2 className="ml-1 inline size-3 animate-spin align-[-2px] text-muted-foreground" />
+              )}
               <span className={`ml-2 ${conn === "open" ? "text-primary" : "text-muted-foreground"}`}>
                 ● {conn === "open" ? "connected" : conn}
               </span>
@@ -1535,6 +1567,7 @@ export function App() {
             consentPolicy={consentPolicy}
             setConsentPolicy={setConsentPolicy}
             consentError={consentError}
+            activeProfileName={activeProfile?.name}
             auditLog={auditLog}
             auditFilter={auditFilter}
             setAuditFilter={setAuditFilter}

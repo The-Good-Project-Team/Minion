@@ -24,7 +24,7 @@ export function ProfileSwitcher({
   onProfileChange,
 }: {
   apiReady?: boolean;
-  onProfileChange?: () => void;
+  onProfileChange?: (profile: Profile) => void;
 }) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfile, setActiveProfileState] = useState<Profile | null>(null);
@@ -55,6 +55,9 @@ export function ProfileSwitcher({
         }
       }
       setActiveProfileState(activeRes);
+      if (activeRes) {
+        onProfileChange?.(activeRes);
+      }
       setIsLoading(false);
     } catch (error) {
       console.error("Failed to load profiles:", error);
@@ -93,7 +96,7 @@ export function ProfileSwitcher({
       const updated = await fetchActiveProfile();
       setActiveProfileState(updated);
       setIsOpen(false);
-      onProfileChange?.();
+      onProfileChange?.(updated);
     } catch (error) {
       console.error("Failed to switch profile:", error);
     }

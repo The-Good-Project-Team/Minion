@@ -1884,13 +1884,25 @@ def get_conversation_chunks(
     return out
 
 
-def count_chunks(conn: sqlite3.Connection) -> int:
-    row = conn.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()
+def count_chunks(conn: sqlite3.Connection, profile_id: Optional[str] = None) -> int:
+    sql = "SELECT COUNT(*) AS n FROM chunks c WHERE 1=1"
+    params: List[Any] = []
+    profile_clause, profile_params = _profile_filter_sql(profile_id, alias="c")
+    if profile_clause:
+        sql += profile_clause
+        params.extend(profile_params)
+    row = conn.execute(sql, params).fetchone()
     return int(row["n"])
 
 
-def count_sources(conn: sqlite3.Connection) -> int:
-    row = conn.execute("SELECT COUNT(*) AS n FROM sources").fetchone()
+def count_sources(conn: sqlite3.Connection, profile_id: Optional[str] = None) -> int:
+    sql = "SELECT COUNT(*) AS n FROM sources s WHERE 1=1"
+    params: List[Any] = []
+    profile_clause, profile_params = _profile_filter_sql(profile_id, alias="s")
+    if profile_clause:
+        sql += profile_clause
+        params.extend(profile_params)
+    row = conn.execute(sql, params).fetchone()
     return int(row["n"])
 
 

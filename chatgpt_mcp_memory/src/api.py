@@ -488,12 +488,16 @@ def _start_watcher(skip_reingest: bool = False) -> None:
         _watcher_mode = "disabled"
 
 
-def _counts() -> Dict[str, Any]:
+def _counts(profile_id: Optional[str] = None) -> Dict[str, Any]:
     try:
         conn = State.conn()
+        if profile_id is None:
+            from store import profile_get_active
+
+            profile_id = profile_get_active(conn) or "default"
         return {
-            "sources": count_sources(conn),
-            "chunks": count_chunks(conn),
+            "sources": count_sources(conn, profile_id=profile_id),
+            "chunks": count_chunks(conn, profile_id=profile_id),
         }
     except Exception:
         return {"sources": 0, "chunks": 0}
@@ -1144,13 +1148,18 @@ def reconcile_endpoint(body: ReconcileBody) -> Dict[str, Any]:
 @app.get("/status")
 def status() -> Dict[str, Any]:
     active = _public_active()
+    conn = State.conn()
+    from store import profile_get_active
+
+    profile_id = profile_get_active(conn)
     return {
         "version": __version__,
         "data_dir": str(State.data_dir),
         "inbox": str(State.inbox),
         "db_path": str(State.db_path),
         "supported_extensions": supported_extensions(),
-        "counts": _counts(),
+        "counts": _counts(profile_id),
+        "active_profile_id": profile_id,
         "active": active,
         "database": _database_status(),
         "watcher": {
@@ -1415,7 +1424,7 @@ def list_sources_endpoint(
         time_range=time_range,
         profile_id=profile_id,
     )
-    return {"sources": rows, "counts": _counts()}
+    return {"sources": rows, "counts": _counts(profile_id)}
 
 
 @app.get("/sources/reveal-path")

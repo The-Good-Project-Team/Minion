@@ -725,6 +725,19 @@ def test_profiles_create_and_switch(sidecar) -> None:
     assert active.json()["profile_id"] == "work-test"
 
 
+def test_status_counts_follow_active_profile(sidecar) -> None:
+    default_status = sidecar.get("/status")
+    assert default_status.status_code == 200, default_status.text
+    assert default_status.json().get("active_profile_id") == "default"
+
+    sidecar.put("/profiles/active", {"profile_id": "personal"}).raise_for_status()
+    personal_status = sidecar.get("/status")
+    assert personal_status.status_code == 200, personal_status.text
+    assert personal_status.json().get("active_profile_id") == "personal"
+
+    sidecar.put("/profiles/active", {"profile_id": "default"}).raise_for_status()
+
+
 def test_workflow_verification(sidecar) -> None:
     r = sidecar.post("/test/workflow", {"query": "workflow verification"})
     assert r.status_code == 200, r.text

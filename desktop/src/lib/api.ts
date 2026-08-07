@@ -79,6 +79,7 @@ export type Status = {
   db_path: string;
   supported_extensions: string[];
   counts: { sources: number; chunks: number };
+  active_profile_id?: string;
   active: Active;
   /** Present on newer sidecars; when ok is false, ingest/search are blocked. */
   database?: DatabaseStatus;

@@ -311,3 +311,38 @@ def test_profile_consent_policy_fallback():
         unknown_policy = load_policy_for_profile(data_dir, "unknown-profile")
         assert "readers" in unknown_policy
         assert "mcp" in unknown_policy["readers"]
+
+
+def test_profile_scoped_counts():
+    """Sources and chunks counts respect profile_id filters."""
+    from store import _apply_schema_upgrades, _new_id, connect, count_chunks, count_sources
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        conn = connect(db_path)
+        _apply_schema_upgrades(conn)
+        profile_initialize_defaults(conn)
+
+        for profile_id, path in (("default", "/tmp/default-doc.txt"), ("personal", "/tmp/personal-doc.txt")):
+            sid = _new_id("src")
+            cid = _new_id("chk")
+            conn.execute(
+                "INSERT INTO sources(source_id, path, kind, sha256, mtime, bytes, parser, meta_json, updated_at, profile_id) "
+                "VALUES (?, ?, 'text', ?, 1.0, 10, 'text', '{}', 1.0, ?)",
+                (sid, path, f"hash-{profile_id}", profile_id),
+            )
+            conn.execute(
+                "INSERT INTO chunks(chunk_id, source_id, seq, role, text, meta_json, profile_id) "
+                "VALUES (?, ?, 0, 'user', ?, '{}', ?)",
+                (cid, sid, f"{profile_id} chunk", profile_id),
+            )
+        conn.commit()
+
+        assert count_sources(conn) == 2
+        assert count_chunks(conn) == 2
+        assert count_sources(conn, profile_id="default") == 1
+        assert count_chunks(conn, profile_id="default") == 1
+        assert count_sources(conn, profile_id="personal") == 1
+        assert count_chunks(conn, profile_id="personal") == 1
+
+        conn.close()
