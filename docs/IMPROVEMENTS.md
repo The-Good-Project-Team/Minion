@@ -144,19 +144,38 @@ This document tracks all potential improvements for Minion beyond the core ChatG
 ## Future Considerations
 
 ### 16. Additional AI Assistant Connectors
-- Perplexity, Copilot, etc. (if there's demand)
-- Standardized connector interface
-- Implementation: Add connector abstraction layer
+- **Completed:** Standardized connector interface with base Connector class
+- **Completed:** Connector registry for dynamic discovery
+- **Completed:** Generic API endpoints (/connectors, /connectors/{id}/status, /connectors/{id}/connect)
+- **Completed:** Claude Desktop and Cursor connectors refactored to use abstraction
+- **Completed:** Tests for connector abstraction layer
+- **Implementation:** Created connector_base.py with Connector abstract base class and ConnectorRegistry
+- **Implementation:** Added connectors/claude_desktop.py and connectors/cursor.py
+- **Note:** Adding new connectors (Perplexity, Copilot, etc.) now requires only implementing the Connector interface
 
 ### 17. Export Tools
-- One-click export from ChatGPT (if API allows)
-- Scheduled export sync
-- Implementation: Add export scheduler
+- **Completed:** Export scheduler for monitoring folder for new AI assistant exports
+- **Completed:** Configurable check intervals (default 1 hour, minimum 5 minutes)
+- **Completed:** Manual trigger API endpoint for specific files or watch path
+- **Completed:** Deduplication via content hash to avoid re-ingesting exports
+- **Completed:** API endpoints: GET /exports/status, POST /exports/trigger, POST /exports/config
+- **Completed:** UI controls for export scheduler configuration in Settings tab
+- **Note:** ChatGPT doesn't have automated export API; users manually download exports to watch folder
+- **Implementation:** Created export_scheduler.py with background monitoring and manual trigger
+- **Implementation:** Added ExportSchedulerConfig UI component with watch path, interval, and enable/disable controls
 
 ### 18. Work vs Personal Separation
 - Separate vault namespaces or profiles
 - Different consent scopes per profile
 - Implementation: Add profile system to data model
+- **Status**: Completed
+  - Added `profiles` table to store profile metadata
+  - Added `profile_id` columns to `sources` and `chunks` tables
+  - Implemented profile management functions in `store.py`
+  - Extended consent policy to support per-profile reader scopes
+  - Added API endpoints for profile CRUD operations and active profile switching
+  - Created comprehensive tests for profile system
+  - See `docs/PROFILE_SYSTEM.md` for detailed design and usage
 
 ## Implementation Notes
 

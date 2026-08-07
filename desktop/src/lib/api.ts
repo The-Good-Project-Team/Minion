@@ -1897,6 +1897,120 @@ export async function createTaskFromScreen(params: {
   });
 }
 
+// Profile management types and functions
+
+export type Profile = {
+  profile_id: string;
+  name: string;
+  kind: string;
+  is_default: boolean;
+  created_at: number;
+  updated_at: number;
+};
+
+export type ProfileListResponse = {
+  profiles: Profile[];
+};
+
+export type ProfileCreateRequest = {
+  profile_id: string;
+  name: string;
+  kind?: string;
+  is_default?: boolean;
+};
+
+export type ProfileUpdateRequest = {
+  name?: string;
+  is_default?: boolean;
+};
+
+export type ProfileSetActiveRequest = {
+  profile_id: string;
+};
+
+export async function fetchProfiles(): Promise<ProfileListResponse> {
+  return apiFetch("/profiles");
+}
+
+export async function fetchProfile(profileId: string): Promise<Profile> {
+  return apiFetch(`/profiles/${encodeURIComponent(profileId)}`);
+}
+
+export async function fetchActiveProfile(): Promise<Profile> {
+  return apiFetch("/profiles/active");
+}
+
+export async function createProfile(request: ProfileCreateRequest): Promise<Profile> {
+  return apiFetch("/profiles", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export async function updateProfile(profileId: string, request: ProfileUpdateRequest): Promise<Profile> {
+  return apiFetch(`/profiles/${encodeURIComponent(profileId)}`, {
+    method: "PUT",
+    body: JSON.stringify(request),
+  });
+}
+
+export async function deleteProfile(profileId: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/profiles/${encodeURIComponent(profileId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function setActiveProfile(request: ProfileSetActiveRequest): Promise<{ ok: boolean; profile_id: string }> {
+  return apiFetch("/profiles/active", {
+    method: "PUT",
+    body: JSON.stringify(request),
+  });
+}
+
+// Export scheduler types and functions
+
+export type ExportSchedulerStatus = {
+  enabled: boolean;
+  watch_path: string;
+  interval_sec: number;
+  last_check_at: number | null;
+  last_ingested_count: number;
+  total_ingested: number;
+};
+
+export type ExportSchedulerConfig = {
+  export_watch_path?: string;
+  export_interval_sec?: number;
+  enabled?: boolean;
+};
+
+export type ExportSchedulerConfigResponse = {
+  ok: boolean;
+  settings: {
+    export_watch_path?: string;
+    export_interval_sec?: number;
+  };
+};
+
+export async function fetchExportSchedulerStatus(): Promise<ExportSchedulerStatus> {
+  return apiFetch("/exports/status");
+}
+
+export async function triggerExportExport(params?: { path?: string }): Promise<{ ok: boolean; ingested: number; message: string }> {
+  const q = new URLSearchParams();
+  if (params?.path) q.set("path", params.path);
+  return apiFetch(`/exports/trigger${q ? `?${q.toString()}` : ""}`, {
+    method: "POST",
+  });
+}
+
+export async function updateExportSchedulerConfig(config: ExportSchedulerConfig): Promise<ExportSchedulerConfigResponse> {
+  return apiFetch("/exports/config", {
+    method: "POST",
+    body: JSON.stringify(config),
+  });
+}
+
 export type TestWorkflowResult = {
   ok: boolean;
   test_file: string;
@@ -1980,8 +2094,9 @@ export async function patchTask(
   });
 }
 
-export async function fetchConsentPolicy(): Promise<ConsentPolicy> {
-  return apiFetch("/settings/consent");
+export async function fetchConsentPolicy(profileId?: string): Promise<ConsentPolicy> {
+  const q = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : "";
+  return apiFetch(`/settings/consent${q}`);
 }
 
 export async function updateConsentPolicy(policy: ConsentPolicy): Promise<ConsentPolicy> {

@@ -52,14 +52,51 @@ READER_STRATA_DEFAULTS: Dict[str, List[str]] = {
 }
 
 DEFAULT_POLICY: Dict[str, Any] = {
-    "schema_version": 1,
+    "schema_version": 2,
+    "profiles": {
+        "default": {
+            "readers": {
+                "mcp": {
+                    # Indexed chunks whose source kind matches are withheld from MCP retrieval.
+                    "deny_chunk_source_kinds": ["ambient", "ambient-ax"],
+                    # Additional path-based withholding (substring match on normalized paths).
+                    "deny_path_substrings": ["/screen-memory/", "/ambient/"],
+                    # Screen-context MCP tools read jsonl separately — allow disabling explicitly.
+                    "allow_screen_context_tools": True,
+                    "allowed_strata": list(READER_STRATA_DEFAULTS["mcp"]),
+                    "max_release_level": 3,
+                    "release_without_ok_level": 2,
+                    "release_notice_threshold": 3,
+                    "releasable_chunk_kinds": ["graph-fact", "screen-event", "ambient-summary"],
+                },
+                "local_ui": {"allowed_strata": list(READER_STRATA_DEFAULTS["local_ui"]), "max_release_level": 5},
+                "connector_builder": {"allowed_strata": list(READER_STRATA_DEFAULTS["connector_builder"]), "max_release_level": 5},
+                "export_bundle": {"allowed_strata": list(READER_STRATA_DEFAULTS["export_bundle"]), "max_release_level": 4},
+            },
+        },
+        "personal": {
+            "readers": {
+                "mcp": {
+                    "deny_chunk_source_kinds": ["ambient", "ambient-ax"],
+                    "deny_path_substrings": ["/screen-memory/", "/ambient/"],
+                    "allow_screen_context_tools": False,
+                    "allowed_strata": [STRATUM_GRAPH_FACTS, STRATUM_PREFERENCES, STRATUM_PROJECTIONS],
+                    "max_release_level": 2,
+                    "release_without_ok_level": 1,
+                    "release_notice_threshold": 2,
+                    "releasable_chunk_kinds": ["graph-fact"],
+                },
+                "local_ui": {"allowed_strata": list(READER_STRATA_DEFAULTS["local_ui"]), "max_release_level": 5},
+                "connector_builder": {"allowed_strata": list(READER_STRATA_DEFAULTS["connector_builder"]), "max_release_level": 5},
+                "export_bundle": {"allowed_strata": list(READER_STRATA_DEFAULTS["export_bundle"]), "max_release_level": 4},
+            },
+        },
+    },
+    # Backward compatibility: top-level readers for when no profile is specified
     "readers": {
         "mcp": {
-            # Indexed chunks whose source kind matches are withheld from MCP retrieval.
             "deny_chunk_source_kinds": ["ambient", "ambient-ax"],
-            # Additional path-based withholding (substring match on normalized paths).
             "deny_path_substrings": ["/screen-memory/", "/ambient/"],
-            # Screen-context MCP tools read jsonl separately — allow disabling explicitly.
             "allow_screen_context_tools": True,
             "allowed_strata": list(READER_STRATA_DEFAULTS["mcp"]),
             "max_release_level": 3,
@@ -89,13 +126,42 @@ def load_policy(data_dir: Path | str) -> Dict[str, Any]:
         log.warning("consent_policy.json unreadable; using defaults")
         return pol
     try:
+        # Merge profile-specific settings
+        profiles = raw.get("profiles")
+        if isinstance(profiles, dict):
+            for profile_id, profile_settings in profiles.items():
+                if profile_id not in pol["profiles"]:
+                    pol["profiles"][profile_id] = {}
+                if "readers" in profile_settings:
+                    if "readers" not in pol["profiles"][profile_id]:
+                        pol["profiles"][profile_id]["readers"] = {}
+                    pol["profiles"][profile_id]["readers"].update(profile_settings["readers"])
+        
+        # Merge top-level readers for backward compatibility
         readers = raw.get("readers")
         if isinstance(readers, dict):
-            mcp = readers.get("mcp")
-            if isinstance(mcp, dict):
-                pol["readers"]["mcp"].update(mcp)
+            for reader_id, reader_settings in readers.items():
+                if reader_id not in pol["readers"]:
+                    pol["readers"][reader_id] = {}
+                pol["readers"][reader_id].update(reader_settings)
     except Exception:
         log.warning("consent_policy.json partial parse failure; merging cautiously")
+    return pol
+
+
+def load_policy_for_profile(data_dir: Path | str, profile_id: str) -> Dict[str, Any]:
+    """Load consent policy for a specific profile, falling back to top-level defaults."""
+    pol = load_policy(data_dir)
+    
+    # If profile exists in policy, use its readers
+    if profile_id in pol.get("profiles", {}):
+        profile_readers = pol["profiles"][profile_id].get("readers", {})
+        # Create a merged policy with profile-specific readers
+        profile_policy = copy.deepcopy(pol)
+        profile_policy["readers"] = profile_readers
+        return profile_policy
+    
+    # Fall back to top-level readers
     return pol
 
 
@@ -283,8 +349,12 @@ def filter_hits_for_mcp(
     *,
     release_ok: bool = False,
     approved_release_level: int | None = None,
+    profile_id: str | None = None,
 ) -> List[Hit]:
-    pol = load_policy(Path(data_dir))
+    if profile_id:
+        pol = load_policy_for_profile(Path(data_dir), profile_id)
+    else:
+        pol = load_policy(Path(data_dir))
     out: List[Hit] = []
     release_requests: Dict[tuple[int, str], Hit] = {}
     for h in hits:

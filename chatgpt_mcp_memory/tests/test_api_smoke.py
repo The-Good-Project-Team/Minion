@@ -682,3 +682,104 @@ def test_extensions_reload(sidecar) -> None:
     body = r.json()
     assert "reloaded" in body
     assert "manifest_path" in body
+
+
+# ---------------------------------------------------------------------------
+# Profiles API
+# ---------------------------------------------------------------------------
+
+
+def test_profiles_bootstrapped_and_active(sidecar) -> None:
+    listed = sidecar.get("/profiles")
+    assert listed.status_code == 200, listed.text
+    profiles = listed.json()["profiles"]
+    assert len(profiles) >= 2
+    ids = {p["profile_id"] for p in profiles}
+    assert "default" in ids
+    assert "personal" in ids
+
+    active = sidecar.get("/profiles/active")
+    assert active.status_code == 200, active.text
+    assert active.json()["profile_id"] == "default"
+
+
+def test_profiles_active_not_shadowed(sidecar) -> None:
+    """GET /profiles/active must not match /profiles/{profile_id}."""
+    r = sidecar.get("/profiles/active")
+    assert r.status_code == 200, r.text
+    assert r.json()["profile_id"] != "active"
+
+
+def test_profiles_create_and_switch(sidecar) -> None:
+    created = sidecar.post(
+        "/profiles",
+        {"profile_id": "work-test", "name": "Work Test", "kind": "custom"},
+    )
+    assert created.status_code == 200, created.text
+
+    switched = sidecar.put("/profiles/active", {"profile_id": "work-test"})
+    assert switched.status_code == 200, switched.text
+
+    active = sidecar.get("/profiles/active")
+    assert active.status_code == 200, active.text
+    assert active.json()["profile_id"] == "work-test"
+
+
+def test_workflow_verification(sidecar) -> None:
+    r = sidecar.post("/test/workflow", {"query": "workflow verification"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "passed", body
+    assert body["semantic_search_found"] or body["keyword_search_found"]
+    assert body["semantic_hits"] > 0 or body["keyword_hits"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Export scheduler API
+# ---------------------------------------------------------------------------
+
+
+def test_exports_status_shape(sidecar) -> None:
+    r = sidecar.get("/exports/status")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "enabled" in body
+    assert "watch_path" in body
+    assert "interval_sec" in body
+    assert "last_check_at" in body
+    assert "total_ingested" in body
+
+
+def test_exports_config_accepts_desktop_field_names(sidecar) -> None:
+    watch = str(sidecar.data_dir / "inbox" / "exports-custom")
+    r = sidecar.post(
+        "/exports/config",
+        {
+            "export_watch_path": watch,
+            "export_interval_sec": 900,
+            "enabled": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    settings = r.json()["settings"]
+    assert settings["export_watch_path"] == watch
+    assert settings["export_interval_sec"] == 900.0
+
+
+def test_exports_trigger_returns_desktop_shape(sidecar) -> None:
+    watch = sidecar.data_dir / "inbox" / "exports"
+    watch.mkdir(parents=True, exist_ok=True)
+    r = sidecar.post("/exports/trigger", {})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "ok" in body
+    assert "ingested" in body
+    assert "message" in body
+
+
+def test_connect_cursor_status(sidecar) -> None:
+    body = sidecar.get("/connect/cursor/status").json()
+    assert "installed" in body
+    assert "configured" in body
+    assert "connected" in body
+    assert "config_path" in body

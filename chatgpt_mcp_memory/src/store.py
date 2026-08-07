@@ -88,6 +88,17 @@ class Hit:
     meta: Dict[str, Any]
     source_meta: Dict[str, Any]
     storage_tier: str = "hot"
+    profile_id: Optional[str] = None
+
+
+@dataclass
+class Profile:
+    profile_id: str
+    name: str
+    kind: str
+    is_default: bool
+    created_at: float
+    updated_at: float
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +197,17 @@ CREATE TABLE IF NOT EXISTS identity_audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_identity_audit_log_ts ON identity_audit_log(ts);
 CREATE INDEX IF NOT EXISTS idx_identity_audit_log_claim ON identity_audit_log(claim_id);
+
+CREATE TABLE IF NOT EXISTS profiles (
+    profile_id  TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_profiles_kind ON profiles(kind);
 """
 
 
@@ -236,6 +258,21 @@ def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    
+    # Profile system migration: add profile_id columns
+    try:
+        conn.execute("ALTER TABLE sources ADD COLUMN profile_id TEXT REFERENCES profiles(profile_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sources_profile ON sources(profile_id)")
+    except sqlite3.OperationalError:
+        # Column already exists
+        pass
+    
+    try:
+        conn.execute("ALTER TABLE chunks ADD COLUMN profile_id TEXT REFERENCES profiles(profile_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_profile ON chunks(profile_id)")
+    except sqlite3.OperationalError:
+        # Column already exists
+        pass
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ambient_events_captured ON ambient_events(captured_at DESC)"
     )
@@ -902,6 +939,8 @@ def _bootstrap_schema(conn: sqlite3.Connection, embed_dim: int) -> None:
     _ensure_vec_table(conn, embed_dim)
     _ensure_fts_table(conn)
     _apply_schema_upgrades(conn)
+    profile_initialize_defaults(conn)
+    profile_migrate_null_rows(conn)
 
     existing = conn.execute("SELECT value FROM meta WHERE key='embed_dim'").fetchone()
     if existing is None:
@@ -1211,6 +1250,7 @@ def list_sources(
     limit: int = 500,
     source_type: Optional[str] = None,
     time_range: Optional[str] = None,
+    profile_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     sql = [
         "SELECT s.source_id, s.path, s.kind, s.sha256, s.mtime, s.bytes, s.parser, "
@@ -1260,6 +1300,10 @@ def list_sources(
         elif source_type == "ambient":
             # Ambient sources (identified by parser prefix or path pattern)
             sql.append("AND (s.parser LIKE 'ambient%' OR s.path GLOB '*/ambient/*' OR s.kind='ambient-summary')")
+    profile_clause, profile_params = _profile_filter_sql(profile_id, alias="s")
+    if profile_clause:
+        sql.append(profile_clause.strip())
+        params.extend(profile_params)
     sql.append("ORDER BY s.mtime DESC LIMIT ?")
     params.append(int(limit))
 
@@ -1329,6 +1373,12 @@ def delete_sources_by_kind(conn: sqlite3.Connection, kind: str) -> Tuple[int, in
     return len(ids), chunk_total
 
 
+def _profile_filter_sql(profile_id: Optional[str], *, alias: str = "c") -> tuple[str, List[Any]]:
+    if not profile_id:
+        return "", []
+    return f" AND COALESCE({alias}.profile_id, 'default') = ?", [profile_id]
+
+
 def upsert_source(
     conn: sqlite3.Connection,
     *,
@@ -1341,6 +1391,7 @@ def upsert_source(
     source_meta: Dict[str, Any],
     chunks: Sequence[Tuple[str, Optional[str], Dict[str, Any]]],
     embeddings: np.ndarray,
+    profile_id: Optional[str] = None,
 ) -> str:
     """
     Replace a source and all its chunks atomically.
@@ -1363,6 +1414,8 @@ def upsert_source(
     embeddings = _l2_normalise(embeddings.astype(np.float32, copy=False))
     sid = source_id_for(path)
     now = time.time()
+    if profile_id is None:
+        profile_id = profile_get_active(conn) or "default"
 
     with transaction(conn):
         # Wipe prior rows (cascade clears chunks, but we still need vec cleanup).
@@ -1374,8 +1427,8 @@ def upsert_source(
         conn.execute("DELETE FROM sources WHERE source_id=?", (sid,))
 
         conn.execute(
-            "INSERT INTO sources(source_id, path, kind, sha256, mtime, bytes, parser, meta_json, updated_at) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sources(source_id, path, kind, sha256, mtime, bytes, parser, meta_json, updated_at, profile_id) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 sid,
                 path,
@@ -1386,15 +1439,16 @@ def upsert_source(
                 parser,
                 json.dumps(source_meta, ensure_ascii=False),
                 now,
+                profile_id,
             ),
         )
 
         for seq, ((text, role, cmeta), emb) in enumerate(zip(chunks, embeddings)):
             cid = chunk_id_for(sid, seq)
             cur = conn.execute(
-                "INSERT INTO chunks(chunk_id, source_id, seq, role, text, meta_json) "
-                "VALUES(?, ?, ?, ?, ?, ?)",
-                (cid, sid, seq, role, text, json.dumps(cmeta, ensure_ascii=False)),
+                "INSERT INTO chunks(chunk_id, source_id, seq, role, text, meta_json, profile_id) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (cid, sid, seq, role, text, json.dumps(cmeta, ensure_ascii=False), profile_id),
             )
             rid = int(cur.lastrowid)
             conn.execute(
@@ -1424,6 +1478,7 @@ def search(
     since: Optional[float] = None,
     before: Optional[float] = None,
     role: Optional[str] = None,
+    profile_id: Optional[str] = None,
 ) -> List[Hit]:
     """KNN search with optional source/role filters.
 
@@ -1472,6 +1527,10 @@ def search(
     if before is not None:
         sql.append("AND s.mtime <= ?")
         params.append(float(before))
+    profile_clause, profile_params = _profile_filter_sql(profile_id)
+    if profile_clause:
+        sql.append(profile_clause.strip())
+        params.extend(profile_params)
 
     rows = conn.execute(" ".join(sql), params).fetchall()
     # Preserve vec-order, then cap.
@@ -1547,6 +1606,7 @@ def browse_chunks_chronological(
     after: Optional[float] = None,
     query_substring: Optional[str] = None,
     limit: int = 10,
+    profile_id: Optional[str] = None,
 ) -> List[Hit]:
     """Pure-SQL chronological retrieval over chunks by meta.create_time.
 
@@ -1584,6 +1644,10 @@ def browse_chunks_chronological(
     if query_substring:
         sql.append("AND LOWER(c.text) LIKE ?")
         params.append(f"%{query_substring.lower()}%")
+    profile_clause, profile_params = _profile_filter_sql(profile_id)
+    if profile_clause:
+        sql.append(profile_clause.strip())
+        params.extend(profile_params)
     sql.append(f"ORDER BY ctime {direction} LIMIT ?")
     params.append(int(max(1, limit)))
 
@@ -1620,6 +1684,7 @@ def keyword_search(
     path_glob: Optional[str] = None,
     before: Optional[float] = None,
     after: Optional[float] = None,
+    profile_id: Optional[str] = None,
 ) -> List[Hit]:
     """FTS5 BM25-ranked keyword search over chunk text.
 
@@ -1660,6 +1725,10 @@ def keyword_search(
     if after is not None:
         sql.append("AND json_extract(c.meta_json, '$.create_time') >= ?")
         params.append(float(after))
+    profile_clause, profile_params = _profile_filter_sql(profile_id)
+    if profile_clause:
+        sql.append(profile_clause.strip())
+        params.extend(profile_params)
     sql.append("ORDER BY rank LIMIT ?")
     params.append(int(max(1, top_k)))
 
@@ -3707,6 +3776,225 @@ def sync_job_runs_recent(
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Profile management
+# ---------------------------------------------------------------------------
+
+
+def profile_create(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    name: str,
+    kind: str = "custom",
+    is_default: bool = False,
+) -> Profile:
+    """Create a new profile."""
+    now = time.time()
+    if is_default:
+        # Unset any existing default
+        conn.execute("UPDATE profiles SET is_default = 0 WHERE is_default = 1")
+    
+    conn.execute(
+        """
+        INSERT INTO profiles (profile_id, name, kind, is_default, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (profile_id, name, kind, 1 if is_default else 0, now, now),
+    )
+    conn.commit()
+    return Profile(
+        profile_id=profile_id,
+        name=name,
+        kind=kind,
+        is_default=is_default,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def profile_list(conn: sqlite3.Connection) -> List[Profile]:
+    """List all profiles."""
+    rows = conn.execute(
+        "SELECT profile_id, name, kind, is_default, created_at, updated_at FROM profiles ORDER BY is_default DESC, name"
+    ).fetchall()
+    return [
+        Profile(
+            profile_id=r["profile_id"],
+            name=r["name"],
+            kind=r["kind"],
+            is_default=bool(r["is_default"]),
+            created_at=float(r["created_at"]),
+            updated_at=float(r["updated_at"]),
+        )
+        for r in rows
+    ]
+
+
+def profile_get(conn: sqlite3.Connection, profile_id: str) -> Optional[Profile]:
+    """Get a specific profile by ID."""
+    row = conn.execute(
+        "SELECT profile_id, name, kind, is_default, created_at, updated_at FROM profiles WHERE profile_id = ?",
+        (profile_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return Profile(
+        profile_id=row["profile_id"],
+        name=row["name"],
+        kind=row["kind"],
+        is_default=bool(row["is_default"]),
+        created_at=float(row["created_at"]),
+        updated_at=float(row["updated_at"]),
+    )
+
+
+def profile_get_default(conn: sqlite3.Connection) -> Optional[Profile]:
+    """Get the default profile."""
+    row = conn.execute(
+        "SELECT profile_id, name, kind, is_default, created_at, updated_at FROM profiles WHERE is_default = 1"
+    ).fetchone()
+    if not row:
+        return None
+    return Profile(
+        profile_id=row["profile_id"],
+        name=row["name"],
+        kind=row["kind"],
+        is_default=bool(row["is_default"]),
+        created_at=float(row["created_at"]),
+        updated_at=float(row["updated_at"]),
+    )
+
+
+def profile_update(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    name: Optional[str] = None,
+    is_default: Optional[bool] = None,
+) -> Optional[Profile]:
+    """Update a profile."""
+    updates = []
+    params = []
+    
+    if name is not None:
+        updates.append("name = ?")
+        params.append(name)
+    
+    if is_default is not None:
+        if is_default:
+            conn.execute("UPDATE profiles SET is_default = 0 WHERE is_default = 1")
+        updates.append("is_default = ?")
+        params.append(1 if is_default else 0)
+    
+    if not updates:
+        return profile_get(conn, profile_id)
+    
+    updates.append("updated_at = ?")
+    params.append(time.time())
+    params.append(profile_id)
+    
+    conn.execute(
+        f"UPDATE profiles SET {', '.join(updates)} WHERE profile_id = ?",
+        params,
+    )
+    conn.commit()
+    return profile_get(conn, profile_id)
+
+
+def profile_delete(conn: sqlite3.Connection, profile_id: str) -> bool:
+    """Delete a profile and associated data."""
+    # Check if it's the default profile
+    profile = profile_get(conn, profile_id)
+    if profile and profile.is_default:
+        raise ValueError("Cannot delete default profile")
+
+    source_rows = conn.execute(
+        "SELECT source_id FROM sources WHERE profile_id = ?", (profile_id,)
+    ).fetchall()
+    for row in source_rows:
+        delete_source(conn, str(row["source_id"]))
+    conn.execute("DELETE FROM profiles WHERE profile_id = ?", (profile_id,))
+    conn.commit()
+    return True
+
+
+def profile_set_active(conn: sqlite3.Connection, profile_id: str) -> None:
+    """Set the active profile in meta table."""
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('active_profile_id', ?)",
+        (profile_id,),
+    )
+    conn.commit()
+
+
+def profile_get_active(conn: sqlite3.Connection) -> Optional[str]:
+    """Get the active profile ID from meta table."""
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = 'active_profile_id'"
+    ).fetchone()
+    if not row:
+        # Fall back to default profile
+        default = profile_get_default(conn)
+        return default.profile_id if default else None
+    return row["value"]
+
+
+def profile_ensure_default(conn: sqlite3.Connection) -> Profile:
+    """Ensure a default profile exists, creating it if necessary."""
+    default = profile_get_default(conn)
+    if default:
+        return default
+    
+    # Create default profile
+    profile_id = f"default-{int(time.time())}"
+    return profile_create(
+        conn,
+        profile_id=profile_id,
+        name="Default",
+        kind="default",
+        is_default=True,
+    )
+
+
+def profile_migrate_null_rows(conn: sqlite3.Connection) -> None:
+    """Assign legacy rows without profile_id to the default profile."""
+    conn.execute("UPDATE sources SET profile_id = 'default' WHERE profile_id IS NULL")
+    conn.execute("UPDATE chunks SET profile_id = 'default' WHERE profile_id IS NULL")
+    conn.commit()
+
+
+def profile_initialize_defaults(conn: sqlite3.Connection) -> None:
+    """Initialize default profiles (default and personal) on first run."""
+    existing = profile_list(conn)
+    if not existing:
+        now = time.time()
+
+        # Create default profile
+        conn.execute(
+            """
+            INSERT INTO profiles (profile_id, name, kind, is_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("default", "Default", "default", 1, now, now),
+        )
+
+        # Create personal profile with stricter consent
+        conn.execute(
+            """
+            INSERT INTO profiles (profile_id, name, kind, is_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("personal", "Personal", "personal", 0, now, now),
+        )
+
+        conn.commit()
+        profile_set_active(conn, "default")
+        return
+
+    if not profile_get_active(conn):
+        default = profile_get_default(conn) or profile_ensure_default(conn)
+        profile_set_active(conn, default.profile_id)
 
 
 def log_mcp_tool_usage(

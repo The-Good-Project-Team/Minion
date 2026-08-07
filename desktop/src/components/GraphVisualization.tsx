@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph3D from "react-force-graph-3d";
 import type { GraphData } from "react-force-graph-3d";
 import { fetchGraphScaffold, fetchGraphContext, type GraphScaffoldResponse } from "../lib/api";
@@ -52,6 +52,7 @@ export function GraphVisualization() {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
   const fitTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const hasInitialFitRef = useRef(false);
 
   const clearFitTimers = useCallback(() => {
     fitTimersRef.current.forEach(clearTimeout);
@@ -65,11 +66,17 @@ export function GraphVisualization() {
   const scheduleFitGraphToView = useCallback(() => {
     clearFitTimers();
     fitGraphToView();
-    requestAnimationFrame(fitGraphToView);
-    fitTimersRef.current = [150, 450, 900].map((ms) =>
-      setTimeout(fitGraphToView, ms),
-    );
+    fitTimersRef.current = [250].map((ms) => setTimeout(fitGraphToView, ms));
   }, [clearFitTimers, fitGraphToView]);
+
+  const freezeGraphLayout = useCallback(() => {
+    const nodes = graphRef.current?.graphData()?.nodes as GraphNode[] | undefined;
+    nodes?.forEach((node) => {
+      node.fx = node.x;
+      node.fy = node.y;
+      node.fz = node.z;
+    });
+  }, []);
 
   useEffect(() => () => clearFitTimers(), [clearFitTimers]);
 
@@ -83,25 +90,41 @@ export function GraphVisualization() {
 
     const updateDimensions = () => {
       const { width, height } = container.getBoundingClientRect();
-      setDimensions({
+      const next = {
         width: Math.floor(width),
         height: Math.floor(height),
-      });
+      };
+      setDimensions((prev) =>
+        prev.width === next.width && prev.height === next.height ? prev : next,
+      );
     };
 
     updateDimensions();
-    const observer = new ResizeObserver(updateDimensions);
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    const observer = new ResizeObserver(() => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(updateDimensions, 120);
+    });
     observer.observe(container);
-    return () => observer.disconnect();
+    return () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      observer.disconnect();
+    };
   }, [loading]);
 
   useEffect(() => {
     if (loading || !graphData?.nodes.length || dimensions.width <= 0 || dimensions.height <= 0) {
       return;
     }
+    if (hasInitialFitRef.current) return;
+    hasInitialFitRef.current = true;
     scheduleFitGraphToView();
     return clearFitTimers;
-  }, [loading, graphData, dimensions, nodeFilter, scheduleFitGraphToView, clearFitTimers]);
+  }, [loading, graphData, dimensions.width, dimensions.height, scheduleFitGraphToView, clearFitTimers]);
+
+  useEffect(() => {
+    hasInitialFitRef.current = false;
+  }, [graphData]);
 
   const loadGraphData = async () => {
     setLoading(true);
@@ -214,15 +237,23 @@ export function GraphVisualization() {
     return "#6b7280"; // gray
   };
 
-  const filteredNodes = graphData?.nodes.filter((node: any) => {
-    if (nodeFilter === "all") return true;
-    return (node as GraphNode).node_kind?.toLowerCase().includes(nodeFilter);
-  }) || [];
+  const displayGraphData = useMemo(() => {
+    if (!graphData) return null;
+    const nodes = graphData.nodes.filter((node: any) => {
+      if (nodeFilter === "all") return true;
+      return (node as GraphNode).node_kind?.toLowerCase().includes(nodeFilter);
+    });
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    const links = graphData.links.filter((link: any) => {
+      const sourceId = (link.source as any).id || link.source;
+      const targetId = (link.target as any).id || link.target;
+      return nodeIds.has(sourceId) && nodeIds.has(targetId);
+    });
+    return { nodes, links };
+  }, [graphData, nodeFilter]);
 
-  const filteredNodeIds = new Set(filteredNodes.map(n => n.id));
-  const filteredLinks = graphData?.links.filter((link: any) => 
-    filteredNodeIds.has((link.source as any).id || link.source) && filteredNodeIds.has((link.target as any).id || link.target)
-  ) || [];
+  const filteredNodes = displayGraphData?.nodes ?? [];
+  const filteredLinks = displayGraphData?.links ?? [];
 
   return (
     <div className="flex h-[500px] w-full gap-4">
@@ -242,12 +273,12 @@ export function GraphVisualization() {
               <p className="text-sm">Build your knowledge graph first to visualize nodes and edges</p>
             </div>
           </div>
-        ) : dimensions.width > 0 && dimensions.height > 0 ? (
+        ) : dimensions.width > 0 && dimensions.height > 0 && displayGraphData ? (
           <ForceGraph3D
             ref={graphRef}
             width={dimensions.width}
             height={dimensions.height}
-            graphData={{ nodes: filteredNodes as any, links: filteredLinks as any }}
+            graphData={displayGraphData as any}
             nodeColor={(node: any) => getNodeColor(node as GraphNode)}
             nodeLabel={(node: any) => showLabels ? (node as GraphNode).title : ""}
             nodeRelSize={3}
@@ -259,14 +290,16 @@ export function GraphVisualization() {
               node.fy = node.y;
               node.fz = node.z;
             }}
-            onEngineStop={scheduleFitGraphToView}
+            onEngineStop={() => {
+              freezeGraphLayout();
+            }}
             enableNodeDrag={true}
             backgroundColor="#0a0a0a"
             showNavInfo={false}
-            warmupTicks={100}
-            cooldownTicks={0}
-            d3AlphaDecay={0.02}
-            d3VelocityDecay={0.3}
+            warmupTicks={80}
+            cooldownTicks={120}
+            d3AlphaDecay={0.05}
+            d3VelocityDecay={0.45}
           />
         ) : null}
       </div>
@@ -303,15 +336,6 @@ export function GraphVisualization() {
             }`}
           >
             {showLabels ? "On" : "Off"}
-          </button>
-        </div>
-
-        <div className="mb-4">
-          <button
-            onClick={fitGraphToView}
-            className="w-full rounded-lg border border-border px-3 py-2 text-sm hover:bg-accent"
-          >
-            Recenter graph
           </button>
         </div>
 

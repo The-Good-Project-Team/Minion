@@ -152,11 +152,24 @@ def _data_dir() -> Path:
     return exe.parent.parent / "data" / "derived"
 
 
+def _active_profile_id(conn: sqlite3.Connection) -> Optional[str]:
+    env = _env_first("MINION_PROFILE_ID")
+    if env:
+        return env.strip() or None
+    try:
+        from store import profile_get_active
+
+        return profile_get_active(conn)
+    except Exception:
+        return None
+
+
 def _consent_filter_hits_for_mcp(
     hits: List[Any],
     *,
     release_ok: bool = False,
     approved_release_level: Optional[int] = None,
+    profile_id: Optional[str] = None,
 ) -> List[Any]:
     try:
         from consent_policy import filter_hits_for_mcp
@@ -166,6 +179,7 @@ def _consent_filter_hits_for_mcp(
             _data_dir(),
             release_ok=release_ok,
             approved_release_level=approved_release_level,
+            profile_id=profile_id,
         )
     except Exception:
         log.exception("MCP consent filter failed; using unfiltered hits")
@@ -536,6 +550,7 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         raise ValueError("query is required when mode='keyword'")
 
     conn = _get_conn()
+    profile_id = _active_profile_id(conn)
 
     if mode in ("oldest", "newest"):
         hits = store_browse_chronological(
@@ -548,6 +563,7 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
             after=after_f,
             query_substring=query or None,
             limit=top_k * 3 if dedupe_by_source else top_k,
+            profile_id=profile_id,
         )
     elif mode == "keyword":
         hits = store_keyword_search(
@@ -559,6 +575,7 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
             path_glob=path_glob,
             before=before_f,
             after=after_f,
+            profile_id=profile_id,
         )
     else:  # relevance
         qvec = _embed_query(query)
@@ -586,6 +603,7 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
                 before=before_f,
                 after=after_f,
                 role=role,
+                profile_id=profile_id,
             )
             rerank_used = "rrf+xenc" if rerank_on else "rrf"
         except Exception:
@@ -598,6 +616,7 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
                 path_glob=path_glob,
                 since=since_f,
                 role=role,
+                profile_id=profile_id,
             )
             rerank_used = "none"
         # Bookkeeping for telemetry below.
@@ -608,6 +627,7 @@ def _tool_ask_minion(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         hits,
         release_ok=release_ok,
         approved_release_level=approved_release_level_i,
+        profile_id=profile_id,
     )
 
     # Identity/graph reranking is intentionally NOT applied to retrieval. It

@@ -128,6 +128,7 @@ from store import (
     delete_sources_by_kind,
     fts_available,
     get_chunk,
+    get_meta,
     get_source,
     identity_claim_get,
     identity_claim_list,
@@ -575,6 +576,13 @@ async def _lifespan(app: FastAPI):
     except Exception:
         log.exception("db_rotate flag handling failed")
     _start_watcher(skip_reingest=just_rotated)
+    # Initialize AI assistant connectors (Claude Desktop, Cursor, etc.)
+    try:
+        from connector_base import initialize_connectors
+
+        initialize_connectors()
+    except Exception:
+        log.exception("connector initialization failed")
     # Nudge Claude Desktop to re-read our tool descriptions + retrieval policy
     # whenever the MCP-relevant sources have changed since last launch. No-op
     # if Claude's config file doesn't exist (user hasn't opted in yet).
@@ -588,6 +596,12 @@ async def _lifespan(app: FastAPI):
     except Exception:
         log.exception("file tracker failed to start")
     start_librarian_scheduler(State.data_dir, State.conn)
+    try:
+        from export_scheduler import start_export_scheduler
+
+        start_export_scheduler(State.data_dir, State.conn)
+    except Exception:
+        log.exception("export scheduler failed to start")
     try:
         from graph_corpus_mine import schedule_background_graph_mine
 
@@ -1077,8 +1091,10 @@ def update_settings(body: SettingsBody) -> Dict[str, Any]:
 
 
 @app.get("/settings/consent")
-def get_consent_settings() -> Dict[str, Any]:
+def get_consent_settings(profile_id: Optional[str] = None) -> Dict[str, Any]:
     """Effective MCP/data-sharing consent policy persisted under consent_policy.json."""
+    if profile_id:
+        return consent_policy.load_policy_for_profile(State.data_dir, profile_id)
     return consent_policy.load_policy(State.data_dir)
 
 
@@ -1385,14 +1401,19 @@ def list_sources_endpoint(
     source_type: Optional[str] = None,
     time_range: Optional[str] = None,
 ) -> Dict[str, Any]:
+    conn = State.conn()
+    from store import profile_get_active
+
+    profile_id = profile_get_active(conn)
     rows = list_sources(
-        State.conn(), 
-        kind=kind, 
-        path_glob=path_glob, 
-        since=since, 
+        conn,
+        kind=kind,
+        path_glob=path_glob,
+        since=since,
         limit=limit,
         source_type=source_type,
         time_range=time_range,
+        profile_id=profile_id,
     )
     return {"sources": rows, "counts": _counts()}
 
@@ -1516,8 +1537,13 @@ def _embed_search_results(
     since: Optional[float],
     role: Optional[str],
     max_chars: int,
+    profile_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     conn = State.conn()
+    if profile_id is None:
+        from store import profile_get_active
+
+        profile_id = profile_get_active(conn)
     model = _get_query_model()
     from ingest import apply_query_prefix
 
@@ -1535,6 +1561,7 @@ def _embed_search_results(
         path_glob=path_glob,
         since=since,
         role=role,
+        profile_id=profile_id,
     )
     hits = relevance_hits
     rerank_used = "none"
@@ -1547,6 +1574,7 @@ def _embed_search_results(
                 role=role,
                 kind=kind,
                 path_glob=path_glob,
+                profile_id=profile_id,
             )
             if keyword_hits:
                 hits = rrf_fuse(relevance_hits, keyword_hits)
@@ -3837,11 +3865,13 @@ def test_workflow(body: TestWorkflowBody = TestWorkflowBody()) -> Dict[str, Any]
 
     End-to-end test:
     1. Create a sample text file in the inbox
-    2. Wait for ingestion (up to 30 seconds)
+    2. Ingest it directly (same path as watcher/CLI)
     3. Perform a search to verify retrieval
     4. Return results with timing info
     """
     import time as _time
+
+    from ingest import ingest_file
 
     start_time = _time.time()
     query = body.query
@@ -3869,65 +3899,50 @@ Key phrases to test retrieval:
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"Failed to create test file: {e}")
 
-    # Wait for ingestion (poll for up to 30 seconds)
-    max_wait = 30.0
-    poll_interval = 0.5
-    waited = 0.0
-    source_id = None
-
-    while waited < max_wait:
-        _time.sleep(poll_interval)
-        waited += poll_interval
-
+    ingest_start = _time.time()
+    try:
+        conn = State.conn()
+        result = ingest_file(conn, test_path)
+        conn.commit()
+    except Exception as e:
         try:
-            conn = State.conn()
-            row = conn.execute(
-                "SELECT source_id FROM sources WHERE path = ? LIMIT 1",
-                (str(test_path),),
-            ).fetchone()
-            if row:
-                source_id = row["source_id"]
-                break
+            test_path.unlink(missing_ok=True)
         except Exception:
-            log.exception("poll for source_id failed")
+            pass
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {e}")
 
-    if not source_id:
-        # Clean up the test file if ingestion failed
+    ingestion_time = _time.time() - ingest_start
+    source_id = result.source_id
+    if not source_id or result.skipped:
         try:
             test_path.unlink(missing_ok=True)
         except Exception:
             pass
         raise HTTPException(
             status_code=500,
-            detail=f"Ingestion timeout after {max_wait}s - test file was not indexed",
+            detail=f"Ingestion did not index test file: {result.reason or 'unknown'}",
         )
 
     # Verify retrieval via search
     try:
         conn = State.conn()
-        from ingest import DEFAULT_MODEL
-        from fastembed import TextEmbedding
+        from store import profile_get_active
 
-        # Use the same embedding model as the MCP
-        model_name = (
-            get_meta(conn, "model_name")
-            or os.environ.get("MINION_EMBED_MODEL")
-            or DEFAULT_MODEL
-        )
-        model = TextEmbedding(
-            model_name=model_name,
-            cache_dir=fastembed_cache_dir(data_dir=State.data_dir),
-        )
-        vec = np.asarray(next(iter(model.embed([query]))), dtype=np.float32)
+        profile_id = profile_get_active(conn)
+        model = _get_query_model()
+        from ingest import apply_query_prefix
+
+        text = apply_query_prefix(_query_model_name or "", query)
+        vec = np.asarray(next(iter(model.embed([text]))), dtype=np.float32)
         norm = float(np.linalg.norm(vec))
         if norm > 0:
             vec = vec / norm
 
-        hits = store_search(conn, vec, top_k=5)
+        hits = store_search(conn, vec, top_k=5, profile_id=profile_id)
         found = any(h.source_id == source_id for h in hits)
 
         # Also try keyword search
-        keyword_hits = store_keyword_search(conn, query, top_k=5)
+        keyword_hits = store_keyword_search(conn, query, top_k=5, profile_id=profile_id)
         keyword_found = any(h.source_id == source_id for h in keyword_hits)
 
         total_time = _time.time() - start_time
@@ -3936,7 +3951,7 @@ Key phrases to test retrieval:
             "ok": True,
             "test_file": str(test_path),
             "source_id": source_id,
-            "ingestion_time": round(waited, 2),
+            "ingestion_time": round(ingestion_time, 2),
             "total_time": round(total_time, 2),
             "semantic_search_found": found,
             "keyword_search_found": keyword_found,
@@ -4179,36 +4194,39 @@ def _upsert_mcp_entry(
 
 
 def _refresh_mcp_on_launch() -> None:
-    """Called from lifespan startup. Refresh the Minion MCP entry if Claude
-    Desktop already has a config — never auto-create one. Silent on any
-    failure; this is a nicety, never a blocker."""
+    """Called from lifespan startup. Refresh Minion MCP entries when configs
+    already exist — never auto-create one. Silent on any failure."""
     if os.environ.get("MINION_SKIP_MCP_REFRESH"):
         return
-    cfg_path = _default_claude_cfg_path()
-    if cfg_path is None:
-        return
     try:
-        result = _upsert_mcp_entry(cfg_path, "minion", create_if_missing=False)
+        from connector_base import ConnectorRegistry
     except Exception:
-        log.exception("mcp: auto-refresh failed")
+        log.exception("mcp: connector registry unavailable for auto-refresh")
         return
-    if result["action"] in ("created", "refreshed"):
-        log.info(
-            "mcp: %s %s (sha=%s) — Claude Desktop will reconnect",
-            result["action"], cfg_path, result.get("build_sha"),
-        )
+    for connector in ConnectorRegistry.list_all().values():
+        result = connector.refresh_if_configured("minion")
+        if result and result.get("action") in ("created", "refreshed"):
+            log.info(
+                "mcp: %s %s (sha=%s) — %s will reconnect",
+                result["action"],
+                result.get("config_path"),
+                result.get("build_sha"),
+                connector.display_name,
+            )
 
 
 @app.get("/connect/claude-desktop/status")
 def connect_claude_desktop_status() -> Dict[str, Any]:
     """Whether Claude Desktop is installed and Minion is registered in its MCP config."""
-    cfg_path = _default_claude_cfg_path()
-    installed = _claude_desktop_installed()
-    configured = bool(cfg_path and _claude_mcp_configured(cfg_path))
+    from connector_base import ConnectorRegistry
+
+    connector = ConnectorRegistry.get("claude-desktop")
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Claude Desktop connector not registered")
+    status = connector.get_status()
+    cfg_path = connector.get_config_path()
     return {
-        "installed": installed,
-        "configured": configured,
-        "connected": installed and configured,
+        **status,
         "config_path": str(cfg_path) if cfg_path else None,
     }
 
@@ -4216,113 +4234,390 @@ def connect_claude_desktop_status() -> Dict[str, Any]:
 @app.get("/connect/cursor/status")
 def connect_cursor_status() -> Dict[str, Any]:
     """Whether Cursor is installed and Minion is registered in its MCP config."""
-    cfg_path = _default_cursor_cfg_path()
-    installed = _cursor_installed()
-    configured = bool(cfg_path and _cursor_mcp_configured(cfg_path))
+    from connector_base import ConnectorRegistry
+
+    connector = ConnectorRegistry.get("cursor")
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Cursor connector not registered")
+    status = connector.get_status()
+    cfg_path = connector.get_config_path()
     return {
-        "installed": installed,
-        "configured": configured,
-        "connected": installed and configured,
+        **status,
         "config_path": str(cfg_path) if cfg_path else None,
     }
 
 
 @app.post("/connect/claude-desktop")
 def connect_claude_desktop(body: ConnectBody) -> Dict[str, Any]:
-    """Merge the Minion MCP entry into Claude Desktop's config. Same behaviour
-    as `minion mcp-config` — lets the UI do it with one click."""
-    if not _claude_desktop_installed():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Claude Desktop is not installed on this Mac. "
-                "Install it from https://claude.ai/download, then click Connect again. "
-                "Minion still works on its own — or use LAN MCP with Cursor and other clients."
-            ),
-        )
+    """Merge the Minion MCP entry into Claude Desktop's config."""
+    from connector_base import ConnectorRegistry
 
-    if body.config_path:
-        cfg_path = Path(body.config_path).expanduser().resolve()
-    else:
-        cfg_path = _default_claude_cfg_path()
-        if cfg_path is None:
-            raise HTTPException(status_code=400, detail="could not resolve Claude Desktop config path")
-
+    connector = ConnectorRegistry.get("claude-desktop")
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Claude Desktop connector not registered")
     try:
-        result = _upsert_mcp_entry(cfg_path, body.server_name, create_if_missing=True)
+        return connector.connect(
+            server_name=body.server_name,
+            config_path_override=body.config_path,
+            create_if_missing=True,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except OSError as e:
-        detail = f"cannot write {cfg_path}: {e.strerror or 'os error'}"
+        detail = f"cannot write config: {e.strerror or 'os error'}"
         raise HTTPException(status_code=403, detail=detail)
     except Exception as e:
-        # Avoid leaking stack traces into the UI; keep it actionable.
         raise HTTPException(status_code=500, detail=f"connect failed: {e.__class__.__name__}: {e}")
-
-    restart_required = result["action"] != "noop"
-    message = (
-        "Minion is connected. Fully quit and reopen Claude Desktop so it picks up memory tools."
-        if restart_required
-        else "Claude Desktop is already connected to Minion."
-    )
-    return {
-        "config_path": result["config_path"],
-        "backup_path": result.get("backup_path"),
-        "server_name": result["server_name"],
-        "restart_required": restart_required,
-        "installed": True,
-        "configured": True,
-        "message": message,
-    }
 
 
 @app.post("/connect/cursor")
 def connect_cursor(body: ConnectBody) -> Dict[str, Any]:
-    """Merge the Minion MCP entry into Cursor's config. Same behaviour
-    as Claude Desktop connect — lets the UI do it with one click."""
-    if not _cursor_installed():
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Cursor is not installed on this Mac. "
-                "Install it from https://cursor.sh, then click Connect again. "
-                "Minion still works on its own — or use LAN MCP with other clients."
-            ),
-        )
+    """Merge the Minion MCP entry into Cursor's config."""
+    from connector_base import ConnectorRegistry
 
-    if body.config_path:
-        cfg_path = Path(body.config_path).expanduser().resolve()
-    else:
-        cfg_path = _default_cursor_cfg_path()
-        if cfg_path is None:
-            raise HTTPException(status_code=400, detail="could not resolve Cursor config path")
-
+    connector = ConnectorRegistry.get("cursor")
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Cursor connector not registered")
     try:
-        result = _upsert_mcp_entry(cfg_path, body.server_name, create_if_missing=True)
+        return connector.connect(
+            server_name=body.server_name,
+            config_path_override=body.config_path,
+            create_if_missing=True,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except OSError as e:
-        detail = f"cannot write {cfg_path}: {e.strerror or 'os error'}"
+        detail = f"cannot write config: {e.strerror or 'os error'}"
         raise HTTPException(status_code=403, detail=detail)
     except Exception as e:
-        # Avoid leaking stack traces into the UI; keep it actionable.
         raise HTTPException(status_code=500, detail=f"connect failed: {e.__class__.__name__}: {e}")
 
-    restart_required = result["action"] != "noop"
-    message = (
-        "Minion is connected. Fully quit and reopen Cursor so it picks up memory tools."
-        if restart_required
-        else "Cursor is already connected to Minion."
+
+# ---------------------------------------------------------------------------
+# Generic connector endpoints (using connector abstraction)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/connectors")
+def list_connectors() -> Dict[str, Any]:
+    """List all available AI assistant connectors with their status."""
+    from connector_base import ConnectorRegistry
+
+    return {
+        "connectors": ConnectorRegistry.list_available(),
+    }
+
+
+@app.get("/connectors/{connector_id}/status")
+def get_connector_status(connector_id: str) -> Dict[str, Any]:
+    """Get connection status for a specific connector."""
+    from connector_base import ConnectorRegistry
+
+    connector = ConnectorRegistry.get(connector_id)
+    if not connector:
+        raise HTTPException(status_code=404, detail=f"Connector '{connector_id}' not found")
+
+    return {
+        "connector_id": connector.connector_id,
+        "display_name": connector.display_name,
+        **connector.get_status(),
+    }
+
+
+@app.post("/connectors/{connector_id}/connect")
+def connect_generic(connector_id: str, body: ConnectBody) -> Dict[str, Any]:
+    """Connect Minion to a specific AI assistant via its MCP config.
+
+    Generic endpoint that works with any registered connector.
+    """
+    from connector_base import ConnectorRegistry
+
+    connector = ConnectorRegistry.get(connector_id)
+    if not connector:
+        raise HTTPException(status_code=404, detail=f"Connector '{connector_id}' not found")
+
+    try:
+        return connector.connect(
+            server_name=body.server_name,
+            config_path_override=body.config_path,
+            create_if_missing=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"connect failed: {e.__class__.__name__}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Export scheduler endpoints
+# ---------------------------------------------------------------------------
+
+
+class ExportTriggerBody(BaseModel):
+    export_path: Optional[str] = None
+
+
+def _normalize_export_trigger_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Shape trigger responses for the desktop client."""
+    if result.get("status") == "error":
+        return {
+            "ok": False,
+            "ingested": 0,
+            "message": result.get("error") or "Export trigger failed",
+            **result,
+        }
+    if "success" in result:
+        ingested = 1 if result.get("success") else 0
+        msg = "Export ingested" if ingested else (result.get("reason") or "Export skipped")
+        return {"ok": bool(result.get("success")), "ingested": ingested, "message": msg, **result}
+    ingested = int(result.get("successful", 0) or 0)
+    status = result.get("status", "completed")
+    if status == "no_new_exports":
+        message = "No new exports found"
+    elif status == "disabled":
+        message = "Export scheduler is disabled"
+    else:
+        message = f"Ingested {ingested} export(s)"
+    return {"ok": True, "ingested": ingested, "message": message, **result}
+
+
+@app.get("/exports/status")
+def exports_status() -> Dict[str, Any]:
+    """Get export scheduler status and configuration."""
+    from export_scheduler import export_interval_sec, export_scheduler_stats, export_watch_path
+
+    watch_path = export_watch_path(State.data_dir)
+    interval = export_interval_sec(State.data_dir)
+    stats = export_scheduler_stats(State.conn())
+
+    return {
+        "enabled": os.environ.get("MINION_DISABLE_EXPORT_SCHEDULER", "").strip().lower() not in (
+            "1",
+            "true",
+            "yes",
+        ),
+        "watch_path": str(watch_path) if watch_path else None,
+        "watch_path_exists": watch_path.exists() if watch_path else False,
+        "interval_sec": interval,
+        "interval_hours": interval / 3600.0,
+        **stats,
+    }
+
+
+@app.post("/exports/trigger")
+def trigger_export(
+    body: ExportTriggerBody = Body(default_factory=ExportTriggerBody),
+    path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Manually trigger export ingestion for a specific file or all new exports."""
+    from export_scheduler import trigger_manual_export
+
+    export_path = path or body.export_path
+    result = trigger_manual_export(
+        State.data_dir,
+        State.conn,
+        export_path=export_path,
+    )
+    return _normalize_export_trigger_result(result)
+
+
+class ExportConfigBody(BaseModel):
+    watch_path: Optional[str] = None
+    interval_sec: Optional[float] = None
+    export_watch_path: Optional[str] = None
+    export_interval_sec: Optional[float] = None
+    enabled: Optional[bool] = None
+
+
+@app.post("/exports/config")
+def configure_exports(body: ExportConfigBody) -> Dict[str, Any]:
+    """Configure export scheduler settings."""
+    from settings import load_settings, save_settings
+
+    settings = load_settings(State.data_dir)
+    resolved_watch = body.watch_path if body.watch_path is not None else body.export_watch_path
+    resolved_interval = body.interval_sec if body.interval_sec is not None else body.export_interval_sec
+
+    if resolved_watch is not None:
+        settings["export_watch_path"] = resolved_watch
+
+    if resolved_interval is not None:
+        settings["export_interval_sec"] = max(300.0, float(resolved_interval))
+    
+    if body.enabled is not None:
+        if body.enabled:
+            os.environ.pop("MINION_DISABLE_EXPORT_SCHEDULER", None)
+        else:
+            os.environ["MINION_DISABLE_EXPORT_SCHEDULER"] = "1"
+    
+    save_settings(State.data_dir, settings)
+    
+    return {
+        "ok": True,
+        "settings": {
+            "export_watch_path": settings.get("export_watch_path"),
+            "export_interval_sec": settings.get("export_interval_sec"),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Profile management endpoints
+# ---------------------------------------------------------------------------
+
+
+class ProfileCreateBody(BaseModel):
+    profile_id: str
+    name: str
+    kind: str = "custom"
+    is_default: bool = False
+
+
+class ProfileUpdateBody(BaseModel):
+    name: Optional[str] = None
+    is_default: Optional[bool] = None
+
+
+class ProfileSetActiveBody(BaseModel):
+    profile_id: str
+
+
+@app.get("/profiles")
+def list_profiles() -> Dict[str, Any]:
+    """List all profiles."""
+    from store import profile_list
+
+    conn = State.conn()
+    profiles = profile_list(conn)
+    return {
+        "profiles": [
+            {
+                "profile_id": p.profile_id,
+                "name": p.name,
+                "kind": p.kind,
+                "is_default": p.is_default,
+                "created_at": p.created_at,
+                "updated_at": p.updated_at,
+            }
+            for p in profiles
+        ]
+    }
+
+
+@app.post("/profiles")
+def create_profile(body: ProfileCreateBody) -> Dict[str, Any]:
+    """Create a new profile."""
+    from store import profile_create
+
+    profile = profile_create(
+        State.conn(),
+        profile_id=body.profile_id,
+        name=body.name,
+        kind=body.kind,
+        is_default=body.is_default,
     )
     return {
-        "config_path": result["config_path"],
-        "backup_path": result.get("backup_path"),
-        "server_name": result["server_name"],
-        "restart_required": restart_required,
-        "installed": True,
-        "configured": True,
-        "message": message,
+        "profile_id": profile.profile_id,
+        "name": profile.name,
+        "kind": profile.kind,
+        "is_default": profile.is_default,
+        "created_at": profile.created_at,
+        "updated_at": profile.updated_at,
     }
+
+
+@app.get("/profiles/active")
+def get_active_profile() -> Dict[str, Any]:
+    """Get the active profile."""
+    from store import profile_get, profile_get_active, profile_set_active
+
+    conn = State.conn()
+    active_id = profile_get_active(conn)
+    if not active_id:
+        from store import profile_ensure_default
+
+        default = profile_ensure_default(conn)
+        profile_set_active(conn, default.profile_id)
+        active_id = default.profile_id
+    profile = profile_get(conn, active_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Active profile not found")
+    return {
+        "profile_id": profile.profile_id,
+        "name": profile.name,
+        "kind": profile.kind,
+        "is_default": profile.is_default,
+        "created_at": profile.created_at,
+        "updated_at": profile.updated_at,
+    }
+
+
+@app.put("/profiles/active")
+def set_active_profile(body: ProfileSetActiveBody) -> Dict[str, Any]:
+    """Set the active profile."""
+    from store import profile_get, profile_set_active
+
+    conn = State.conn()
+    profile = profile_get(conn, body.profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    profile_set_active(conn, body.profile_id)
+    return {"ok": True, "profile_id": body.profile_id}
+
+
+@app.get("/profiles/{profile_id}")
+def get_profile(profile_id: str) -> Dict[str, Any]:
+    """Get a specific profile."""
+    from store import profile_get
+
+    profile = profile_get(State.conn(), profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {
+        "profile_id": profile.profile_id,
+        "name": profile.name,
+        "kind": profile.kind,
+        "is_default": profile.is_default,
+        "created_at": profile.created_at,
+        "updated_at": profile.updated_at,
+    }
+
+
+@app.put("/profiles/{profile_id}")
+def update_profile(profile_id: str, body: ProfileUpdateBody) -> Dict[str, Any]:
+    """Update a profile."""
+    from store import profile_update
+
+    profile = profile_update(
+        State.conn(),
+        profile_id=profile_id,
+        name=body.name,
+        is_default=body.is_default,
+    )
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {
+        "profile_id": profile.profile_id,
+        "name": profile.name,
+        "kind": profile.kind,
+        "is_default": profile.is_default,
+        "created_at": profile.created_at,
+        "updated_at": profile.updated_at,
+    }
+
+
+@app.delete("/profiles/{profile_id}")
+def delete_profile(profile_id: str) -> Dict[str, Any]:
+    """Delete a profile and associated data."""
+    from store import profile_delete
+
+    try:
+        profile_delete(State.conn(), profile_id)
+        return {"ok": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.websocket("/events")

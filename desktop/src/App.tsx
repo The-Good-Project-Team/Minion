@@ -20,6 +20,8 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 import { GraphVisualization } from "./components/GraphVisualization";
 import { IdentityMirror } from "./components/IdentityMirror";
+import { ProfileSwitcher } from "./components/ProfileSwitcher";
+import { ExportSchedulerConfig } from "./components/ExportSchedulerConfig";
 
 import {
   apiErrorDetail,
@@ -368,6 +370,11 @@ function SettingsView({
         </section>
       ))}
 
+      {/* Export Scheduler */}
+      <section className="rounded-2xl border border-border bg-card p-4">
+        <ExportSchedulerConfig />
+      </section>
+
       {/* Audit Log */}
       <section className="rounded-2xl border border-border bg-card p-4">
         <div className="flex items-center justify-between mb-4">
@@ -514,18 +521,6 @@ export function App() {
   const load = useCallback(async () => {
     setConn("connecting");
     try {
-      const consent = await fetchConsentPolicy().catch(() => null);
-      if (consent) {
-        setConsentPolicy(consent);
-        setConsentError(null);
-      } else {
-        setConsentError("Failed to load consent policy");
-      }
-    } catch (e) {
-      setConsentError(e instanceof Error ? e.message : "Failed to load consent policy");
-    }
-
-    try {
       const [st, srcs, gs, claude, cursor] = await Promise.all([
         fetchStatus().catch(() => null),
         fetchSources({
@@ -559,6 +554,28 @@ export function App() {
       console.error("Failed to load dashboard data:", e);
     }
   }, [sourceTypeFilter, timeRangeFilter]);
+
+  const loadConsent = useCallback(async (retryCount = 0) => {
+    if (retryCount === 0) {
+      setConsentError(null);
+    }
+    try {
+      const consent = await fetchConsentPolicy();
+      setConsentPolicy(consent);
+      setConsentError(null);
+    } catch (e) {
+      console.error("Failed to load consent policy:", e);
+      if (retryCount < 5) {
+        window.setTimeout(() => {
+          void loadConsent(retryCount + 1);
+        }, 1000 * (retryCount + 1));
+        return;
+      }
+      setConsentError(e instanceof Error ? e.message : "Failed to load consent policy");
+    }
+  }, []);
+
+  const apiReady = conn === "open" || sidecar?.state === "ready";
 
   // Coalesce the per-file refreshes the ingest stream triggers. The backend
   // emits one `source_updated` per file; on a big corpus (100k+ chunks) calling
@@ -642,17 +659,25 @@ export function App() {
   }, [load]);
 
   useEffect(() => {
-    // Only load activity feed when sidecar is ready
     if (sidecar?.state === "ready") {
       void loadActivityFeed();
     }
   }, [sidecar?.state, loadActivityFeed]);
 
   useEffect(() => {
+    if (apiReady) {
+      void loadConsent();
+    }
+  }, [apiReady, loadConsent]);
+
+  useEffect(() => {
     if (currentTab === "settings") {
       void loadAuditLog();
+      if (!consentPolicy || consentError) {
+        void loadConsent();
+      }
     }
-  }, [currentTab, loadAuditLog]);
+  }, [currentTab, loadAuditLog, consentPolicy, consentError, loadConsent]);
 
   function pushFeed(path: string, stage: string, state: FeedLine["state"]) {
     setFeed((prev) => {
@@ -994,20 +1019,22 @@ export function App() {
       )}
 
       <div className="mx-auto max-w-3xl px-6 py-8">
-        <header className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <img src="/logo.png" alt="Minion" className="size-10 rounded-xl" />
-            <div>
-            <h1 className="font-serif text-2xl">Minion</h1>
-            <p className="text-sm text-muted-foreground">
+        <header className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <img src="/logo.png" alt="Minion" className="size-10 shrink-0 rounded-xl" />
+              <h1 className="truncate font-serif text-2xl">Minion</h1>
+            </div>
+            <ProfileSwitcher apiReady={apiReady} onProfileChange={() => void load()} />
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+            <p className="shrink-0 text-sm text-muted-foreground">
               {counts.sources} sources · {counts.chunks} chunks
               <span className={`ml-2 ${conn === "open" ? "text-primary" : "text-muted-foreground"}`}>
                 ● {conn === "open" ? "connected" : conn}
               </span>
             </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setCurrentTab("home")}
               className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm hover:bg-accent ${
@@ -1047,6 +1074,7 @@ export function App() {
             >
               {testRunning ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Test
             </button>
+            </div>
           </div>
         </header>
 

@@ -140,14 +140,19 @@ def search_fused(
     before: Optional[float] = None,
     after: Optional[float] = None,
     role: Optional[str] = None,
+    profile_id: Optional[str] = None,
 ) -> List[Hit]:
     """Run dense ∥ sparse ∥ graph in parallel, RRF-fuse, then optionally rerank.
 
     `conn_factory` mints a fresh reader connection per lane so the lanes truly
     overlap. Without it the lanes run serially on `conn` (still correct).
     """
-    dense_filters = dict(kind=kind, path_glob=path_glob, since=since, before=before, role=role)
-    kw_filters = dict(kind=kind, path_glob=path_glob, before=before, after=after, role=role)
+    dense_filters = dict(
+        kind=kind, path_glob=path_glob, since=since, before=before, role=role, profile_id=profile_id
+    )
+    kw_filters = dict(
+        kind=kind, path_glob=path_glob, before=before, after=after, role=role, profile_id=profile_id
+    )
     has_fts = fts_available(conn)
     # Candidate pool for the lanes: when reranking, fetch enough per lane that the
     # cross-encoder has real recall to work with (a small pool caps the rerank — the
