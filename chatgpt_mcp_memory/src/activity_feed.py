@@ -483,14 +483,45 @@ def _mcp_tool_usage_items(usage: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _filter_items_for_profile(
+    conn,
+    items: List[Dict[str, Any]],
+    profile_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not profile_id:
+        return items
+    allowed = {
+        str(r["source_id"])
+        for r in conn.execute(
+            "SELECT source_id FROM sources WHERE COALESCE(profile_id, 'default') = ?",
+            (profile_id,),
+        ).fetchall()
+    }
+    out: List[Dict[str, Any]] = []
+    for item in items:
+        if item.get("item_kind") == "council":
+            out.append(item)
+            continue
+        refs = item.get("refs") or {}
+        sid = refs.get("source_id")
+        if sid and sid not in allowed:
+            continue
+        out.append(item)
+    return out
+
+
 def build_activity_feed(
     conn,
     data_dir: Path,
     *,
     limit: int = 80,
     since_hours: float = 48.0,
+    profile_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Merge observations, parse outcomes, and suggestions into one chronological river."""
+    from store import graph_active_profile_id
+
+    profile_id = graph_active_profile_id(conn, profile_id)
     since_ts = time.time() - since_hours * 3600.0
     lim = int(max(10, min(limit, 200)))
 
@@ -574,6 +605,7 @@ def build_activity_feed(
     items: List[Dict[str, Any]] = []
     items.extend(council_items)
     items.extend(river)
+    items = _filter_items_for_profile(conn, items, profile_id)
 
     session_hint = None
     try:
@@ -588,9 +620,10 @@ def build_activity_feed(
         "items": items,
         "council_items": council_items,
         "memory_prefetch": [],
-        "graph": graph_scaffold_list(conn),
+        "graph": graph_scaffold_list(conn, profile_id=profile_id),
         "librarian": librarian_state,
         "session": session_hint,
         "composed_at": time.time(),
         "since_ts": since_ts,
+        "profile_id": profile_id,
     }

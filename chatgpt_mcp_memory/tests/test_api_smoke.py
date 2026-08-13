@@ -869,6 +869,22 @@ def test_graph_stats_includes_active_profile(sidecar) -> None:
     assert body["active_profile_id"] in ("default", "personal")
 
 
+def test_search_accepts_profile_id(sidecar, staged_note: Path) -> None:
+    sidecar.post("/ingest", {"path": str(staged_note)}).raise_for_status()
+    sidecar.wait_for_sources(1, timeout=45.0)
+    r = sidecar.post("/search", {"query": "Good Capital", "top_k": 3, "profile_id": "default"})
+    assert r.status_code == 200, r.text
+    assert "results" in r.json()
+
+
+def test_feed_accepts_profile_id(sidecar) -> None:
+    r = sidecar.get("/feed?profile_id=default&limit=5")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("profile_id") == "default"
+    assert "items" in body
+
+
 def test_connect_cursor_status(sidecar) -> None:
     body = sidecar.get("/connect/cursor/status").json()
     assert "installed" in body

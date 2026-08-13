@@ -728,6 +728,7 @@ class SearchBody(BaseModel):
     role: Optional[str] = None
     since: Optional[float] = None
     max_chars: int = Field(default=600, ge=50, le=4000)
+    profile_id: Optional[str] = None
 
 
 class IngestBody(BaseModel):
@@ -1674,6 +1675,7 @@ def search_endpoint(body: SearchBody) -> Dict[str, Any]:
             body.since,
             body.role,
             body.max_chars,
+            profile_id=body.profile_id,
         )
     }
 
@@ -2046,12 +2048,17 @@ def today_bundle() -> Dict[str, Any]:
 
 
 @app.get("/feed")
-def activity_feed(limit: int = 80, since_hours: float = 48.0) -> Dict[str, Any]:
+def activity_feed(
+    limit: int = 80,
+    since_hours: float = 48.0,
+    profile_id: Optional[str] = None,
+) -> Dict[str, Any]:
     return build_activity_feed(
         State.conn(),
         State.data_dir,
         limit=limit,
         since_hours=since_hours,
+        profile_id=profile_id,
     )
 
 

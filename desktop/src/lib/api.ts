@@ -306,6 +306,7 @@ export async function search(body: {
   top_k?: number;
   kind?: string;
   path_glob?: string;
+  profile_id?: string;
 }): Promise<{ results: SearchHit[] }> {
   return apiFetch("/search", {
     method: "POST",
@@ -1797,10 +1798,13 @@ export async function councilApprove(body: {
   });
 }
 
-export async function fetchFeed(params: { limit?: number; since_hours?: number } = {}): Promise<ActivityFeedBundle> {
+export async function fetchFeed(
+  params: { limit?: number; since_hours?: number; profile_id?: string } = {},
+): Promise<ActivityFeedBundle> {
   const q = new URLSearchParams();
   if (params.limit != null) q.set("limit", String(params.limit));
   if (params.since_hours != null) q.set("since_hours", String(params.since_hours));
+  if (params.profile_id) q.set("profile_id", params.profile_id);
   const qs = q.toString();
   const raw = await apiFetch<ActivityFeedBundle & { librarian?: AgentStreamState }>(`/feed${qs ? `?${qs}` : ""}`);
   return { ...raw, agent: raw.agent ?? raw.librarian };

@@ -22,6 +22,8 @@ import { GraphVisualization } from "./components/GraphVisualization";
 import { IdentityMirror } from "./components/IdentityMirror";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
 import { ExportSchedulerConfig } from "./components/ExportSchedulerConfig";
+import { ActivityHome } from "./components/ActivityHome";
+import { formatFeedTime } from "./lib/feedUtils";
 
 import {
   apiErrorDetail,
@@ -31,7 +33,6 @@ import {
   fetchClaudeDesktopStatus,
   fetchCursorStatus,
   fetchConsentPolicy,
-  fetchFeed,
   fetchGraphStats,
   fetchSources,
   fetchStatus,
@@ -48,17 +49,13 @@ import {
   testWorkflow,
   updateConsentPolicy,
   type Active,
-  type ActivityFeedBundle,
   type AuditLogEntry,
   type AuditLogResponse,
   type ClaudeDesktopStatus,
   type ConnState,
   type ConsentPolicy,
-  type CouncilFeedItem,
   type CursorStatus,
   type EventMsg,
-  type FeedItem,
-  type FeedRow,
   type GraphStats,
   type SidecarStatus,
   type Source,
@@ -489,43 +486,11 @@ export function App() {
   const [consentError, setConsentError] = useState<string | null>(null);
   const [activeProfile, setActiveProfile] = useState<Profile | null>(null);
   const [profileRefreshing, setProfileRefreshing] = useState(false);
-  const [activityFeed, setActivityFeed] = useState<ActivityFeedBundle | null>(null);
-  const [activityFeedLoading, setActivityFeedLoading] = useState(true);
-  const [activityFeedError, setActivityFeedError] = useState<string | null>(null);
-  const [activityFeedFilter, setActivityFeedFilter] = useState<"all" | "ingest" | "ambient" | "graph" | "errors">("all");
-  const [activityTimeRange, setActivityTimeRange] = useState<"last_hour" | "last_day" | "last_week" | "all">("last_day");
-  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [auditFilter, setAuditFilter] = useState<"all" | "identity" | "graph">("all");
   const [testRunning, setTestRunning] = useState(false);
   const [testResult, setTestResult] = useState<TestWorkflowResult | null>(null);
   const dropRef = useRef<(files: FileList | null) => void>(() => {});
-
-  const loadActivityFeed = useCallback(async (retryCount = 0) => {
-    // Only show loading state if we don't have data yet
-    if (!activityFeed) {
-      setActivityFeedLoading(true);
-    }
-    setActivityFeedError(null);
-    try {
-      const sinceHours = activityTimeRange === "all" ? 168 : activityTimeRange === "last_week" ? 168 : activityTimeRange === "last_day" ? 24 : 1;
-      const feed = await fetchFeed({ limit: 100, since_hours: sinceHours });
-      setActivityFeed(feed);
-      setActivityFeedLoading(false);
-    } catch (e) {
-      console.error("Failed to load activity feed:", e);
-      if (retryCount < 2) {
-        // Retry automatically after a delay
-        setTimeout(() => loadActivityFeed(retryCount + 1), 1000 * (retryCount + 1));
-      } else {
-        // Only show error if we don't have any data
-        if (!activityFeed) {
-          setActivityFeedError("Failed to load activity feed");
-        }
-        setActivityFeedLoading(false);
-      }
-    }
-  }, [activityTimeRange, activityFeed]);
 
   const loadAuditLog = useCallback(async () => {
     try {
@@ -608,12 +573,11 @@ export function App() {
       await Promise.all([
         loadConsent(profile.profile_id),
         refreshDashboard(),
-        loadActivityFeed(),
       ]);
     } finally {
       setProfileRefreshing(false);
     }
-  }, [loadConsent, refreshDashboard, loadActivityFeed]);
+  }, [loadConsent, refreshDashboard]);
 
   const apiReady = conn === "open" || sidecar?.state === "ready";
 
@@ -699,12 +663,6 @@ export function App() {
   }, [load]);
 
   useEffect(() => {
-    if (sidecar?.state === "ready") {
-      void loadActivityFeed();
-    }
-  }, [sidecar?.state, loadActivityFeed]);
-
-  useEffect(() => {
     if (currentTab === "settings") {
       void loadAuditLog();
       if (activeProfile && (!consentPolicy || consentError)) {
@@ -719,37 +677,6 @@ export function App() {
       next.unshift({ path, stage, state });
       return next.slice(0, 12);
     });
-  }
-
-  function toggleSection(sectionId: string) {
-    setCollapsedSections(prev => ({ ...prev, [sectionId]: !prev[sectionId] }));
-  }
-
-  function formatFeedTime(ts: number): string {
-    const now = Date.now() / 1000;
-    const diff = now - ts;
-    if (diff < 60) return "just now";
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-  }
-
-  function isFeedItem(item: FeedRow): item is FeedItem {
-    return item.item_kind !== "council";
-  }
-
-  function isCouncilFeedItem(item: FeedRow): item is CouncilFeedItem {
-    return item.item_kind === "council";
-  }
-
-  function getFeedItemType(item: FeedRow): "ingest" | "ambient" | "graph" | "errors" | "other" {
-    if (item.item_kind === "council") return "graph";
-    const kind = item.kind?.toLowerCase() || "";
-    if (kind.includes("ingest") || kind.includes("source") || kind.includes("indexed")) return "ingest";
-    if (kind.includes("ambient") || kind.includes("screen") || kind.includes("focus")) return "ambient";
-    if (kind.includes("graph") || kind.includes("node") || kind.includes("edge")) return "graph";
-    if (kind.includes("error") || kind.includes("failed") || kind.includes("issue")) return "errors";
-    return "other";
   }
 
   // --- ingest actions (reuse the v1 path-based ingest) ---
@@ -1098,7 +1025,7 @@ export function App() {
                 currentTab === "home" ? "bg-accent" : ""
               }`}
             >
-              <Brain className="size-4" /> Home
+              <Brain className="size-4" /> Activity
             </button>
             <button
               onClick={() => setCurrentTab("graph")}
@@ -1177,7 +1104,15 @@ export function App() {
 
         {currentTab === "home" && (
           <>
-            {/* live dashboard */}
+            <ActivityHome
+              displayName={name}
+              activeProfileId={activeProfile?.profile_id}
+              activeProfileName={activeProfile?.name}
+              sources={sources}
+              onReveal={handleReveal}
+              onNavigateGraph={() => setCurrentTab("graph")}
+            />
+
             <section className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <StatTile icon={<FileText className="size-4" />} label="Sources" value={counts.sources} tint="text-sky-500" />
           <StatTile icon={<Database className="size-4" />} label="Chunks" value={counts.chunks} tint="text-blue-500" />
@@ -1321,177 +1256,6 @@ export function App() {
             </ul>
           </section>
         )}
-
-        {/* activity feed */}
-        <section className="mt-6 rounded-2xl border border-border bg-card p-4">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="inline-flex items-center gap-1.5 font-medium">
-              <Clock className="size-4 text-primary" /> Activity Feed
-            </h2>
-            <div className="flex items-center gap-2">
-              <select
-                value={activityFeedFilter}
-                onChange={(e) => setActivityFeedFilter(e.target.value as any)}
-                className="rounded-lg border border-border bg-background px-2 py-1 text-xs hover:bg-accent"
-              >
-                <option value="all">All Events</option>
-                <option value="ingest">Ingest</option>
-                <option value="ambient">Ambient</option>
-                <option value="graph">Graph</option>
-                <option value="errors">Errors</option>
-              </select>
-              <select
-                value={activityTimeRange}
-                onChange={(e) => setActivityTimeRange(e.target.value as any)}
-                className="rounded-lg border border-border bg-background px-2 py-1 text-xs hover:bg-accent"
-              >
-                <option value="last_hour">Last Hour</option>
-                <option value="last_day">Last Day</option>
-                <option value="last_week">Last Week</option>
-                <option value="all">All Time</option>
-              </select>
-            </div>
-          </div>
-
-          {activityFeedLoading ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="size-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : activityFeedError ? (
-            <div className="text-center py-8">
-              <p className="text-sm text-muted-foreground">{activityFeedError}</p>
-              <button
-                onClick={() => loadActivityFeed()}
-                className="mt-2 text-sm text-primary hover:underline"
-              >
-                Retry
-              </button>
-            </div>
-          ) : activityFeed ? (
-            <>
-              {activityFeed.now && (
-              <div className="mb-4 rounded-lg bg-muted/50 p-3">
-                <p className="text-xs font-medium text-muted-foreground mb-1">Now</p>
-                <p className="text-sm">{activityFeed.now.title}</p>
-              </div>
-            )}
-
-            <div className="space-y-3">
-              {["ingest", "ambient", "graph", "errors"].map((sectionType) => {
-                const sectionItems = activityFeed.items.filter(item => {
-                  const itemType = getFeedItemType(item);
-                  if (activityFeedFilter !== "all" && itemType !== activityFeedFilter) return false;
-                  return itemType === sectionType;
-                });
-
-                if (sectionItems.length === 0) return null;
-
-                const sectionId = `activity-${sectionType}`;
-                const isCollapsed = collapsedSections[sectionId];
-
-                return (
-                  <div key={sectionId} className="rounded-lg border border-border bg-muted/30">
-                    <button
-                      onClick={() => toggleSection(sectionId)}
-                      className="flex w-full items-center justify-between p-3 hover:bg-accent/40 transition-colors"
-                    >
-                      <span className="text-sm font-medium capitalize">{sectionType} ({sectionItems.length})</span>
-                      <span className="text-muted-foreground">
-                        {isCollapsed ? "▶" : "▼"}
-                      </span>
-                    </button>
-                    {!isCollapsed && (
-                      <div className="border-t border-border p-3 space-y-2">
-                        {sectionItems.slice(0, 10).map((item, idx) => {
-                          const itemId = isFeedItem(item) ? item.feed_id : `${item.proposal.proposal_id}-${idx}`;
-                          const title = isFeedItem(item) ? item.title : item.proposal.title;
-                          const body = isFeedItem(item) ? item.body : item.proposal.summary;
-                          const refs = isFeedItem(item) ? item.refs : {};
-
-                          return (
-                            <div
-                              key={`${itemId}-${idx}`}
-                              className="flex items-start gap-2 text-xs hover:bg-accent/40 p-2 rounded cursor-pointer"
-                              onClick={() => {
-                                // Handle click to jump to source or graph node
-                                if (refs?.source_id) {
-                                  const source = sources.find(s => s.source_id === refs?.source_id);
-                                  if (source?.path) {
-                                    void handleReveal(source.path);
-                                  }
-                                } else if (refs?.node_id) {
-                                  // Navigate to graph node
-                                  setCurrentTab("graph");
-                                } else if (refs?.path) {
-                                  void handleReveal(refs.path);
-                                }
-                              }}
-                            >
-                              <span className="text-muted-foreground shrink-0">{formatFeedTime(item.ts)}</span>
-                              <div className="min-w-0 flex-1">
-                                <p className="font-medium truncate">{title}</p>
-                                {body && <p className="text-muted-foreground truncate">{body}</p>}
-                              </div>
-                            </div>
-                          );
-                        })}
-                        {sectionItems.length > 10 && (
-                          <p className="text-xs text-muted-foreground text-center">
-                            +{sectionItems.length - 10} more
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-
-              {activityFeed.items.filter(item => {
-                if (activityFeedFilter !== "all" && getFeedItemType(item) !== activityFeedFilter) return false;
-                return getFeedItemType(item) === "other";
-              }).length > 0 && (
-                <div className="rounded-lg border border-border bg-muted/30">
-                  <button
-                    onClick={() => toggleSection("activity-other")}
-                    className="flex w-full items-center justify-between p-3 hover:bg-accent/40 transition-colors"
-                  >
-                    <span className="text-sm font-medium">Other ({activityFeed.items.filter(item => getFeedItemType(item) === "other").length})</span>
-                    <span className="text-muted-foreground">
-                      {collapsedSections["activity-other"] ? "▶" : "▼"}
-                    </span>
-                  </button>
-                  {!collapsedSections["activity-other"] && (
-                    <div className="border-t border-border p-3 space-y-2">
-                      {activityFeed.items.filter(item => getFeedItemType(item) === "other").slice(0, 10).map((item, idx) => {
-                        const itemId = isFeedItem(item) ? item.feed_id : `${item.proposal.proposal_id}-${idx}`;
-                        const title = isFeedItem(item) ? item.title : item.proposal.title;
-                        const body = isFeedItem(item) ? item.body : item.proposal.summary;
-
-                        return (
-                          <div
-                            key={`${itemId}-${idx}`}
-                            className="flex items-start gap-2 text-xs hover:bg-accent/40 p-2 rounded"
-                          >
-                            <span className="text-muted-foreground shrink-0">{formatFeedTime(item.ts)}</span>
-                            <div className="min-w-0 flex-1">
-                              <p className="font-medium truncate">{title}</p>
-                              {body && <p className="text-muted-foreground truncate">{body}</p>}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {activityFeed.items.length === 0 && (
-              <p className="text-sm text-muted-foreground text-center py-4">No recent activity</p>
-            )}
-            </>
-          ) : null}
-        </section>
 
         {/* identity mirror */}
         <IdentityMirror sidecarReady={sidecar?.state === "ready"} />

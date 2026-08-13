@@ -112,6 +112,16 @@ test.describe("User journeys", () => {
     await expect(page.getByText("MCP assistants")).toBeVisible();
   });
 
+  test("Activity home shows today briefing and memory search", async ({ page }) => {
+    await skipOnboarding(page);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: "Activity" })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("heading", { name: "Today" })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("heading", { name: "Search memory" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
+  });
+
 });
 
 test.describe("Return visit", () => {
