@@ -12,11 +12,13 @@ import {
 import {
   fetchProfiles,
   fetchActiveProfile,
+  fetchProfileSummary,
   setActiveProfile,
   createProfile,
   updateProfile,
   deleteProfile,
   type Profile,
+  type ProfileSummary,
 } from "../lib/api";
 
 export function ProfileSwitcher({
@@ -34,6 +36,16 @@ export function ProfileSwitcher({
   const [newProfileName, setNewProfileName] = useState("");
   const [editingProfile, setEditingProfile] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [activeSummary, setActiveSummary] = useState<ProfileSummary | null>(null);
+
+  const loadProfileSummary = useCallback(async (profileId: string) => {
+    try {
+      const summary = await fetchProfileSummary(profileId);
+      setActiveSummary(summary);
+    } catch {
+      setActiveSummary(null);
+    }
+  }, []);
 
   const loadProfiles = useCallback(async (retryCount = 0) => {
     setIsLoading(true);
@@ -90,6 +102,12 @@ export function ProfileSwitcher({
     profiles[0] ??
     null;
 
+  useEffect(() => {
+    if (isOpen && displayProfile?.profile_id && apiReady) {
+      void loadProfileSummary(displayProfile.profile_id);
+    }
+  }, [isOpen, displayProfile?.profile_id, apiReady, loadProfileSummary]);
+
   const handleSwitchProfile = async (profileId: string) => {
     try {
       await setActiveProfile({ profile_id: profileId });
@@ -97,6 +115,7 @@ export function ProfileSwitcher({
       setActiveProfileState(updated);
       setIsOpen(false);
       onProfileChange?.(updated);
+      void loadProfileSummary(updated.profile_id);
     } catch (error) {
       console.error("Failed to switch profile:", error);
     }
@@ -187,6 +206,20 @@ export function ProfileSwitcher({
           <div className="absolute right-0 top-full z-20 mt-2 w-72 rounded-lg border border-border bg-card shadow-lg">
             <div className="border-b border-border p-3">
               <h3 className="text-sm font-semibold">Profiles</h3>
+              {activeSummary && (
+                <div className="mt-2 rounded-md bg-muted/50 p-2 text-xs text-muted-foreground">
+                  <p className="font-medium text-foreground">{activeSummary.name}</p>
+                  <p>
+                    {activeSummary.counts.sources} sources · {activeSummary.counts.chunks} chunks
+                  </p>
+                  <p>
+                    MCP max level {activeSummary.consent_preview.max_release_level}/5
+                    {activeSummary.consent_preview.allow_screen_context_tools
+                      ? " · screen tools on"
+                      : " · screen tools off"}
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="max-h-64 overflow-y-auto">

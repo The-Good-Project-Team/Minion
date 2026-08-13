@@ -173,6 +173,55 @@ def save_policy(data_dir: Path | str, policy: Dict[str, Any]) -> None:
     tmp.replace(p)
 
 
+def save_policy_for_profile(
+    data_dir: Path | str,
+    profile_id: str,
+    readers_patch: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge reader settings into ``profiles[profile_id].readers`` and persist."""
+    pid = (profile_id or "").strip()
+    if not pid:
+        raise ValueError("profile_id is required")
+
+    pol = load_policy(data_dir)
+    profiles = pol.setdefault("profiles", {})
+    if pid not in profiles:
+        profiles[pid] = {}
+    profile_block = profiles[pid]
+    if not isinstance(profile_block, dict):
+        profile_block = {}
+        profiles[pid] = profile_block
+
+    readers = profile_block.setdefault("readers", {})
+    if not isinstance(readers, dict):
+        readers = {}
+        profile_block["readers"] = readers
+
+    for reader_id, settings in (readers_patch or {}).items():
+        if not isinstance(settings, dict):
+            continue
+        existing = readers.get(reader_id)
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = copy.deepcopy(existing)
+        merged.update(settings)
+        readers[reader_id] = merged
+
+    save_policy(data_dir, pol)
+    return load_policy_for_profile(data_dir, pid)
+
+
+def consent_preview_for_profile(data_dir: Path | str, profile_id: str) -> Dict[str, Any]:
+    """Compact MCP consent summary for profile UI cards."""
+    pol = load_policy_for_profile(Path(data_dir), profile_id)
+    mcp = _reader_policy(pol, "mcp")
+    return {
+        "max_release_level": int(mcp.get("max_release_level", 3)),
+        "allowed_strata": list(mcp.get("allowed_strata") or READER_STRATA_DEFAULTS["mcp"]),
+        "allow_screen_context_tools": bool(mcp.get("allow_screen_context_tools", True)),
+    }
+
+
 def release_level_for_hit(hit: Hit) -> int:
     """Privacy level 0-5: 3 is releasable work context; 5 is raw evidence."""
     meta = getattr(hit, "meta", None) or {}

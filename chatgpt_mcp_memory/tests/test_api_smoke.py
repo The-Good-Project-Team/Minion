@@ -738,6 +738,55 @@ def test_status_counts_follow_active_profile(sidecar) -> None:
     sidecar.put("/profiles/active", {"profile_id": "default"}).raise_for_status()
 
 
+def test_consent_put_scoped_to_profile(sidecar) -> None:
+    """PUT /settings/consent?profile_id= merges readers without clobbering other profiles."""
+    personal_before = sidecar.get("/settings/consent?profile_id=personal")
+    assert personal_before.status_code == 200, personal_before.text
+    assert personal_before.json()["readers"]["mcp"]["max_release_level"] == 2
+
+    updated = sidecar.put(
+        "/settings/consent?profile_id=personal",
+        {
+            "schema_version": 2,
+            "readers": {
+                "mcp": {
+                    "max_release_level": 1,
+                    "allowed_strata": ["graph_facts", "preferences"],
+                }
+            },
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert body["ok"] is True
+    assert body["profile_id"] == "personal"
+    assert body["policy"]["readers"]["mcp"]["max_release_level"] == 1
+
+    personal_after = sidecar.get("/settings/consent?profile_id=personal")
+    assert personal_after.status_code == 200, personal_after.text
+    assert personal_after.json()["readers"]["mcp"]["max_release_level"] == 1
+
+    default_after = sidecar.get("/settings/consent?profile_id=default")
+    assert default_after.status_code == 200, default_after.text
+    assert default_after.json()["readers"]["mcp"]["max_release_level"] == 3
+
+
+def test_profile_summary_shape(sidecar) -> None:
+    r = sidecar.get("/profiles/default/summary")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["profile_id"] == "default"
+    assert "counts" in body
+    assert "sources" in body["counts"]
+    assert "chunks" in body["counts"]
+    preview = body["consent_preview"]
+    assert "max_release_level" in preview
+    assert "allowed_strata" in preview
+    assert "allow_screen_context_tools" in preview
+    assert body["is_active"] is True
+    assert "last_ingest_at" in body
+
+
 def test_workflow_verification(sidecar) -> None:
     r = sidecar.post("/test/workflow", {"query": "workflow verification"})
     assert r.status_code == 200, r.text

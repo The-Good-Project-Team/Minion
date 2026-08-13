@@ -1104,16 +1104,29 @@ def get_consent_settings(profile_id: Optional[str] = None) -> Dict[str, Any]:
 
 
 @app.put("/settings/consent")
-def put_consent_settings(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
-    consent_policy.save_policy(State.data_dir, body)
+def put_consent_settings(
+    body: Dict[str, Any] = Body(...),
+    profile_id: Optional[str] = None,
+) -> Dict[str, Any]:
     conn = State.conn()
+    if profile_id:
+        readers = body.get("readers")
+        if not isinstance(readers, dict):
+            raise HTTPException(status_code=400, detail="body.readers object required for profile-scoped save")
+        policy = consent_policy.save_policy_for_profile(State.data_dir, profile_id, readers)
+    else:
+        consent_policy.save_policy(State.data_dir, body)
+        policy = consent_policy.load_policy(State.data_dir)
     identity_audit_log_append(
         conn,
         action="consent_policy_put",
-        detail={"schema_version": body.get("schema_version")},
+        detail={
+            "schema_version": body.get("schema_version"),
+            "profile_id": profile_id,
+        },
     )
     conn.commit()
-    return {"ok": True, "policy": consent_policy.load_policy(State.data_dir)}
+    return {"ok": True, "policy": policy, "profile_id": profile_id}
 
 
 @app.post("/reconcile")
@@ -4374,6 +4387,46 @@ def set_active_profile(body: ProfileSetActiveBody) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Profile not found")
     profile_set_active(conn, body.profile_id)
     return {"ok": True, "profile_id": body.profile_id}
+
+
+@app.get("/profiles/{profile_id}/summary")
+def get_profile_summary(profile_id: str) -> Dict[str, Any]:
+    """Profile card: counts, MCP consent preview, last ingest timestamp."""
+    from store import (
+        count_chunks,
+        count_sources,
+        profile_get,
+        profile_get_active,
+    )
+
+    conn = State.conn()
+    profile = profile_get(conn, profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    row = conn.execute(
+        "SELECT MAX(updated_at) AS ts FROM sources WHERE COALESCE(profile_id, 'default') = ?",
+        (profile_id,),
+    ).fetchone()
+    last_ingest_at: Optional[float] = None
+    if row and row["ts"] is not None:
+        last_ingest_at = float(row["ts"])
+
+    return {
+        "profile_id": profile.profile_id,
+        "name": profile.name,
+        "kind": profile.kind,
+        "is_default": profile.is_default,
+        "is_active": profile_get_active(conn) == profile_id,
+        "counts": {
+            "sources": count_sources(conn, profile_id=profile_id),
+            "chunks": count_chunks(conn, profile_id=profile_id),
+        },
+        "consent_preview": consent_policy.consent_preview_for_profile(
+            State.data_dir, profile_id
+        ),
+        "last_ingest_at": last_ingest_at,
+    }
 
 
 @app.get("/profiles/{profile_id}")

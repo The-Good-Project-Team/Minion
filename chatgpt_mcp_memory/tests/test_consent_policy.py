@@ -66,3 +66,18 @@ def test_save_and_reload_roundtrip(tmp_path: Path) -> None:
     assert policy_path(tmp_path).is_file()
     pol = load_policy(tmp_path)
     assert pol["readers"]["mcp"]["deny_chunk_source_kinds"] == ["ambient", "ambient-ax"]
+
+
+def test_save_policy_for_profile_merges_readers(tmp_path: Path) -> None:
+    from consent_policy import load_policy_for_profile, save_policy_for_profile
+
+    save_policy_for_profile(
+        tmp_path,
+        "personal",
+        {"mcp": {"max_release_level": 1, "allowed_strata": ["graph_facts"]}},
+    )
+    personal = load_policy_for_profile(tmp_path, "personal")
+    assert personal["readers"]["mcp"]["max_release_level"] == 1
+    assert personal["readers"]["mcp"]["allowed_strata"] == ["graph_facts"]
+    default = load_policy_for_profile(tmp_path, "default")
+    assert default["readers"]["mcp"]["max_release_level"] == 3

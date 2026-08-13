@@ -184,6 +184,7 @@ function SettingsView({
   consentPolicy,
   setConsentPolicy,
   consentError,
+  activeProfileId,
   activeProfileName,
   auditLog,
   auditFilter,
@@ -194,6 +195,7 @@ function SettingsView({
   consentPolicy: ConsentPolicy | null;
   setConsentPolicy: (policy: ConsentPolicy) => void;
   consentError: string | null;
+  activeProfileId?: string | null;
   activeProfileName?: string | null;
   auditLog: AuditLogEntry[];
   auditFilter: "all" | "identity" | "graph";
@@ -243,10 +245,11 @@ function SettingsView({
     setSaving(true);
     setSaveMsg("");
     try {
-      await updateConsentPolicy(updated);
+      const saved = await updateConsentPolicy(updated, activeProfileId ?? undefined);
+      setConsentPolicy(saved);
       setSaveMsg("Saved");
     } catch (e) {
-      setSaveMsg(e instanceof Error ? e.message : "Failed to save");
+      setSaveMsg(apiErrorDetail(e));
     } finally {
       setSaving(false);
     }
@@ -263,10 +266,11 @@ function SettingsView({
     setSaving(true);
     setSaveMsg("");
     try {
-      await updateConsentPolicy(updated);
+      const saved = await updateConsentPolicy(updated, activeProfileId ?? undefined);
+      setConsentPolicy(saved);
       setSaveMsg("Saved");
     } catch (e) {
-      setSaveMsg(e instanceof Error ? e.message : "Failed to save");
+      setSaveMsg(apiErrorDetail(e));
     } finally {
       setSaving(false);
     }
@@ -314,14 +318,21 @@ function SettingsView({
       </div>
 
       <p className="text-sm text-muted-foreground">
-        Control what each reader can access. Local UI sees everything by default. MCP tools are restricted to summaries and graph facts.
+        Control what each reader can access for this profile. Local UI sees everything by default. MCP tools are restricted to summaries and graph facts unless you widen them here.
       </p>
 
       {/* Real-time preview */}
       <section className="rounded-2xl border border-border bg-card p-4">
         <h3 className="mb-3 font-medium">Real-time Preview</h3>
+        <div className="mb-3 rounded-lg border border-primary/20 bg-primary/5 p-3">
+          <p className="text-sm font-medium">MCP assistants (Claude, Cursor, …)</p>
+          <p className="text-xs text-muted-foreground">{getReaderSummary("mcp")}</p>
+          {consentPolicy.readers.mcp?.allow_screen_context_tools === false && (
+            <p className="mt-1 text-xs text-amber-700">Screen-context MCP tools are disabled for this profile.</p>
+          )}
+        </div>
         <div className="space-y-2">
-          {readers.map((readerId) => (
+          {readers.filter((readerId) => readerId !== "mcp").map((readerId) => (
             <div key={readerId} className="rounded-lg bg-muted/50 p-3">
               <p className="text-sm font-medium capitalize">{readerId.replace("_", " ")}</p>
               <p className="text-xs text-muted-foreground">{getReaderSummary(readerId)}</p>
@@ -880,6 +891,7 @@ export function App() {
         keyword_hits: 0,
         query: "test",
         status: "failed",
+        error: apiErrorDetail(e),
       });
     } finally {
       setTestRunning(false);
@@ -1164,6 +1176,9 @@ export function App() {
               </button>
             </div>
             <div className="space-y-1 text-xs text-muted-foreground">
+              {testResult.error && (
+                <div className="text-red-600">{testResult.error}</div>
+              )}
               <div>Ingestion: {testResult.ingestion_time}s · Total: {testResult.total_time}s</div>
               <div>Semantic search: {testResult.semantic_search_found ? "✓" : "✗"} ({testResult.semantic_hits} hits)</div>
               <div>Keyword search: {testResult.keyword_search_found ? "✓" : "✗"} ({testResult.keyword_hits} hits)</div>
@@ -1567,6 +1582,7 @@ export function App() {
             consentPolicy={consentPolicy}
             setConsentPolicy={setConsentPolicy}
             consentError={consentError}
+            activeProfileId={activeProfile?.profile_id}
             activeProfileName={activeProfile?.name}
             auditLog={auditLog}
             auditFilter={auditFilter}

@@ -1929,6 +1929,23 @@ export type ProfileSetActiveRequest = {
   profile_id: string;
 };
 
+export type ProfileConsentPreview = {
+  max_release_level: number;
+  allowed_strata: string[];
+  allow_screen_context_tools: boolean;
+};
+
+export type ProfileSummary = {
+  profile_id: string;
+  name: string;
+  kind: string;
+  is_default: boolean;
+  is_active: boolean;
+  counts: { sources: number; chunks: number };
+  consent_preview: ProfileConsentPreview;
+  last_ingest_at: number | null;
+};
+
 export async function fetchProfiles(): Promise<ProfileListResponse> {
   return apiFetch("/profiles");
 }
@@ -1939,6 +1956,10 @@ export async function fetchProfile(profileId: string): Promise<Profile> {
 
 export async function fetchActiveProfile(): Promise<Profile> {
   return apiFetch("/profiles/active");
+}
+
+export async function fetchProfileSummary(profileId: string): Promise<ProfileSummary> {
+  return apiFetch(`/profiles/${encodeURIComponent(profileId)}/summary`);
 }
 
 export async function createProfile(request: ProfileCreateRequest): Promise<Profile> {
@@ -2024,6 +2045,7 @@ export type TestWorkflowResult = {
   keyword_hits: number;
   query: string;
   status: "passed" | "failed";
+  error?: string;
 };
 
 export async function testWorkflow(query = "test"): Promise<TestWorkflowResult> {
@@ -2100,8 +2122,16 @@ export async function fetchConsentPolicy(profileId?: string): Promise<ConsentPol
   return apiFetch(`/settings/consent${q}`);
 }
 
-export async function updateConsentPolicy(policy: ConsentPolicy): Promise<ConsentPolicy> {
-  return apiFetch("/settings/consent", { method: "PUT", body: JSON.stringify(policy) });
+export async function updateConsentPolicy(
+  policy: ConsentPolicy,
+  profileId?: string,
+): Promise<ConsentPolicy> {
+  const q = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : "";
+  const res = await apiFetch<{ ok: boolean; policy: ConsentPolicy }>(`/settings/consent${q}`, {
+    method: "PUT",
+    body: JSON.stringify(policy),
+  });
+  return res.policy;
 }
 
 export async function resolveHealthIssue(issueId: string): Promise<{ status: string }> {
