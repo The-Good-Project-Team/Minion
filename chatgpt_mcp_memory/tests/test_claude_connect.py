@@ -32,10 +32,17 @@ def test_connect_claude_desktop_rejects_when_app_missing(monkeypatch, tmp_path: 
 
 
 def test_claude_mcp_configured_detects_minion_entry(tmp_path: Path) -> None:
+    from connector_base import ConnectorRegistry, initialize_connectors
+
+    ConnectorRegistry._connectors.clear()
+    initialize_connectors()
+    connector = ConnectorRegistry.get("claude-desktop")
+    assert connector is not None
+
     cfg = tmp_path / "claude_desktop_config.json"
     cfg.write_text(
         json.dumps({"mcpServers": {"minion": {"command": "python", "args": [], "env": {}}}}),
         encoding="utf-8",
     )
-    assert minion_api._claude_mcp_configured(cfg) is True
-    assert minion_api._claude_mcp_configured(tmp_path / "missing.json") is False
+    assert connector.is_configured(cfg) is True
+    assert connector.is_configured(tmp_path / "missing.json") is False

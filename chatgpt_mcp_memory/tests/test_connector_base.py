@@ -294,3 +294,17 @@ def test_list_available():
     test2_status = next(c for c in available if c["connector_id"] == "test2")
     assert test2_status["display_name"] == "Test 2"
     assert test2_status["installed"] is False
+
+
+def test_cursor_linux_installed_when_config_dir_writable(tmp_path: Path, monkeypatch) -> None:
+    """Linux headless: treat Cursor as available when ~/.cursor is writable."""
+    from connectors.cursor import CursorConnector
+
+    cfg = tmp_path / ".cursor" / "mcp.json"
+    monkeypatch.setenv("CURSOR_MCP_CONFIG", str(cfg))
+    monkeypatch.delenv("MINION_SKIP_CURSOR_APP_CHECK", raising=False)
+    monkeypatch.setattr("connectors.cursor.sys.platform", "linux")
+
+    connector = CursorConnector()
+    assert connector.is_installed() is True
+    assert connector.get_config_path() == cfg.resolve()

@@ -190,7 +190,9 @@ def _screen_context_tools_allowed() -> bool:
     try:
         from consent_policy import screen_tools_allowed_for_mcp
 
-        return screen_tools_allowed_for_mcp(_data_dir())
+        conn = _get_conn()
+        profile_id = _active_profile_id(conn)
+        return screen_tools_allowed_for_mcp(_data_dir(), profile_id=profile_id)
     except Exception:
         return True
 

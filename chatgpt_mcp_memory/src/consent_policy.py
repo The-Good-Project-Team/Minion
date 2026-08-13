@@ -375,8 +375,14 @@ def filter_hits_for_mcp(
     return [*release_requests.values(), *out]
 
 
-def screen_tools_allowed_for_mcp(data_dir: Path | str) -> bool:
-    pol = load_policy(Path(data_dir))
+def screen_tools_allowed_for_mcp(
+    data_dir: Path | str,
+    profile_id: str | None = None,
+) -> bool:
+    if profile_id:
+        pol = load_policy_for_profile(Path(data_dir), profile_id)
+    else:
+        pol = load_policy(Path(data_dir))
     r = (pol.get("readers") or {}).get("mcp") or {}
     return bool(r.get("allow_screen_context_tools", True))
 

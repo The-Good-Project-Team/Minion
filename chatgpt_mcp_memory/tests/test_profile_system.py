@@ -300,6 +300,16 @@ def test_profile_consent_policy():
         assert default_mcp["allow_screen_context_tools"] is True
 
 
+def test_screen_tools_respects_active_profile():
+    """Personal profile blocks screen context tools; default allows them."""
+    from consent_policy import screen_tools_allowed_for_mcp
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = Path(tmpdir)
+        assert screen_tools_allowed_for_mcp(data_dir, profile_id="default") is True
+        assert screen_tools_allowed_for_mcp(data_dir, profile_id="personal") is False
+
+
 def test_profile_consent_policy_fallback():
     """Test fallback to top-level readers for unknown profile."""
     from consent_policy import load_policy_for_profile
