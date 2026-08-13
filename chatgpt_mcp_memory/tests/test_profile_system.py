@@ -356,3 +356,74 @@ def test_profile_scoped_counts():
         assert count_chunks(conn, profile_id="personal") == 1
 
         conn.close()
+
+
+def test_source_id_default_profile_backward_compat():
+    from store import source_id_for
+
+    path = "/inbox/shared-note.md"
+    assert source_id_for(path) == source_id_for(path, "default")
+    assert source_id_for(path, "personal") != source_id_for(path, "default")
+
+
+def test_upsert_same_path_isolated_by_profile():
+    """Same logical path in two profiles is two sources; search stays scoped."""
+    import numpy as np
+
+    from store import (
+        _apply_schema_upgrades,
+        connect,
+        count_sources,
+        profile_initialize_defaults,
+        seed_sync_sources,
+        source_id_for,
+        keyword_search,
+        upsert_source,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        conn = connect(db_path)
+        seed_sync_sources(conn)
+        _apply_schema_upgrades(conn)
+        profile_initialize_defaults(conn)
+
+        path = "/inbox/shared-note.md"
+        emb = np.ones((1, 768), dtype=np.float32)
+        upsert_source(
+            conn,
+            path=path,
+            kind="text",
+            sha256="hash-default",
+            mtime=1.0,
+            bytes_=10,
+            parser="text",
+            source_meta={},
+            chunks=[("default-only secret phrase xyzzy", None, {})],
+            embeddings=emb,
+            profile_id="default",
+        )
+        upsert_source(
+            conn,
+            path=path,
+            kind="text",
+            sha256="hash-personal",
+            mtime=1.0,
+            bytes_=10,
+            parser="text",
+            source_meta={},
+            chunks=[("personal-only secret phrase plugh", None, {})],
+            embeddings=emb,
+            profile_id="personal",
+        )
+
+        assert source_id_for(path, "default") != source_id_for(path, "personal")
+        assert count_sources(conn, profile_id="default") == 1
+        assert count_sources(conn, profile_id="personal") == 1
+
+        default_hits = keyword_search(conn, "xyzzy", top_k=5, profile_id="default")
+        personal_hits = keyword_search(conn, "xyzzy", top_k=5, profile_id="personal")
+        assert len(default_hits) == 1
+        assert len(personal_hits) == 0
+
+        conn.close()

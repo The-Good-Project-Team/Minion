@@ -736,6 +736,7 @@ class IngestBody(BaseModel):
     recursive: bool = True  # used when `path` is a directory
     temporary: bool = False  # remove staged inbox copy after indexing; original remains tracked
     refresh: bool = False  # for ChatGPT exports: only add new conversations (skip duplicates)
+    profile_id: Optional[str] = None  # active profile when omitted
 
 
 class ValidateExportBody(BaseModel):
@@ -3520,7 +3521,7 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
             def _work_one(p: Path) -> Dict[str, Any]:
                 conn = connect(State.db_path)
                 try:
-                    res = ingest_file(conn, p, refresh=body.refresh)
+                    res = ingest_file(conn, p, refresh=body.refresh, profile_id=body.profile_id)
                     return {
                         "path": res.path,
                         "source_id": res.source_id,
@@ -3619,7 +3620,7 @@ async def ingest_endpoint(body: IngestBody) -> Dict[str, Any]:
         def _work() -> Dict[str, Any]:
             conn = connect(State.db_path)
             try:
-                res = ingest_file(conn, dest, refresh=body.refresh)
+                res = ingest_file(conn, dest, refresh=body.refresh, profile_id=body.profile_id)
                 return {
                     "path": res.path,
                     "source_id": res.source_id,

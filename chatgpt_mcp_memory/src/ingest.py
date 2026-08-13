@@ -32,7 +32,7 @@ from parsers import (
     kind_for,
     parse_file,
 )
-from store import sha256_of_file, upsert_source
+from store import profile_get_active, sha256_of_file, upsert_source
 import telemetry
 
 
@@ -469,6 +469,37 @@ def _payload_digest(source_key: str, chunks_payload: List[Dict[str, Any]]) -> st
     return h.hexdigest()
 
 
+def _resolve_ingest_profile_id(
+    conn: sqlite3.Connection,
+    profile_id: Optional[str],
+) -> str:
+    if profile_id:
+        return profile_id.strip() or "default"
+    return profile_get_active(conn) or "default"
+
+
+def _source_row_for_path(
+    conn: sqlite3.Connection,
+    path: str,
+    profile_id: str,
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT source_id, sha256, meta_json FROM sources "
+        "WHERE path=? AND COALESCE(profile_id, 'default')=?",
+        (path, profile_id),
+    ).fetchone()
+
+
+def _source_unchanged(
+    conn: sqlite3.Connection,
+    path: str,
+    digest: str,
+    profile_id: str,
+) -> bool:
+    row = _source_row_for_path(conn, path, profile_id)
+    return bool(row and row["sha256"] == digest)
+
+
 def ingest_webhook_payload(
     conn: sqlite3.Connection,
     data_dir: Path,
@@ -480,8 +511,10 @@ def ingest_webhook_payload(
     chunks: List[Dict[str, Any]],
     force: bool = False,
     on_progress: ProgressFn = _noop,
+    profile_id: Optional[str] = None,
 ) -> IngestResult:
     """Parse-free ingest: embed JSON chunks (webhook / automation)."""
+    ingest_profile = _resolve_ingest_profile_id(conn, profile_id)
     sk = source_key.strip()
     if not sk:
         return IngestResult("", None, "?", "?", 0, True, reason="empty source_key")
@@ -517,10 +550,8 @@ def ingest_webhook_payload(
     logical = _stream_logical_path(data_dir, sk)
     digest = _payload_digest(sk, chunks)
 
-    if not force:
-        row = conn.execute("SELECT sha256 FROM sources WHERE path=?", (logical,)).fetchone()
-        if row and row["sha256"] == digest:
-            return IngestResult(logical, None, k, parser, 0, True, reason="unchanged")
+    if not force and _source_unchanged(conn, logical, digest, ingest_profile):
+        return IngestResult(logical, None, k, parser, 0, True, reason="unchanged")
 
     on_progress("parse_start", {"suffix": "(webhook)", "bytes": total_chars})
     on_progress("parsed", {"chunks": len(norm_chunks), "kind": k, "parser": parser})
@@ -548,6 +579,7 @@ def ingest_webhook_payload(
         source_meta=source_meta,
         chunks=norm_chunks,
         embeddings=embeddings,
+        profile_id=ingest_profile,
     )
 
     try:
@@ -584,6 +616,7 @@ def ingest_file(
     on_progress: ProgressFn = _noop,
     cancel_flag: Optional[Dict[str, bool]] = None,
     refresh: bool = False,
+    profile_id: Optional[str] = None,
 ) -> IngestResult:
     """Public ingest entrypoint. Wraps the pipeline with telemetry.
 
@@ -592,7 +625,14 @@ def ingest_file(
     whether it was triggered by the watcher, the CLI, or `bin/minion add`.
     """
     result = _ingest_file_inner(
-        conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
+        conn,
+        path,
+        model_name=model_name,
+        force=force,
+        on_progress=on_progress,
+        cancel_flag=cancel_flag,
+        refresh=refresh,
+        profile_id=profile_id,
     )
     try:
         telemetry.log_event(
@@ -623,8 +663,10 @@ def _ingest_file_inner(
     on_progress: ProgressFn = _noop,
     cancel_flag: Optional[Dict[str, bool]] = None,
     refresh: bool = False,
+    profile_id: Optional[str] = None,
 ) -> IngestResult:
     """Parse + embed + upsert. Skips unchanged files (same sha256) unless force=True."""
+    ingest_profile = _resolve_ingest_profile_id(conn, profile_id)
     path = Path(path).expanduser().resolve()
     spath = str(path)
     if not path.exists():
@@ -637,19 +679,47 @@ def _ingest_file_inner(
     if path.is_dir():
         if _looks_like_claude_export(path):
             return _ingest_claude_export_dir(
-                conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
+                conn,
+                path,
+                model_name=model_name,
+                force=force,
+                on_progress=on_progress,
+                cancel_flag=cancel_flag,
+                refresh=refresh,
+                profile_id=ingest_profile,
             )
         if _looks_like_chatgpt_export(path):
             return _ingest_chatgpt_export_dir(
-                conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
+                conn,
+                path,
+                model_name=model_name,
+                force=force,
+                on_progress=on_progress,
+                cancel_flag=cancel_flag,
+                refresh=refresh,
+                profile_id=ingest_profile,
             )
         if _looks_like_gemini_export(path):
             return _ingest_gemini_export_dir(
-                conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
+                conn,
+                path,
+                model_name=model_name,
+                force=force,
+                on_progress=on_progress,
+                cancel_flag=cancel_flag,
+                refresh=refresh,
+                profile_id=ingest_profile,
             )
         if _looks_like_copilot_export(path):
             return _ingest_copilot_export_dir(
-                conn, path, model_name=model_name, force=force, on_progress=on_progress, cancel_flag=cancel_flag, refresh=refresh
+                conn,
+                path,
+                model_name=model_name,
+                force=force,
+                on_progress=on_progress,
+                cancel_flag=cancel_flag,
+                refresh=refresh,
+                profile_id=ingest_profile,
             )
         return IngestResult(spath, None, "?", "?", 0, True, reason="directory (not a recognized export)")
 
@@ -670,12 +740,8 @@ def _ingest_file_inner(
         )
 
     digest = sha256_of_file(path)
-    if not force:
-        row = conn.execute(
-            "SELECT sha256 FROM sources WHERE path=?", (spath,)
-        ).fetchone()
-        if row and row["sha256"] == digest:
-            return IngestResult(spath, None, "?", "?", 0, True, reason="unchanged")
+    if not force and _source_unchanged(conn, spath, digest, ingest_profile):
+        return IngestResult(spath, None, "?", "?", 0, True, reason="unchanged")
 
     on_progress("parse_start", {"suffix": path.suffix.lower(), "bytes": path.stat().st_size if path.exists() else 0})
     try:
@@ -725,6 +791,7 @@ def _ingest_file_inner(
         source_meta=source_meta,
         chunks=chunk_tuples,
         embeddings=embeddings,
+        profile_id=ingest_profile,
     )
 
     return IngestResult(
@@ -746,6 +813,7 @@ def _ingest_chatgpt_export_dir(
     on_progress: ProgressFn,
     cancel_flag: Optional[Dict[str, bool]] = None,
     refresh: bool = False,
+    profile_id: str = "default",
 ) -> IngestResult:
     """Ingest a ChatGPT export directory as a single logical source.
 
@@ -766,9 +834,7 @@ def _ingest_chatgpt_export_dir(
     # Get existing source metadata for deduplication
     existing_conv_ids: Set[str] = set()
     if refresh or not force:
-        row = conn.execute(
-            "SELECT sha256, meta_json FROM sources WHERE path=?", (spath,)
-        ).fetchone()
+        row = _source_row_for_path(conn, spath, profile_id)
         if row:
             if row["sha256"] == digest and not force:
                 return IngestResult(spath, None, "chatgpt-export", "chatgpt-export", 0, True, reason="unchanged")
@@ -857,6 +923,7 @@ def _ingest_chatgpt_export_dir(
         source_meta=source_meta,
         chunks=chunk_tuples,
         embeddings=embeddings,
+        profile_id=profile_id,
     )
 
     return IngestResult(
@@ -878,6 +945,7 @@ def _ingest_claude_export_dir(
     on_progress: ProgressFn,
     cancel_flag: Optional[Dict[str, bool]] = None,
     refresh: bool = False,
+    profile_id: str = "default",
 ) -> IngestResult:
     """Ingest a Claude.ai export directory as a single logical source.
 
@@ -894,9 +962,7 @@ def _ingest_claude_export_dir(
     # Get existing source metadata for deduplication
     existing_conv_ids: Set[str] = set()
     if refresh or not force:
-        row = conn.execute(
-            "SELECT sha256, meta_json FROM sources WHERE path=?", (spath,)
-        ).fetchone()
+        row = _source_row_for_path(conn, spath, profile_id)
         if row:
             if row["sha256"] == digest and not force:
                 return IngestResult(spath, None, "claude-export", "claude-export", 0, True, reason="unchanged")
@@ -914,7 +980,7 @@ def _ingest_claude_export_dir(
     try:
         result: ParseResult = parse_file(
             path, 
-            parser="parsers.claude_export", 
+            parser="parsers.claude_export",
             on_progress=on_progress, 
             cancel_flag=cancel_flag,
             existing_conv_ids=existing_conv_ids if refresh else None
@@ -978,6 +1044,7 @@ def _ingest_claude_export_dir(
         source_meta=source_meta,
         chunks=chunk_tuples,
         embeddings=embeddings,
+        profile_id=profile_id,
     )
 
     return IngestResult(
@@ -1000,6 +1067,7 @@ def _ingest_gemini_export_dir(
     on_progress: ProgressFn,
     cancel_flag: Optional[Dict[str, bool]] = None,
     refresh: bool = False,
+    profile_id: str = "default",
 ) -> IngestResult:
     """Ingest a Gemini export directory as a single logical source.
 
@@ -1016,9 +1084,7 @@ def _ingest_gemini_export_dir(
     # Get existing source metadata for deduplication
     existing_conv_ids: Set[str] = set()
     if refresh or not force:
-        row = conn.execute(
-            "SELECT sha256, meta_json FROM sources WHERE path=?", (spath,)
-        ).fetchone()
+        row = _source_row_for_path(conn, spath, profile_id)
         if row:
             if row["sha256"] == digest and not force:
                 return IngestResult(spath, None, "gemini-export", "gemini-export", 0, True, reason="unchanged")
@@ -1100,6 +1166,7 @@ def _ingest_gemini_export_dir(
         source_meta=source_meta,
         chunks=chunk_tuples,
         embeddings=embeddings,
+        profile_id=profile_id,
     )
 
     return IngestResult(
@@ -1122,6 +1189,7 @@ def _ingest_copilot_export_dir(
     on_progress: ProgressFn,
     cancel_flag: Optional[Dict[str, bool]] = None,
     refresh: bool = False,
+    profile_id: str = "default",
 ) -> IngestResult:
     """Ingest a Copilot export directory as a single logical source.
 
@@ -1138,9 +1206,7 @@ def _ingest_copilot_export_dir(
     # Get existing source metadata for deduplication
     existing_conv_ids: Set[str] = set()
     if refresh or not force:
-        row = conn.execute(
-            "SELECT sha256, meta_json FROM sources WHERE path=?", (spath,)
-        ).fetchone()
+        row = _source_row_for_path(conn, spath, profile_id)
         if row:
             if row["sha256"] == digest and not force:
                 return IngestResult(spath, None, "copilot-export", "copilot-export", 0, True, reason="unchanged")
@@ -1222,6 +1288,7 @@ def _ingest_copilot_export_dir(
         source_meta=source_meta,
         chunks=chunk_tuples,
         embeddings=embeddings,
+        profile_id=profile_id,
     )
 
     return IngestResult(

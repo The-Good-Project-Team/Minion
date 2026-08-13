@@ -3,7 +3,7 @@ SQLite + sqlite-vec backed storage for Minion memory.
 
 Schema
 ------
-- sources(source_id PK, path UNIQUE, kind, sha256, mtime, bytes, parser, meta_json, updated_at)
+- sources(source_id PK, path, kind, sha256, mtime, bytes, parser, meta_json, updated_at, profile_id)
 - chunks(chunk_id PK, source_id FK ON DELETE CASCADE, seq, role, text, meta_json)
 - vec_chunks (sqlite-vec virtual table): rowid -> embedding float[dim]
 
@@ -109,15 +109,19 @@ class Profile:
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sources (
     source_id   TEXT PRIMARY KEY,
-    path        TEXT NOT NULL UNIQUE,
+    path        TEXT NOT NULL,
     kind        TEXT NOT NULL,
     sha256      TEXT NOT NULL,
     mtime       REAL NOT NULL,
     bytes       INTEGER NOT NULL,
     parser      TEXT NOT NULL,
     meta_json   TEXT NOT NULL DEFAULT '{}',
-    updated_at  REAL NOT NULL
+    updated_at  REAL NOT NULL,
+    profile_id  TEXT
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_path_profile
+    ON sources(path, IFNULL(profile_id, 'default'));
 
 CREATE INDEX IF NOT EXISTS idx_sources_kind ON sources(kind);
 CREATE INDEX IF NOT EXISTS idx_sources_mtime ON sources(mtime);
@@ -273,6 +277,8 @@ def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         # Column already exists
         pass
+
+    _migrate_sources_profile_path_unique(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_ambient_events_captured ON ambient_events(captured_at DESC)"
     )
@@ -536,6 +542,71 @@ def _apply_schema_upgrades(conn: sqlite3.Connection) -> None:
     seed_sync_sources(conn)
     seed_graph_scaffold(conn)
     conn.commit()
+
+
+def _migrate_sources_profile_path_unique(conn: sqlite3.Connection) -> None:
+    """Drop global UNIQUE(path); enforce uniqueness per profile instead."""
+    if get_meta(conn, "sources_path_profile_unique") == "1":
+        return
+
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'"
+    ).fetchone()
+    if not row or not row[0]:
+        return
+    ddl = str(row[0]).lower()
+    needs_rebuild = "unique" in ddl and "path" in ddl
+
+    if needs_rebuild:
+        source_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(sources)").fetchall()}
+        has_profile = "profile_id" in source_cols
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            conn.execute(
+                """
+                CREATE TABLE sources_profile_mig (
+                    source_id   TEXT PRIMARY KEY,
+                    path        TEXT NOT NULL,
+                    kind        TEXT NOT NULL,
+                    sha256      TEXT NOT NULL,
+                    mtime       REAL NOT NULL,
+                    bytes       INTEGER NOT NULL,
+                    parser      TEXT NOT NULL,
+                    meta_json   TEXT NOT NULL DEFAULT '{}',
+                    updated_at  REAL NOT NULL,
+                    profile_id  TEXT
+                )
+                """
+            )
+            if has_profile:
+                conn.execute(
+                    """
+                    INSERT INTO sources_profile_mig
+                    SELECT source_id, path, kind, sha256, mtime, bytes, parser, meta_json, updated_at, profile_id
+                    FROM sources
+                    """
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO sources_profile_mig
+                    SELECT source_id, path, kind, sha256, mtime, bytes, parser, meta_json, updated_at, NULL
+                    FROM sources
+                    """
+                )
+            conn.execute("DROP TABLE sources")
+            conn.execute("ALTER TABLE sources_profile_mig RENAME TO sources")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sources_kind ON sources(kind)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sources_mtime ON sources(mtime)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sources_profile ON sources(profile_id)")
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_path_profile "
+        "ON sources(path, IFNULL(profile_id, 'default'))"
+    )
+    set_meta(conn, "sources_path_profile_unique", "1")
 
 
 def _migrate_graph_schema(conn: sqlite3.Connection) -> None:
@@ -1163,9 +1234,14 @@ def get_meta(conn: sqlite3.Connection, key: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def source_id_for(path: str) -> str:
-    """Stable ID from the absolute path. Same path across runs => same source_id."""
-    return "src-" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
+def source_id_for(path: str, profile_id: Optional[str] = None) -> str:
+    """Stable ID from path (+ profile for non-default namespaces).
+
+    Default profile keeps the legacy path-only hash so existing rows stay addressable.
+    """
+    pid = (profile_id or "default").strip() or "default"
+    key = path if pid == "default" else f"{pid}\0{path}"
+    return "src-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 def chunk_id_for(source_id: str, seq: int) -> str:
@@ -1223,11 +1299,19 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 # ---------------------------------------------------------------------------
 
 
-def get_source_by_path(conn: sqlite3.Connection, path: str) -> Optional[Source]:
+def get_source_by_path(
+    conn: sqlite3.Connection,
+    path: str,
+    profile_id: Optional[str] = None,
+) -> Optional[Source]:
+    if profile_id is None:
+        profile_id = profile_get_active(conn) or "default"
+    else:
+        profile_id = (profile_id or "default").strip() or "default"
     row = conn.execute(
         "SELECT source_id, path, kind, sha256, mtime, bytes, parser, meta_json, updated_at "
-        "FROM sources WHERE path=?",
-        (path,),
+        "FROM sources WHERE path=? AND COALESCE(profile_id, 'default')=?",
+        (path, profile_id),
     ).fetchone()
     return _row_to_source(row) if row else None
 
@@ -1354,8 +1438,12 @@ def delete_source(conn: sqlite3.Connection, source_id: str) -> int:
     return len(rowids)
 
 
-def delete_source_by_path(conn: sqlite3.Connection, path: str) -> int:
-    src = get_source_by_path(conn, path)
+def delete_source_by_path(
+    conn: sqlite3.Connection,
+    path: str,
+    profile_id: Optional[str] = None,
+) -> int:
+    src = get_source_by_path(conn, path, profile_id=profile_id)
     if src is None:
         return 0
     return delete_source(conn, src.source_id)
@@ -1412,10 +1500,12 @@ def upsert_source(
         )
 
     embeddings = _l2_normalise(embeddings.astype(np.float32, copy=False))
-    sid = source_id_for(path)
     now = time.time()
     if profile_id is None:
         profile_id = profile_get_active(conn) or "default"
+    else:
+        profile_id = (profile_id or "default").strip() or "default"
+    sid = source_id_for(path, profile_id)
 
     with transaction(conn):
         # Wipe prior rows (cascade clears chunks, but we still need vec cleanup).
