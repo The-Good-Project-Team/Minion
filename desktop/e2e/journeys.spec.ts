@@ -97,6 +97,21 @@ test.describe("User journeys", () => {
     await expect(page.getByText("Saved. Minion is indexing it now.")).toBeVisible({ timeout: 15_000 });
   });
 
+  test("Settings loads consent policy and profile context after startup", async ({ page, request }) => {
+    await skipOnboarding(page, "Settings User");
+    await saveDisplayName(request, "Settings User");
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: "Settings" })).toBeVisible({ timeout: 15_000 });
+    await page.getByRole("button", { name: "Settings" }).click();
+    await expect(page.getByRole("heading", { name: "Consent Policy" })).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByText("Real-time Preview")).toBeVisible();
+    await expect(page.getByText(/Profile:/)).toBeVisible();
+    await expect(page.getByText("MCP assistants")).toBeVisible();
+  });
+
 });
 
 test.describe("Return visit", () => {

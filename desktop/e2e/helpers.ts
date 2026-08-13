@@ -31,6 +31,7 @@ export async function skipOnboarding(page: Page, displayName = "E2E User"): Prom
     ({ name }) => {
       localStorage.setItem("minion:onboarding_done", "true");
       localStorage.setItem("minion:onboarding_name", name);
+      localStorage.setItem("minion:name", name);
     },
     displayName,
   );

@@ -96,17 +96,21 @@ def ensure_person_node(
         }
     )
     now = time.time()
+    from store import graph_active_profile_id
+
+    profile_id = graph_active_profile_id(conn)
     conn.execute(
         "INSERT INTO graph_nodes(node_id, node_kind, title, status, body_md, wiki_page_id, "
         "parent_node_id, aliases_json, summary, confidence, source_refs_json, privacy_level, "
-        "created_at, updated_at) VALUES(?, 'person', ?, 'active', '', NULL, ?, ?, ?, 0.5, '[]', "
-        "'vault_local', ?, ?)",
+        "profile_id, created_at, updated_at) VALUES(?, 'person', ?, 'active', '', NULL, ?, ?, ?, 0.5, '[]', "
+        "'vault_local', ?, ?, ?)",
         (
             nid,
             label[:200],
             parent_id,
             json.dumps(aliases, ensure_ascii=False),
             json.dumps(meta_out, ensure_ascii=False),
+            profile_id,
             now,
             now,
         ),

@@ -427,3 +427,126 @@ def test_upsert_same_path_isolated_by_profile():
         assert len(personal_hits) == 0
 
         conn.close()
+
+
+def test_graph_scaffold_scoped_by_profile():
+    """Filled graph counts and highlights respect profile_id."""
+    import time
+
+    from store import (
+        _apply_schema_upgrades,
+        connect,
+        graph_scaffold_list,
+        profile_create,
+        profile_initialize_defaults,
+        seed_sync_sources,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        conn = connect(db_path)
+        seed_sync_sources(conn)
+        _apply_schema_upgrades(conn)
+        profile_initialize_defaults(conn)
+        profile_create(conn, "work", "Work", "custom", False)
+        now = time.time()
+
+        conn.execute(
+            "INSERT INTO graph_nodes(node_id, node_kind, title, status, body_md, wiki_page_id, "
+            "parent_node_id, aliases_json, summary, confidence, source_refs_json, privacy_level, "
+            "profile_id, created_at, updated_at) VALUES "
+            "('gn-default', 'person', 'Default Friend', 'active', '', NULL, "
+            "'scaffold-people-friends', '[]', '', 0.8, '[]', 'vault_local', 'default', ?, ?), "
+            "('gn-work', 'person', 'Work Colleague', 'active', '', NULL, "
+            "'scaffold-people-friends', '[]', '', 0.8, '[]', 'vault_local', 'work', ?, ?)",
+            (now, now, now, now),
+        )
+        conn.commit()
+
+        default_g = graph_scaffold_list(conn, profile_id="default")
+        work_g = graph_scaffold_list(conn, profile_id="work")
+
+        assert default_g["profile_id"] == "default"
+        assert work_g["profile_id"] == "work"
+        assert default_g["totals"].get("person", 0) >= 1
+        assert work_g["totals"].get("person", 0) >= 1
+        assert any(h["title"] == "Default Friend" for h in default_g["highlights"])
+        assert any(h["title"] == "Work Colleague" for h in work_g["highlights"])
+        assert not any(h["title"] == "Work Colleague" for h in default_g["highlights"])
+
+        conn.close()
+
+
+def test_profile_delete_removes_sources_vec_and_graph():
+    """Deleting a profile cascades sources, vec rows, and graph nodes."""
+    import numpy as np
+
+    from store import (
+        _apply_schema_upgrades,
+        connect,
+        count_chunks,
+        count_sources,
+        profile_create,
+        profile_delete,
+        profile_initialize_defaults,
+        seed_sync_sources,
+        upsert_source,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        conn = connect(db_path)
+        seed_sync_sources(conn)
+        _apply_schema_upgrades(conn)
+        profile_initialize_defaults(conn)
+        profile_create(conn, "temp-profile", "Temp", "custom", False)
+
+        emb = np.ones((1, 768), dtype=np.float32)
+        upsert_source(
+            conn,
+            path="/inbox/temp-note.txt",
+            kind="text",
+            sha256="hash-temp",
+            mtime=1.0,
+            bytes_=10,
+            parser="text",
+            source_meta={},
+            chunks=[("temp profile secret", None, {})],
+            embeddings=emb,
+            profile_id="temp-profile",
+        )
+        chunk_row = conn.execute(
+            "SELECT rowid FROM chunks WHERE profile_id = 'temp-profile'"
+        ).fetchone()
+        assert chunk_row is not None
+        rowid = int(chunk_row["rowid"])
+        assert conn.execute(
+            "SELECT COUNT(*) FROM vec_chunks WHERE rowid = ?", (rowid,)
+        ).fetchone()[0] == 1
+
+        now = __import__("time").time()
+        conn.execute(
+            "INSERT INTO graph_nodes(node_id, node_kind, title, status, body_md, wiki_page_id, "
+            "parent_node_id, aliases_json, summary, confidence, source_refs_json, privacy_level, "
+            "profile_id, created_at, updated_at) VALUES "
+            "('gn-temp', 'person', 'Temp Person', 'active', '', NULL, "
+            "'scaffold-people-friends', '[]', '', 0.8, '[]', 'vault_local', 'temp-profile', ?, ?)",
+            (now, now),
+        )
+        conn.commit()
+
+        assert count_sources(conn, profile_id="temp-profile") == 1
+        assert count_chunks(conn, profile_id="temp-profile") == 1
+
+        profile_delete(conn, "temp-profile")
+
+        assert count_sources(conn, profile_id="temp-profile") == 0
+        assert count_chunks(conn, profile_id="temp-profile") == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM vec_chunks WHERE rowid = ?", (rowid,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM graph_nodes WHERE node_id = 'gn-temp'"
+        ).fetchone()[0] == 0
+
+        conn.close()

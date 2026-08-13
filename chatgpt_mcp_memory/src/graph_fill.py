@@ -953,17 +953,21 @@ def _create_graph_node(
     nid = _new_id("gn")
     meta = {"user_note": user_note[:500], "source": "librarian"} if user_note else {}
     now = time.time()
+    from store import graph_active_profile_id
+
+    profile_id = graph_active_profile_id(conn)
     conn.execute(
         "INSERT INTO graph_nodes(node_id, node_kind, title, status, body_md, wiki_page_id, "
         "parent_node_id, aliases_json, summary, confidence, source_refs_json, privacy_level, "
-        "created_at, updated_at) VALUES(?, ?, ?, 'active', '', NULL, ?, '[]', ?, 0.6, '[]', "
-        "'vault_local', ?, ?)",
+        "profile_id, created_at, updated_at) VALUES(?, ?, ?, 'active', '', NULL, ?, '[]', ?, 0.6, '[]', "
+        "'vault_local', ?, ?, ?)",
         (
             nid,
             node_kind,
             title[:200],
             parent_id,
             json.dumps(meta, ensure_ascii=False) if meta else "",
+            profile_id,
             now,
             now,
         ),

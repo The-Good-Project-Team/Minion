@@ -39,7 +39,7 @@ type NodeRelationship = {
   rel_kind: string;
 };
 
-export function GraphVisualization() {
+export function GraphVisualization({ activeProfileId }: { activeProfileId?: string | null }) {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
@@ -81,8 +81,12 @@ export function GraphVisualization() {
   useEffect(() => () => clearFitTimers(), [clearFitTimers]);
 
   useEffect(() => {
-    loadGraphData();
-  }, []);
+    void loadGraphData();
+  }, [activeProfileId]);
+
+  useEffect(() => {
+    hasInitialFitRef.current = false;
+  }, [graphData, activeProfileId]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -122,15 +126,11 @@ export function GraphVisualization() {
     return clearFitTimers;
   }, [loading, graphData, dimensions.width, dimensions.height, scheduleFitGraphToView, clearFitTimers]);
 
-  useEffect(() => {
-    hasInitialFitRef.current = false;
-  }, [graphData]);
-
   const loadGraphData = async () => {
     setLoading(true);
     try {
-      const scaffold: GraphScaffoldResponse = await fetchGraphScaffold();
-      
+      const scaffold: GraphScaffoldResponse = await fetchGraphScaffold(activeProfileId ?? undefined);
+
       // Convert scaffold tree to force-graph format
       const nodes: GraphNode[] = [];
       const links: GraphLink[] = [];

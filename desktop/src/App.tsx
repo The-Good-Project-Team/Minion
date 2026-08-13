@@ -1631,7 +1631,7 @@ export function App() {
         {currentTab === "graph" && (
           <section className="mt-6 w-full">
             <h2 className="text-lg font-medium mb-4">Knowledge Graph</h2>
-            <GraphVisualization />
+            <GraphVisualization activeProfileId={activeProfile?.profile_id} />
           </section>
         )}
 

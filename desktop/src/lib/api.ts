@@ -1284,6 +1284,7 @@ export type GraphScaffoldResponse = {
   totals?: Record<string, number>;
   highlights?: GraphHighlight[];
   user_node_count?: number;
+  profile_id?: string;
   has_fill_gap?: boolean;
   agent?: {
     active_thread_id?: string | null;
@@ -1805,8 +1806,9 @@ export async function fetchFeed(params: { limit?: number; since_hours?: number }
   return { ...raw, agent: raw.agent ?? raw.librarian };
 }
 
-export async function fetchGraphScaffold(): Promise<GraphScaffoldResponse> {
-  return apiFetch("/graph/scaffold");
+export async function fetchGraphScaffold(profileId?: string): Promise<GraphScaffoldResponse> {
+  const q = profileId ? `?profile_id=${encodeURIComponent(profileId)}` : "";
+  return apiFetch(`/graph/scaffold${q}`);
 }
 
 export async function fetchGraphContext(subject = ""): Promise<GraphContextResponse> {

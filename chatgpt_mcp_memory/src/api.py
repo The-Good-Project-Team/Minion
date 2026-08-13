@@ -2175,15 +2175,26 @@ def graph_stats() -> Dict[str, Any]:
     """Cheap counts for the dashboard: real (non-scaffold) nodes, edges,
     L4 communities, and whether a build is in progress."""
     conn = State.conn()
+    from store import graph_active_profile_id
 
-    def _count(sql: str) -> int:
+    active_profile = graph_active_profile_id(conn)
+    profile_clause, profile_params = (
+        " AND COALESCE(profile_id, 'default') = ?",
+        [active_profile],
+    )
+
+    def _count(sql: str, params: Optional[List[Any]] = None) -> int:
         try:
-            row = conn.execute(sql).fetchone()
+            row = conn.execute(sql, params or []).fetchone()
             return int(row[0]) if row else 0
         except Exception:
             return 0
 
-    nodes = _count("SELECT COUNT(*) FROM graph_nodes WHERE status NOT IN ('scaffold', 'stub')")
+    nodes = _count(
+        "SELECT COUNT(*) FROM graph_nodes WHERE status NOT IN ('scaffold', 'stub')"
+        + profile_clause,
+        profile_params,
+    )
     edges = _count("SELECT COUNT(*) FROM graph_edges")
     communities = _count(
         "SELECT COUNT(*) FROM sources WHERE kind='graph-community'"
@@ -2213,6 +2224,7 @@ def graph_stats() -> Dict[str, Any]:
         "building": building,
         "embed_dim": embed_dim,
         "embed_model": embed_model,
+        "active_profile_id": active_profile,
     }
 
 
@@ -2249,9 +2261,11 @@ def admin_reindex(body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 
 @app.get("/graph/scaffold")
-def graph_scaffold() -> Dict[str, Any]:
+def graph_scaffold(profile_id: Optional[str] = None) -> Dict[str, Any]:
     conn = State.conn()
-    out = graph_scaffold_list(conn)
+    from store import graph_scaffold_list
+
+    out = graph_scaffold_list(conn, profile_id=profile_id)
     try:
         from graph_fill import pick_next_gap
 
@@ -2600,12 +2614,15 @@ def dev_e2e_seed_graph_gap(body: E2eSeedGraphGapBody) -> Dict[str, Any]:
     nid = _new_id("gn")
     now = time.time()
     name = (body.name or "E2E Journey Person").strip()[:120]
+    from store import graph_active_profile_id
+
+    profile_id = graph_active_profile_id(conn)
     conn.execute(
         "INSERT INTO graph_nodes(node_id, node_kind, title, status, body_md, wiki_page_id, "
         "parent_node_id, aliases_json, summary, confidence, source_refs_json, privacy_level, "
-        "created_at, updated_at) VALUES(?, 'person', ?, 'active', '', NULL, "
-        "'scaffold-people-friends', '[]', '', 0.5, '[]', 'vault_local', ?, ?)",
-        (nid, name, now, now),
+        "profile_id, created_at, updated_at) VALUES(?, 'person', ?, 'active', '', NULL, "
+        "'scaffold-people-friends', '[]', '', 0.5, '[]', 'vault_local', ?, ?, ?)",
+        (nid, name, profile_id, now, now),
     )
     from graph_fill import compose_question, open_thread_for_gap, pick_next_gap
 

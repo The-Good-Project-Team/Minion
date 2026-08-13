@@ -624,6 +624,15 @@ def _migrate_graph_schema(conn: sqlite3.Connection) -> None:
         for col, ddl in adds:
             if col not in node_cols:
                 conn.execute(f"ALTER TABLE graph_nodes ADD COLUMN {col} {ddl}")
+        if "profile_id" not in node_cols:
+            conn.execute("ALTER TABLE graph_nodes ADD COLUMN profile_id TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_graph_nodes_profile ON graph_nodes(profile_id)"
+            )
+            conn.execute(
+                "UPDATE graph_nodes SET profile_id = 'default' "
+                "WHERE profile_id IS NULL AND status NOT IN ('scaffold', 'stub')"
+            )
     edge_cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
     if edge_cols:
         for col, ddl in [
@@ -1434,6 +1443,7 @@ def delete_source(conn: sqlite3.Connection, source_id: str) -> int:
         rowids = [int(r["rowid"]) for r in rows]
         for rid in rowids:
             conn.execute("DELETE FROM vec_chunks WHERE rowid=?", (rid,))
+        conn.execute("DELETE FROM chunks WHERE source_id=?", (source_id,))
         conn.execute("DELETE FROM sources WHERE source_id=?", (source_id,))
     return len(rowids)
 
@@ -1459,6 +1469,19 @@ def delete_sources_by_kind(conn: sqlite3.Connection, kind: str) -> Tuple[int, in
     for sid in ids:
         chunk_total += delete_source(conn, sid)
     return len(ids), chunk_total
+
+
+def _graph_profile_filter(profile_id: Optional[str], *, alias: str = "") -> tuple[str, List[Any]]:
+    if not profile_id:
+        return "", []
+    col = f"{alias}." if alias else ""
+    return f" AND COALESCE({col}profile_id, 'default') = ?", [profile_id]
+
+
+def graph_active_profile_id(conn: sqlite3.Connection, explicit: Optional[str] = None) -> str:
+    if explicit and str(explicit).strip():
+        return str(explicit).strip()
+    return profile_get_active(conn) or "default"
 
 
 def _profile_filter_sql(profile_id: Optional[str], *, alias: str = "c") -> tuple[str, List[Any]]:
@@ -3682,13 +3705,18 @@ def graph_scaffold_nodes(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return nodes
 
 
-def graph_filled_counts(conn: sqlite3.Connection) -> Dict[str, int]:
+def graph_filled_counts(conn: sqlite3.Connection, profile_id: Optional[str] = None) -> Dict[str, int]:
     """Count non-scaffold nodes + wiki pages mapped by type."""
     _, wiki_map = _import_life_graph()
+    profile_id = graph_active_profile_id(conn, profile_id)
+    profile_clause, profile_params = _graph_profile_filter(profile_id)
     out: Dict[str, int] = {}
     rows = conn.execute(
         "SELECT node_kind, COUNT(*) AS n FROM graph_nodes "
-        "WHERE status NOT IN ('stub', 'scaffold') GROUP BY node_kind"
+        "WHERE status NOT IN ('stub', 'scaffold')"
+        + profile_clause
+        + " GROUP BY node_kind",
+        profile_params,
     ).fetchall()
     for r in rows:
         out[str(r["node_kind"])] = int(r["n"])
@@ -3717,9 +3745,14 @@ def _graph_summary_snippet(summary: Any) -> str:
     return raw[:100]
 
 
-def graph_members_by_parent(conn: sqlite3.Connection) -> Dict[str, List[Dict[str, Any]]]:
+def graph_members_by_parent(
+    conn: sqlite3.Connection,
+    profile_id: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
     """User-filled nodes keyed by scaffold parent_node_id."""
     scaffold, wiki_map = _import_life_graph()
+    profile_id = graph_active_profile_id(conn, profile_id)
+    profile_clause, profile_params = _graph_profile_filter(profile_id)
     default_parent_by_kind = {
         "person": "scaffold-people-unknown",
         "family": "scaffold-people-family",
@@ -3740,7 +3773,9 @@ def graph_members_by_parent(conn: sqlite3.Connection) -> Dict[str, List[Dict[str
     rows = conn.execute(
         "SELECT node_id, node_kind, title, status, parent_node_id, summary, updated_at "
         "FROM graph_nodes WHERE status NOT IN ('scaffold', 'stub') "
-        "ORDER BY updated_at DESC"
+        + profile_clause
+        + " ORDER BY updated_at DESC",
+        profile_params,
     ).fetchall()
     out: Dict[str, List[Dict[str, Any]]] = {}
     for r in rows:
@@ -3775,11 +3810,15 @@ def graph_members_by_parent(conn: sqlite3.Connection) -> Dict[str, List[Dict[str
     return out
 
 
-def graph_scaffold_list(conn: sqlite3.Connection) -> Dict[str, Any]:
+def graph_scaffold_list(
+    conn: sqlite3.Connection,
+    profile_id: Optional[str] = None,
+) -> Dict[str, Any]:
     from life_graph import NODE_TYPES, RELATION_TYPES, scaffold_as_tree
 
+    profile_id = graph_active_profile_id(conn, profile_id)
     nodes = graph_scaffold_nodes(conn)
-    members_by_parent = graph_members_by_parent(conn)
+    members_by_parent = graph_members_by_parent(conn, profile_id=profile_id)
 
     def _bucket_ids(node_id: str) -> List[str]:
         ids = [node_id]
@@ -3812,13 +3851,16 @@ def graph_scaffold_list(conn: sqlite3.Connection) -> Dict[str, Any]:
     tree = scaffold_as_tree(flat)
     tree = [_attach_counts(n) for n in tree]
 
-    totals = graph_filled_counts(conn)
+    totals = graph_filled_counts(conn, profile_id=profile_id)
     highlights: List[Dict[str, Any]] = []
     title_by_id = {n["node_id"]: n["title"] for n in nodes}
+    profile_clause, profile_params = _graph_profile_filter(profile_id)
     for r in conn.execute(
         "SELECT node_id, node_kind, title, parent_node_id, summary "
         "FROM graph_nodes WHERE status NOT IN ('scaffold', 'stub') "
-        "ORDER BY updated_at DESC LIMIT 24"
+        + profile_clause
+        + " ORDER BY updated_at DESC LIMIT 24",
+        profile_params,
     ).fetchall():
         pid = str(r["parent_node_id"] or "")
         highlights.append(
@@ -3854,6 +3896,7 @@ def graph_scaffold_list(conn: sqlite3.Connection) -> Dict[str, Any]:
         "totals": totals,
         "highlights": highlights,
         "user_node_count": sum(totals.values()),
+        "profile_id": profile_id,
     }
 
 
@@ -4016,6 +4059,24 @@ def profile_delete(conn: sqlite3.Connection, profile_id: str) -> bool:
     ).fetchall()
     for row in source_rows:
         delete_source(conn, str(row["source_id"]))
+
+    node_rows = conn.execute(
+        "SELECT node_id FROM graph_nodes WHERE COALESCE(profile_id, 'default') = ? "
+        "AND status NOT IN ('scaffold', 'stub')",
+        (profile_id,),
+    ).fetchall()
+    for row in node_rows:
+        nid = str(row["node_id"])
+        conn.execute(
+            "DELETE FROM graph_edges WHERE from_node_id = ? OR to_node_id = ?",
+            (nid, nid),
+        )
+    conn.execute(
+        "DELETE FROM graph_nodes WHERE COALESCE(profile_id, 'default') = ? "
+        "AND status NOT IN ('scaffold', 'stub')",
+        (profile_id,),
+    )
+
     conn.execute("DELETE FROM profiles WHERE profile_id = ?", (profile_id,))
     conn.commit()
     return True
@@ -4063,6 +4124,10 @@ def profile_migrate_null_rows(conn: sqlite3.Connection) -> None:
     """Assign legacy rows without profile_id to the default profile."""
     conn.execute("UPDATE sources SET profile_id = 'default' WHERE profile_id IS NULL")
     conn.execute("UPDATE chunks SET profile_id = 'default' WHERE profile_id IS NULL")
+    conn.execute(
+        "UPDATE graph_nodes SET profile_id = 'default' "
+        "WHERE profile_id IS NULL AND status NOT IN ('scaffold', 'stub')"
+    )
     conn.commit()
 
 

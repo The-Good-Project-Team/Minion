@@ -857,6 +857,18 @@ def test_exports_trigger_returns_desktop_shape(sidecar) -> None:
     assert "message" in body
 
 
+def test_graph_scaffold_includes_profile_id(sidecar) -> None:
+    body = sidecar.get("/graph/scaffold").json()
+    assert "profile_id" in body
+    assert body["profile_id"] in ("default", "personal")
+
+
+def test_graph_stats_includes_active_profile(sidecar) -> None:
+    body = sidecar.get("/graph/stats").json()
+    assert "active_profile_id" in body
+    assert body["active_profile_id"] in ("default", "personal")
+
+
 def test_connect_cursor_status(sidecar) -> None:
     body = sidecar.get("/connect/cursor/status").json()
     assert "installed" in body
