@@ -655,10 +655,20 @@ export function openSearchStream(
   };
 }
 
-export async function ingestPath(path: string, move = false, temporary = false): Promise<{ queued: string }> {
+export async function ingestPath(
+  path: string,
+  move = false,
+  temporary = false,
+  profileId?: string,
+): Promise<{ queued: string }> {
   return apiFetch("/ingest", {
     method: "POST",
-    body: JSON.stringify({ path, move, temporary }),
+    body: JSON.stringify({
+      path,
+      move,
+      temporary,
+      ...(profileId ? { profile_id: profileId } : {}),
+    }),
   });
 }
 
@@ -674,6 +684,9 @@ export type ClaudeDesktopStatus = {
   configured: boolean;
   connected: boolean;
   config_path: string | null;
+  minion_profile_id?: string | null;
+  active_profile_id?: string | null;
+  profile_needs_reconnect?: boolean;
 };
 
 export async function fetchClaudeDesktopStatus(): Promise<ClaudeDesktopStatus> {
@@ -700,6 +713,9 @@ export type CursorStatus = {
   configured: boolean;
   connected: boolean;
   config_path: string | null;
+  minion_profile_id?: string | null;
+  active_profile_id?: string | null;
+  profile_needs_reconnect?: boolean;
 };
 
 export async function fetchCursorStatus(): Promise<CursorStatus> {
@@ -1995,6 +2011,8 @@ export type ExportSchedulerStatus = {
   enabled: boolean;
   watch_path: string;
   interval_sec: number;
+  export_profile_id?: string | null;
+  active_profile_id?: string | null;
   last_check_at: number | null;
   last_ingested_count: number;
   total_ingested: number;
@@ -2003,6 +2021,7 @@ export type ExportSchedulerStatus = {
 export type ExportSchedulerConfig = {
   export_watch_path?: string;
   export_interval_sec?: number;
+  export_profile_id?: string;
   enabled?: boolean;
 };
 
@@ -2011,6 +2030,7 @@ export type ExportSchedulerConfigResponse = {
   settings: {
     export_watch_path?: string;
     export_interval_sec?: number;
+    export_profile_id?: string;
   };
 };
 

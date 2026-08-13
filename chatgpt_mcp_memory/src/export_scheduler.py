@@ -39,6 +39,30 @@ def export_interval_sec(data_dir: Optional[Path] = None) -> float:
     return _DEFAULT_INTERVAL_SEC
 
 
+def export_profile_id(data_dir: Optional[Path] = None, conn=None) -> Optional[str]:
+    """Profile namespace for scheduled export ingests."""
+    raw = os.environ.get("MINION_EXPORT_PROFILE_ID", "").strip()
+    if raw:
+        return raw
+    if data_dir:
+        try:
+            from settings import load_settings
+
+            v = load_settings(Path(data_dir)).get("export_profile_id")
+            if v:
+                return str(v).strip()
+        except Exception:
+            pass
+    if conn is not None:
+        try:
+            from store import profile_get_active
+
+            return profile_get_active(conn) or "default"
+        except Exception:
+            pass
+    return None
+
+
 def export_watch_path(data_dir: Optional[Path] = None) -> Optional[Path]:
     """Get the folder path to monitor for new exports."""
     raw = os.environ.get("MINION_EXPORT_WATCH_PATH", "").strip()
@@ -118,12 +142,12 @@ def _is_export_file(path: Path) -> bool:
     return any(pattern in name_lower for pattern in export_patterns)
 
 
-def _should_ingest_export(conn, path: Path) -> bool:
+def _should_ingest_export(conn, path: Path, profile_id: Optional[str] = None) -> bool:
     """True when the export file is new or changed since last ingest."""
     from store import get_source_by_path, sha256_of_file
 
     spath = str(path.expanduser().resolve())
-    existing = get_source_by_path(conn, spath)
+    existing = get_source_by_path(conn, spath, profile_id=profile_id)
     if existing is None:
         return True
     try:
@@ -133,12 +157,12 @@ def _should_ingest_export(conn, path: Path) -> bool:
     return existing.sha256 != digest
 
 
-def _ingest_export_file(path: Path, data_dir, conn) -> dict:
+def _ingest_export_file(path: Path, data_dir, conn, profile_id: Optional[str] = None) -> dict:
     """Ingest a single export file."""
     from ingest import ingest_file
 
     try:
-        result = ingest_file(conn, path)
+        result = ingest_file(conn, path, profile_id=profile_id)
         return {
             "path": str(path),
             "success": not result.skipped and result.source_id is not None,
@@ -171,20 +195,25 @@ def tick(data_dir, conn_factory: Callable) -> dict:
 
     conn = conn_factory()
     try:
+        ingest_profile = export_profile_id(data_dir, conn)
         new_exports = []
         for path in watch_path.iterdir():
             if not _is_export_file(path):
                 continue
-            if _should_ingest_export(conn, path):
+            if _should_ingest_export(conn, path, profile_id=ingest_profile):
                 new_exports.append(path)
 
         if not new_exports:
             _record_tick_stats(conn, 0)
-            return {"status": "no_new_exports", "watched": str(watch_path)}
+            return {
+                "status": "no_new_exports",
+                "watched": str(watch_path),
+                "export_profile_id": ingest_profile,
+            }
 
         results = []
         for path in new_exports:
-            result = _ingest_export_file(path, data_dir, conn)
+            result = _ingest_export_file(path, data_dir, conn, profile_id=ingest_profile)
             results.append(result)
             if result.get("success"):
                 conn.commit()
@@ -205,6 +234,7 @@ def tick(data_dir, conn_factory: Callable) -> dict:
         return {
             "status": "completed",
             "watch_path": str(watch_path),
+            "export_profile_id": ingest_profile,
             "total": len(results),
             "successful": successful,
             "failed": failed,
@@ -279,13 +309,15 @@ def trigger_manual_export(data_dir, conn_factory: Callable, export_path: Optiona
 
         conn = conn_factory()
         try:
-            result = _ingest_export_file(path, data_dir, conn)
+            ingest_profile = export_profile_id(data_dir, conn)
+            result = _ingest_export_file(path, data_dir, conn, profile_id=ingest_profile)
             if result.get("success"):
                 conn.commit()
                 _record_tick_stats(conn, 1)
             else:
                 conn.rollback()
                 _record_tick_stats(conn, 0)
+            result["export_profile_id"] = ingest_profile
             return result
         finally:
             try:

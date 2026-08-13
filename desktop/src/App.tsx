@@ -757,7 +757,8 @@ export function App() {
     if (!paths.length || busy) return;
     setBusy(true);
     try {
-      await Promise.all(paths.map((p) => ingestPath(p, false, true)));
+      const profileId = activeProfile?.profile_id;
+      await Promise.all(paths.map((p) => ingestPath(p, false, true, profileId)));
       await load();
     } finally {
       setBusy(false);
@@ -997,7 +998,14 @@ export function App() {
         action: counts.sources > 0 ? { label: graphBusy ? "Rebuilding…" : "Rebuild", run: runGraphBuild } : undefined,
       },
     ];
-  }, [name, counts.sources, sources, graphMsg, graphBusy, claudeStatus, claudeMsg]);
+  }, [name, counts.sources, sources, graphMsg, graphBusy, claudeStatus, claudeMsg, cursorStatus, cursorMsg]);
+
+  const mcpReconnectApps = useMemo(() => {
+    const apps: string[] = [];
+    if (claudeStatus?.profile_needs_reconnect) apps.push("Claude Desktop");
+    if (cursorStatus?.profile_needs_reconnect) apps.push("Cursor");
+    return apps;
+  }, [claudeStatus, cursorStatus]);
 
   const doneCount = checklist.filter((c) => c.done).length;
   const pct = active.total > 0 ? Math.round((active.done / active.total) * 100) : 0;
@@ -1049,6 +1057,11 @@ export function App() {
           <div className="rounded-2xl border-2 border-dashed border-primary bg-card px-10 py-8 text-center shadow-lg">
             <Upload className="mx-auto size-8 text-primary" />
             <p className="mt-2 font-medium">Drop to add to your memory</p>
+            {activeProfile && (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Indexing into profile: {activeProfile.name}
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -1121,6 +1134,46 @@ export function App() {
             </div>
           </div>
         </header>
+
+        {mcpReconnectApps.length > 0 && (
+          <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-50/80 p-3 text-sm text-amber-950 dark:bg-amber-950/30 dark:text-amber-100">
+            <p className="font-medium">Reconnect MCP after profile switch</p>
+            <p className="mt-1 text-xs opacity-90">
+              {mcpReconnectApps.join(" and ")} still point at profile{" "}
+              <span className="font-mono">
+                {claudeStatus?.minion_profile_id ?? cursorStatus?.minion_profile_id}
+              </span>
+              . Reconnect so assistants use{" "}
+              <span className="font-mono">{activeProfile?.profile_id}</span>.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {claudeStatus?.profile_needs_reconnect && (
+                <button
+                  type="button"
+                  onClick={() => void connectClaudeDesktop({}).then((r) => {
+                    setClaudeMsg(r.message);
+                    void refreshDashboard();
+                  }).catch((e) => setClaudeMsg(apiErrorDetail(e)))}
+                  className="rounded-lg border border-amber-600/30 bg-background px-3 py-1.5 text-xs hover:bg-accent"
+                >
+                  Reconnect Claude
+                </button>
+              )}
+              {cursorStatus?.profile_needs_reconnect && (
+                <button
+                  type="button"
+                  onClick={() => void connectCursor({}).then((r) => {
+                    setCursorMsg(r.message);
+                    void refreshDashboard();
+                  }).catch((e) => setCursorMsg(apiErrorDetail(e)))}
+                  className="rounded-lg border border-amber-600/30 bg-background px-3 py-1.5 text-xs hover:bg-accent"
+                >
+                  Reconnect Cursor
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {currentTab === "home" && (
           <>
@@ -1195,6 +1248,11 @@ export function App() {
           <Upload className="mx-auto size-8 text-muted-foreground" />
           <p className="mt-3 font-medium">Drop files or folders here</p>
           <p className="text-sm text-muted-foreground">Documents, notes, AI chat exports — indexed on-device.</p>
+          {activeProfile && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Indexing into profile: {activeProfile.name}
+            </p>
+          )}
           <div className="mt-4 flex justify-center gap-2">
             <button
               onClick={addFiles}

@@ -11,6 +11,7 @@ import pytest
 from export_scheduler import (
     _is_export_file,
     export_interval_sec,
+    export_profile_id,
     export_watch_path,
     tick,
     trigger_manual_export,
@@ -73,7 +74,6 @@ def test_export_interval_sec():
 
 def test_export_watch_path():
     """Test export watch path configuration."""
-    # Default path with data_dir
     with tempfile.TemporaryDirectory() as tmpdir:
         data_dir = Path(tmpdir)
         with patch.dict("os.environ", {}, clear=True):
@@ -89,6 +89,30 @@ def test_export_watch_path():
     with patch.dict("os.environ", {}, clear=True):
         path = export_watch_path(None)
         assert path is None
+
+
+def test_export_profile_id():
+    """Profile namespace for scheduled export ingests."""
+    from settings import save_settings
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data_dir = Path(tmpdir)
+        with patch.dict("os.environ", {}, clear=True):
+            assert export_profile_id(data_dir, None) is None
+
+        with patch.dict("os.environ", {"MINION_EXPORT_PROFILE_ID": "env-profile"}):
+            assert export_profile_id(data_dir, None) == "env-profile"
+
+        save_settings(data_dir, {"export_profile_id": "saved-profile"})
+        with patch.dict("os.environ", {}, clear=True):
+            assert export_profile_id(data_dir, None) == "saved-profile"
+
+        empty_dir = data_dir / "no-settings"
+        empty_dir.mkdir()
+        mock_conn = Mock()
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("store.profile_get_active", return_value="active-profile"):
+                assert export_profile_id(empty_dir, mock_conn) == "active-profile"
 
 
 def test_tick_no_watch_path():

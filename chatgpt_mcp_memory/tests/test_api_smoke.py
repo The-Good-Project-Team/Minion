@@ -465,11 +465,15 @@ def test_connect_claude_desktop_status(sidecar) -> None:
     assert body["installed"] is True  # skipped in test env
     assert body["configured"] is False
     assert body["connected"] is False
+    assert "minion_profile_id" in body
+    assert "active_profile_id" in body
+    assert "profile_needs_reconnect" in body
 
     sidecar.post("/connect/claude-desktop", {}).raise_for_status()
     body = sidecar.get("/connect/claude-desktop/status").json()
     assert body["configured"] is True
     assert body["connected"] is True
+    assert body["profile_needs_reconnect"] is False
 
 
 def test_connect_claude_desktop_merges_existing(sidecar) -> None:
@@ -810,6 +814,20 @@ def test_exports_status_shape(sidecar) -> None:
     assert "interval_sec" in body
     assert "last_check_at" in body
     assert "total_ingested" in body
+    assert "export_profile_id" in body
+    assert "active_profile_id" in body
+
+
+def test_exports_config_accepts_export_profile_id(sidecar) -> None:
+    r = sidecar.post(
+        "/exports/config",
+        {"export_profile_id": "work"},
+    )
+    assert r.status_code == 200, r.text
+    settings = r.json()["settings"]
+    assert settings["export_profile_id"] == "work"
+    status = sidecar.get("/exports/status").json()
+    assert status["export_profile_id"] == "work"
 
 
 def test_exports_config_accepts_desktop_field_names(sidecar) -> None:
@@ -845,3 +863,6 @@ def test_connect_cursor_status(sidecar) -> None:
     assert "configured" in body
     assert "connected" in body
     assert "config_path" in body
+    assert "minion_profile_id" in body
+    assert "active_profile_id" in body
+    assert "profile_needs_reconnect" in body

@@ -7,36 +7,51 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
+  User,
 } from "lucide-react";
 import {
   fetchExportSchedulerStatus,
+  fetchProfiles,
   triggerExportExport,
   updateExportSchedulerConfig,
   type ExportSchedulerStatus,
+  type Profile,
 } from "../lib/api";
 
 export function ExportSchedulerConfig() {
   const [status, setStatus] = useState<ExportSchedulerStatus | null>(null);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isTriggering, setIsTriggering] = useState(false);
   const [watchPath, setWatchPath] = useState("");
   const [intervalSec, setIntervalSec] = useState(3600);
+  const [exportProfileId, setExportProfileId] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   useEffect(() => {
-    loadStatus();
+    void loadStatus();
   }, []);
 
   const loadStatus = async () => {
     setIsLoading(true);
     try {
-      const data = await fetchExportSchedulerStatus();
+      const [data, profilesRes] = await Promise.all([
+        fetchExportSchedulerStatus(),
+        fetchProfiles().catch(() => ({ profiles: [] as Profile[] })),
+      ]);
       setStatus(data);
+      setProfiles(profilesRes.profiles);
       setWatchPath(data.watch_path);
       setIntervalSec(data.interval_sec);
       setEnabled(data.enabled);
+      setExportProfileId(
+        data.export_profile_id ??
+          data.active_profile_id ??
+          profilesRes.profiles.find((p) => p.is_default)?.profile_id ??
+          "default",
+      );
     } catch (error) {
       console.error("Failed to load export scheduler status:", error);
       setMessage({ type: "error", text: "Failed to load scheduler status" });
@@ -52,6 +67,7 @@ export function ExportSchedulerConfig() {
       await updateExportSchedulerConfig({
         export_watch_path: watchPath,
         export_interval_sec: intervalSec,
+        export_profile_id: exportProfileId,
         enabled,
       });
       await loadStatus();
@@ -69,9 +85,9 @@ export function ExportSchedulerConfig() {
     setMessage(null);
     try {
       const result = await triggerExportExport();
-      setMessage({ 
-        type: "success", 
-        text: `Triggered export scan: ${result.ingested} files ingested` 
+      setMessage({
+        type: "success",
+        text: `Triggered export scan: ${result.ingested} files ingested`,
       });
       await loadStatus();
     } catch (error) {
@@ -93,6 +109,9 @@ export function ExportSchedulerConfig() {
     if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes`;
     return `${Math.floor(seconds / 3600)} hours`;
   };
+
+  const profileLabel =
+    profiles.find((p) => p.profile_id === exportProfileId)?.name ?? exportProfileId;
 
   if (isLoading) {
     return (
@@ -135,16 +154,16 @@ export function ExportSchedulerConfig() {
             </div>
           </div>
           <div className="bg-muted/50 rounded-lg p-3">
+            <div className="text-muted-foreground text-xs mb-1">Target Profile</div>
+            <div className="font-medium">{profileLabel}</div>
+          </div>
+          <div className="bg-muted/50 rounded-lg p-3">
             <div className="text-muted-foreground text-xs mb-1">Total Ingested</div>
             <div className="font-medium">{status.total_ingested}</div>
           </div>
           <div className="bg-muted/50 rounded-lg p-3">
             <div className="text-muted-foreground text-xs mb-1">Last Check</div>
             <div className="font-medium text-xs">{formatTime(status.last_check_at)}</div>
-          </div>
-          <div className="bg-muted/50 rounded-lg p-3">
-            <div className="text-muted-foreground text-xs mb-1">Last Ingested</div>
-            <div className="font-medium">{status.last_ingested_count}</div>
           </div>
         </div>
       )}
@@ -160,6 +179,27 @@ export function ExportSchedulerConfig() {
             />
             <span>Enable export scheduler</span>
           </label>
+        </div>
+
+        <div className="space-y-1">
+          <label className="text-sm font-medium flex items-center gap-2">
+            <User className="w-4 h-4" />
+            Ingest Into Profile
+          </label>
+          <select
+            value={exportProfileId}
+            onChange={(e) => setExportProfileId(e.target.value)}
+            className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background"
+          >
+            {profiles.map((profile) => (
+              <option key={profile.profile_id} value={profile.profile_id}>
+                {profile.name}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-muted-foreground">
+            Exports from the watch folder are indexed under this profile namespace.
+          </p>
         </div>
 
         <div className="space-y-1">
@@ -221,8 +261,8 @@ export function ExportSchedulerConfig() {
       {message && (
         <div
           className={`flex items-center gap-2 text-sm p-3 rounded-lg ${
-            message.type === "success" 
-              ? "bg-green-50 text-green-700 border border-green-200" 
+            message.type === "success"
+              ? "bg-green-50 text-green-700 border border-green-200"
               : "bg-red-50 text-red-700 border border-red-200"
           }`}
         >

@@ -4208,11 +4208,14 @@ def _normalize_export_trigger_result(result: Dict[str, Any]) -> Dict[str, Any]:
 @app.get("/exports/status")
 def exports_status() -> Dict[str, Any]:
     """Get export scheduler status and configuration."""
-    from export_scheduler import export_interval_sec, export_scheduler_stats, export_watch_path
+    from export_scheduler import export_interval_sec, export_profile_id, export_scheduler_stats, export_watch_path
+    from store import profile_get_active
 
+    conn = State.conn()
     watch_path = export_watch_path(State.data_dir)
     interval = export_interval_sec(State.data_dir)
-    stats = export_scheduler_stats(State.conn())
+    stats = export_scheduler_stats(conn)
+    resolved_profile = export_profile_id(State.data_dir, conn)
 
     return {
         "enabled": os.environ.get("MINION_DISABLE_EXPORT_SCHEDULER", "").strip().lower() not in (
@@ -4224,6 +4227,8 @@ def exports_status() -> Dict[str, Any]:
         "watch_path_exists": watch_path.exists() if watch_path else False,
         "interval_sec": interval,
         "interval_hours": interval / 3600.0,
+        "export_profile_id": resolved_profile,
+        "active_profile_id": profile_get_active(conn),
         **stats,
     }
 
@@ -4250,6 +4255,7 @@ class ExportConfigBody(BaseModel):
     interval_sec: Optional[float] = None
     export_watch_path: Optional[str] = None
     export_interval_sec: Optional[float] = None
+    export_profile_id: Optional[str] = None
     enabled: Optional[bool] = None
 
 
@@ -4267,6 +4273,13 @@ def configure_exports(body: ExportConfigBody) -> Dict[str, Any]:
 
     if resolved_interval is not None:
         settings["export_interval_sec"] = max(300.0, float(resolved_interval))
+
+    if body.export_profile_id is not None:
+        pid = body.export_profile_id.strip()
+        if pid:
+            settings["export_profile_id"] = pid
+        else:
+            settings.pop("export_profile_id", None)
     
     if body.enabled is not None:
         if body.enabled:
@@ -4281,6 +4294,7 @@ def configure_exports(body: ExportConfigBody) -> Dict[str, Any]:
         "settings": {
             "export_watch_path": settings.get("export_watch_path"),
             "export_interval_sec": settings.get("export_interval_sec"),
+            "export_profile_id": settings.get("export_profile_id"),
         },
     }
 

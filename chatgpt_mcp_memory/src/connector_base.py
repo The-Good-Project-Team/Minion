@@ -100,6 +100,30 @@ class Connector(ABC):
         servers = config.get("mcpServers") if isinstance(config, dict) else None
         return isinstance(servers, dict) and server_name in servers
 
+    def configured_minion_profile_id(self, server_name: str = "minion") -> Optional[str]:
+        """MINION_PROFILE_ID stored in the assistant MCP config, if any."""
+        cfg_path = self.get_config_path()
+        if not cfg_path or not cfg_path.is_file():
+            return None
+        try:
+            raw = cfg_path.read_text(encoding="utf-8")
+            if not raw.strip():
+                return None
+            config = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return None
+        servers = config.get("mcpServers") if isinstance(config, dict) else None
+        if not isinstance(servers, dict):
+            return None
+        entry = servers.get(server_name)
+        if not isinstance(entry, dict):
+            return None
+        env = entry.get("env")
+        if not isinstance(env, dict):
+            return None
+        pid = env.get("MINION_PROFILE_ID")
+        return str(pid).strip() if pid else None
+
     def get_status(self, server_name: str = "minion") -> Dict[str, Any]:
         """Get connection status for this connector.
 
@@ -107,16 +131,35 @@ class Connector(ABC):
             server_name: MCP server name to check for
 
         Returns:
-            Dict with keys: installed, configured, connected, config_path
+            Dict with keys: installed, configured, connected, config_path,
+            minion_profile_id, active_profile_id, profile_needs_reconnect
         """
         cfg_path = self.get_config_path()
         installed = self.is_installed()
         configured = bool(cfg_path and self.is_configured(cfg_path, server_name))
+        minion_profile_id = self.configured_minion_profile_id(server_name) if configured else None
+        active_profile_id: Optional[str] = None
+        try:
+            from api import State
+            from store import profile_get_active
+
+            active_profile_id = profile_get_active(State.conn())
+        except Exception:
+            pass
+        profile_needs_reconnect = bool(
+            configured
+            and minion_profile_id
+            and active_profile_id
+            and minion_profile_id != active_profile_id
+        )
         return {
             "installed": installed,
             "configured": configured,
             "connected": installed and configured,
             "config_path": str(cfg_path) if cfg_path else None,
+            "minion_profile_id": minion_profile_id,
+            "active_profile_id": active_profile_id,
+            "profile_needs_reconnect": profile_needs_reconnect,
         }
 
     def connect(
