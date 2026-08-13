@@ -1,6 +1,9 @@
 .DS_Store
 Untitled.png
 
+# JetBrains IDE
+.idea/
+
 # Local virtualenvs (match .venv, .venv-old-py39, etc.)
 .venv*/
 **/.venv*/

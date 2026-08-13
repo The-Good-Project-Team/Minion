@@ -499,6 +499,69 @@ def test_connect_claude_desktop_merges_existing(sidecar) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6b. Cursor connector (generic + legacy paths)
+# ---------------------------------------------------------------------------
+
+
+def test_list_connectors(sidecar) -> None:
+    body = sidecar.get("/connectors").json()
+    ids = {c["connector_id"] for c in body["connectors"]}
+    assert "claude-desktop" in ids
+    assert "cursor" in ids
+
+
+def test_connect_cursor_writes_config(sidecar) -> None:
+    assert not sidecar.cursor_cfg_path.exists()
+
+    r = sidecar.post("/connectors/cursor/connect", {})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["server_name"] == "minion"
+    assert body["restart_required"] is True
+    assert Path(body["config_path"]).resolve() == sidecar.cursor_cfg_path.resolve()
+
+    cfg = json.loads(sidecar.cursor_cfg_path.read_text())
+    assert "mcpServers" in cfg
+    entry = cfg["mcpServers"]["minion"]
+    assert entry["command"].endswith("python") or entry["command"].endswith("python3") or entry["command"].endswith("python3.11")
+    assert entry["args"][0].endswith("mcp_server.py")
+    assert entry["env"]["MINION_DATA_DIR"] == str(sidecar.data_dir)
+
+
+def test_connect_cursor_status_and_legacy_post(sidecar) -> None:
+    body = sidecar.get("/connectors/cursor/status").json()
+    assert body["connector_id"] == "cursor"
+    assert body["installed"] is True
+    assert body["configured"] is False
+    assert body["connected"] is False
+
+    sidecar.post("/connect/cursor", {}).raise_for_status()
+    body = sidecar.get("/connect/cursor/status").json()
+    assert body["configured"] is True
+    assert body["connected"] is True
+
+
+def test_connect_cursor_merges_existing(sidecar) -> None:
+    existing = {
+        "mcpServers": {
+            "other-server": {"command": "/usr/bin/other", "args": [], "env": {}}
+        },
+        "unrelated_key": 99,
+    }
+    sidecar.cursor_cfg_path.write_text(json.dumps(existing, indent=2))
+
+    r = sidecar.post("/connect/cursor", {})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["backup_path"] is not None
+
+    cfg = json.loads(sidecar.cursor_cfg_path.read_text())
+    assert cfg["unrelated_key"] == 99
+    assert "other-server" in cfg["mcpServers"]
+    assert "minion" in cfg["mcpServers"]
+
+
+# ---------------------------------------------------------------------------
 # 7. POST /factory-reset and /nuke exist + work
 # ---------------------------------------------------------------------------
 
@@ -893,14 +956,3 @@ def test_tasks_list_multi_origin_and_status(sidecar) -> None:
     titles = {t["title"] for t in r.json()["tasks"]}
     assert "Agent task" in titles
     assert "Screen task" in titles
-
-
-def test_connect_cursor_status(sidecar) -> None:
-    body = sidecar.get("/connect/cursor/status").json()
-    assert "installed" in body
-    assert "configured" in body
-    assert "connected" in body
-    assert "config_path" in body
-    assert "minion_profile_id" in body
-    assert "active_profile_id" in body
-    assert "profile_needs_reconnect" in body

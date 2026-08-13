@@ -4,7 +4,7 @@
   "version": "3.2.1",
   "identifier": "dev.minion",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "bash src-tauri/scripts/sync_sidecar.sh && npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "bash src-tauri/scripts/sync_sidecar.sh && npm run build",
     "frontendDist": "../build"

@@ -680,7 +680,9 @@ export async function ingestText(body: { title?: string; text: string }): Promis
   });
 }
 
-export type ClaudeDesktopStatus = {
+export type ConnectorStatus = {
+  connector_id?: string;
+  display_name?: string;
   installed: boolean;
   configured: boolean;
   connected: boolean;
@@ -689,53 +691,53 @@ export type ClaudeDesktopStatus = {
   active_profile_id?: string | null;
   profile_needs_reconnect?: boolean;
 };
+
+export type ConnectorConnectResult = {
+  config_path: string;
+  backup_path: string | null;
+  server_name: string;
+  restart_required: boolean;
+  installed: boolean;
+  configured: boolean;
+  message: string;
+};
+
+export async function fetchConnectorStatus(connectorId: string): Promise<ConnectorStatus> {
+  return apiFetch(`/connectors/${connectorId}/status`);
+}
+
+export async function connectConnector(
+  connectorId: string,
+  body: { server_name?: string; config_path?: string } = {},
+): Promise<ConnectorConnectResult> {
+  return apiFetch(`/connectors/${connectorId}/connect`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export type ClaudeDesktopStatus = ConnectorStatus;
 
 export async function fetchClaudeDesktopStatus(): Promise<ClaudeDesktopStatus> {
-  return apiFetch("/connect/claude-desktop/status");
+  return fetchConnectorStatus("claude-desktop");
 }
 
-export async function connectClaudeDesktop(body: { server_name?: string; config_path?: string } = {}): Promise<{
-  config_path: string;
-  backup_path: string | null;
-  server_name: string;
-  restart_required: boolean;
-  installed: boolean;
-  configured: boolean;
-  message: string;
-}> {
-  return apiFetch("/connect/claude-desktop", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+export async function connectClaudeDesktop(
+  body: { server_name?: string; config_path?: string } = {},
+): Promise<ConnectorConnectResult> {
+  return connectConnector("claude-desktop", body);
 }
 
-export type CursorStatus = {
-  installed: boolean;
-  configured: boolean;
-  connected: boolean;
-  config_path: string | null;
-  minion_profile_id?: string | null;
-  active_profile_id?: string | null;
-  profile_needs_reconnect?: boolean;
-};
+export type CursorStatus = ConnectorStatus;
 
 export async function fetchCursorStatus(): Promise<CursorStatus> {
-  return apiFetch("/connect/cursor/status");
+  return fetchConnectorStatus("cursor");
 }
 
-export async function connectCursor(body: { server_name?: string; config_path?: string } = {}): Promise<{
-  config_path: string;
-  backup_path: string | null;
-  server_name: string;
-  restart_required: boolean;
-  installed: boolean;
-  configured: boolean;
-  message: string;
-}> {
-  return apiFetch("/connect/cursor", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+export async function connectCursor(
+  body: { server_name?: string; config_path?: string } = {},
+): Promise<ConnectorConnectResult> {
+  return connectConnector("cursor", body);
 }
 
 /** Pull a human-readable message out of apiFetch's `status text: {"detail":...}` errors. */

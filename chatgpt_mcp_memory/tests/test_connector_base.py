@@ -308,3 +308,17 @@ def test_cursor_linux_installed_when_config_dir_writable(tmp_path: Path, monkeyp
     connector = CursorConnector()
     assert connector.is_installed() is True
     assert connector.get_config_path() == cfg.resolve()
+
+
+def test_claude_linux_installed_when_config_dir_writable(tmp_path: Path, monkeypatch) -> None:
+    """Linux headless: treat Claude Desktop as available when config dir is writable."""
+    from connectors.claude_desktop import ClaudeDesktopConnector
+
+    cfg = tmp_path / ".config" / "Claude" / "claude_desktop_config.json"
+    monkeypatch.setenv("CLAUDE_DESKTOP_CONFIG", str(cfg))
+    monkeypatch.delenv("MINION_SKIP_CLAUDE_APP_CHECK", raising=False)
+    monkeypatch.setattr("connectors.claude_desktop.sys.platform", "linux")
+
+    connector = ClaudeDesktopConnector()
+    assert connector.is_installed() is True
+    assert connector.get_config_path() == cfg.resolve()

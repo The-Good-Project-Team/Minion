@@ -192,6 +192,7 @@ class SidecarClient:
     inbox: Path
     process: subprocess.Popen
     claude_cfg_path: Path
+    cursor_cfg_path: Path
 
     @property
     def ws_url(self) -> str:
@@ -233,6 +234,7 @@ def _spawn_sidecar(
     inbox: Path,
     port: int,
     claude_cfg_path: Path,
+    cursor_cfg_path: Path,
 ) -> subprocess.Popen:
     """Spawn api.py with the test env. Use the interpreter running pytest so
     we inherit the same venv (which must have fastapi/uvicorn installed)."""
@@ -244,6 +246,8 @@ def _spawn_sidecar(
     env["MINION_DISABLE_PLAYWRIGHT_DOM"] = "1"
     env["CLAUDE_DESKTOP_CONFIG"] = str(claude_cfg_path)
     env["MINION_SKIP_CLAUDE_APP_CHECK"] = "1"
+    env["CURSOR_MCP_CONFIG"] = str(cursor_cfg_path)
+    env["MINION_SKIP_CURSOR_APP_CHECK"] = "1"
     env["PYTHONPATH"] = str(API_SCRIPT.parent) + os.pathsep + env.get("PYTHONPATH", "")
 
     process = subprocess.Popen(
@@ -317,10 +321,11 @@ def sidecar(tmp_path: Path) -> SidecarClient:
     data_dir.mkdir(parents=True, exist_ok=True)
     inbox.mkdir(parents=True, exist_ok=True)
     claude_cfg = tmp_path / "claude_desktop_config.json"
+    cursor_cfg = tmp_path / "cursor_mcp.json"
     port = _pick_free_port()
     base = f"http://127.0.0.1:{port}"
 
-    process = _spawn_sidecar(data_dir, inbox, port, claude_cfg)
+    process = _spawn_sidecar(data_dir, inbox, port, claude_cfg, cursor_cfg)
     try:
         _wait_ready(base, process)
     except Exception:
@@ -338,6 +343,7 @@ def sidecar(tmp_path: Path) -> SidecarClient:
         inbox=inbox,
         process=process,
         claude_cfg_path=claude_cfg,
+        cursor_cfg_path=cursor_cfg,
     )
 
     try:
