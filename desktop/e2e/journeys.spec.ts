@@ -122,6 +122,22 @@ test.describe("User journeys", () => {
     await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
   });
 
+  test("Work tab loads suggested task queue", async ({ page }) => {
+    await skipOnboarding(page);
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Work" }).click();
+    await expect(page.getByRole("heading", { name: "Work queue" })).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("Graph tab shows candidate inbox section", async ({ page }) => {
+    await skipOnboarding(page);
+    await page.goto("/");
+
+    await page.locator("header").getByRole("button", { name: "Graph" }).click();
+    await expect(page.getByText("Graph questions")).toBeVisible({ timeout: 15_000 });
+  });
+
 });
 
 test.describe("Return visit", () => {

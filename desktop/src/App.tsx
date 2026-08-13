@@ -8,6 +8,7 @@ import {
   FolderOpen,
   GitFork,
   Layers,
+  ListTodo,
   Loader2,
   Network,
   Plug,
@@ -23,6 +24,8 @@ import { IdentityMirror } from "./components/IdentityMirror";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
 import { ExportSchedulerConfig } from "./components/ExportSchedulerConfig";
 import { ActivityHome } from "./components/ActivityHome";
+import { GraphCandidateInbox } from "./components/GraphCandidateInbox";
+import { WorkQueue } from "./components/WorkQueue";
 import { formatFeedTime } from "./lib/feedUtils";
 
 import {
@@ -481,7 +484,7 @@ export function App() {
   const [cursorStatus, setCursorStatus] = useState<CursorStatus | null>(null);
   const [cursorMsg, setCursorMsg] = useState("");
   const [revealError, setRevealError] = useState<string | null>(null);
-  const [currentTab, setCurrentTab] = useState<"home" | "graph" | "settings">("home");
+  const [currentTab, setCurrentTab] = useState<"home" | "graph" | "work" | "settings">("home");
   const [consentPolicy, setConsentPolicy] = useState<ConsentPolicy | null>(null);
   const [consentError, setConsentError] = useState<string | null>(null);
   const [activeProfile, setActiveProfile] = useState<Profile | null>(null);
@@ -1036,6 +1039,14 @@ export function App() {
               <Network className="size-4" /> Graph
             </button>
             <button
+              onClick={() => setCurrentTab("work")}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm hover:bg-accent ${
+                currentTab === "work" ? "bg-accent" : ""
+              }`}
+            >
+              <ListTodo className="size-4" /> Work
+            </button>
+            <button
               onClick={() => setCurrentTab("settings")}
               className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm hover:bg-accent ${
                 currentTab === "settings" ? "bg-accent" : ""
@@ -1112,6 +1123,13 @@ export function App() {
               onReveal={handleReveal}
               onNavigateGraph={() => setCurrentTab("graph")}
             />
+
+            <div className="mt-4">
+              <GraphCandidateInbox
+                compact
+                onNavigateGraph={() => setCurrentTab("graph")}
+              />
+            </div>
 
             <section className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <StatTile icon={<FileText className="size-4" />} label="Sources" value={counts.sources} tint="text-sky-500" />
@@ -1393,10 +1411,17 @@ export function App() {
         )}
 
         {currentTab === "graph" && (
-          <section className="mt-6 w-full">
-            <h2 className="text-lg font-medium mb-4">Knowledge Graph</h2>
-            <GraphVisualization activeProfileId={activeProfile?.profile_id} />
+          <section className="mt-6 w-full space-y-6">
+            <GraphCandidateInbox />
+            <div>
+              <h2 className="mb-4 text-lg font-medium">Knowledge Graph</h2>
+              <GraphVisualization activeProfileId={activeProfile?.profile_id} />
+            </div>
           </section>
+        )}
+
+        {currentTab === "work" && (
+          <WorkQueue onReveal={handleReveal} />
         )}
 
         {currentTab === "settings" && (

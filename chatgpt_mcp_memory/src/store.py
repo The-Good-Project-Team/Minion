@@ -3434,6 +3434,18 @@ def _row_task(r: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def _task_filter_in(column: str, raw: Optional[str]) -> tuple[Optional[str], List[Any]]:
+    if not raw:
+        return None, []
+    parts = [p.strip()[:32] for p in str(raw).split(",") if p.strip()]
+    if not parts:
+        return None, []
+    if len(parts) == 1:
+        return f"{column}=?", parts
+    placeholders = ",".join("?" * len(parts))
+    return f"{column} IN ({placeholders})", parts
+
+
 def task_list(
     conn: sqlite3.Connection,
     *,
@@ -3444,12 +3456,14 @@ def task_list(
     lim = int(max(1, min(limit, 500)))
     clauses: List[str] = []
     params: List[Any] = []
-    if status:
-        clauses.append("status=?")
-        params.append(status.strip()[:32])
-    if origin:
-        clauses.append("origin=?")
-        params.append(origin.strip()[:32])
+    status_clause, status_params = _task_filter_in("status", status)
+    if status_clause:
+        clauses.append(status_clause)
+        params.extend(status_params)
+    origin_clause, origin_params = _task_filter_in("origin", origin)
+    if origin_clause:
+        clauses.append(origin_clause)
+        params.extend(origin_params)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
         f"SELECT task_id, title, status, origin, priority, due_at, body_md, context_refs_json, "

@@ -885,6 +885,16 @@ def test_feed_accepts_profile_id(sidecar) -> None:
     assert "items" in body
 
 
+def test_tasks_list_multi_origin_and_status(sidecar) -> None:
+    sidecar.post("/tasks/infer", {"title": "Agent task", "origin": "agent"}).raise_for_status()
+    sidecar.post("/tasks/infer", {"title": "Screen task", "origin": "screen_memory"}).raise_for_status()
+    r = sidecar.get("/tasks?origin=agent,screen_memory&status=open")
+    assert r.status_code == 200, r.text
+    titles = {t["title"] for t in r.json()["tasks"]}
+    assert "Agent task" in titles
+    assert "Screen task" in titles
+
+
 def test_connect_cursor_status(sidecar) -> None:
     body = sidecar.get("/connect/cursor/status").json()
     assert "installed" in body
