@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Clock, Loader2, Sparkles } from "lucide-react";
 import {
   fetchFeed,
+  fetchGraphCandidates,
+  fetchProfileSummary,
   fetchToday,
   openSession,
   type ActivityFeedBundle,
+  type ProfileSummary,
   type Source,
   type TodayBundle,
 } from "../lib/api";
@@ -24,9 +27,15 @@ type ActivityHomeProps = {
   sources: Source[];
   onReveal: (path: string) => void | Promise<void>;
   onNavigateGraph: () => void;
+  onNavigateWork?: () => void;
 };
 
 const LANE_ORDER: FeedSection[] = ["now", "observed", "parsed", "suggestion", "errors", "other"];
+const BRIEFING_REFRESH_MS = 60_000;
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 export function ActivityHome({
   displayName,
@@ -35,8 +44,11 @@ export function ActivityHome({
   sources,
   onReveal,
   onNavigateGraph,
+  onNavigateWork,
 }: ActivityHomeProps) {
   const [today, setToday] = useState<TodayBundle | null>(null);
+  const [profileSummary, setProfileSummary] = useState<ProfileSummary | null>(null);
+  const [candidateCount, setCandidateCount] = useState(0);
   const [todayLoading, setTodayLoading] = useState(true);
   const [feed, setFeed] = useState<ActivityFeedBundle | null>(null);
   const [feedLoading, setFeedLoading] = useState(true);
@@ -44,6 +56,7 @@ export function ActivityHome({
   const [laneFilter, setLaneFilter] = useState<"all" | FeedSection>("all");
   const [timeRange, setTimeRange] = useState<"last_hour" | "last_day" | "last_week" | "all">("last_day");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const lastBriefingRefresh = useRef(0);
 
   const sinceHours = useMemo(() => {
     if (timeRange === "all" || timeRange === "last_week") return 168;
@@ -51,54 +64,87 @@ export function ActivityHome({
     return 1;
   }, [timeRange]);
 
-  const loadToday = useCallback(async () => {
+  const loadBriefing = useCallback(async () => {
     setTodayLoading(true);
+    setFeedLoading(true);
+    setFeedError(null);
     try {
       if (displayName) {
         await openSession({ display_name: displayName }).catch(() => undefined);
       }
-      const bundle = await fetchToday();
-      setToday(bundle);
-    } catch (e) {
-      console.error("Failed to load today bundle:", e);
-    } finally {
-      setTodayLoading(false);
-    }
-  }, [displayName]);
 
-  const loadFeed = useCallback(async () => {
-    setFeedLoading(true);
-    setFeedError(null);
-    try {
-      const data = await fetchFeed({
-        limit: 100,
-        since_hours: sinceHours,
-        profile_id: activeProfileId ?? undefined,
-      });
-      setFeed(data);
+      const profileSummaryPromise = activeProfileId
+        ? fetchProfileSummary(activeProfileId).catch(() => null)
+        : Promise.resolve(null);
+
+      const [todayBundle, feedBundle, candidates, summary] = await Promise.all([
+        fetchToday(),
+        fetchFeed({
+          limit: 100,
+          since_hours: sinceHours,
+          profile_id: activeProfileId ?? undefined,
+        }),
+        fetchGraphCandidates("open").catch(() => ({ candidates: [], count: 0 })),
+        profileSummaryPromise,
+      ]);
+
+      setToday(todayBundle);
+      setFeed(feedBundle);
+      setCandidateCount(candidates.count ?? candidates.candidates.length);
+      setProfileSummary(summary);
+      sessionStorage.setItem("minion:briefing_date", todayKey());
+      lastBriefingRefresh.current = Date.now();
     } catch (e) {
-      console.error("Failed to load activity feed:", e);
+      console.error("Failed to load briefing:", e);
       setFeedError("Failed to load activity feed");
     } finally {
+      setTodayLoading(false);
       setFeedLoading(false);
     }
-  }, [sinceHours, activeProfileId]);
+  }, [displayName, activeProfileId, sinceHours]);
 
   useEffect(() => {
-    void loadToday();
-  }, [loadToday, activeProfileId]);
+    void loadBriefing();
+  }, [loadBriefing]);
 
   useEffect(() => {
-    void loadFeed();
-  }, [loadFeed]);
+    function onVisibilityChange() {
+      if (document.visibilityState !== "visible") return;
+      const isNewDay = sessionStorage.getItem("minion:briefing_date") !== todayKey();
+      const stale = Date.now() - lastBriefingRefresh.current > BRIEFING_REFRESH_MS;
+      if (isNewDay || stale) void loadBriefing();
+    }
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [loadBriefing]);
 
   const sessionBriefing =
     feed?.session?.briefing_summary?.trim() ||
     (feed?.session?.request_preview ? `Since you were here: ${feed.session.request_preview}` : "");
 
-  const attentionLine = today?.attention_24h?.top_apps?.trim();
+  const workingContext = today?.working_context as {
+    focus?: { app_name?: string; window_title?: string };
+    graph_context?: { open_candidates?: Array<{ title?: string }> };
+  } | undefined;
+
+  const focusLine =
+    feed?.now?.title?.trim() ||
+    workingContext?.focus?.window_title?.trim() ||
+    workingContext?.focus?.app_name?.trim() ||
+    today?.attention_24h?.top_apps?.trim() ||
+    "";
+
+  const graphHighlight =
+    feed?.graph?.highlights?.[0]?.title?.trim() ||
+    workingContext?.graph_context?.open_candidates?.[0]?.title?.trim() ||
+    "";
+
   const issueCount = today?.needs_attention?.length ?? 0;
   const pendingWork = today?.work_items?.inferred_pending?.length ?? 0;
+  const openWork = today?.work_items?.open?.length ?? 0;
+  const reviewWork = today?.work_items?.review?.length ?? 0;
+  const consentLevel = profileSummary?.consent_preview?.max_release_level;
 
   const filteredItems = useMemo(() => {
     if (!feed) return [];
@@ -150,6 +196,8 @@ export function ActivityHome({
     }
   }
 
+  const briefingLoading = todayLoading && !today;
+
   return (
     <div className="mt-6 space-y-6">
       <section className="rounded-2xl border border-primary/20 bg-gradient-to-br from-primary/5 to-card p-4">
@@ -157,35 +205,79 @@ export function ActivityHome({
           <h2 className="inline-flex items-center gap-1.5 font-medium">
             <Sparkles className="size-4 text-primary" /> Today
           </h2>
-          {activeProfileName && (
-            <span className="text-xs text-muted-foreground">{activeProfileName}</span>
-          )}
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {activeProfileName && <span>{activeProfileName}</span>}
+            {profileSummary && (
+              <span>
+                {profileSummary.counts.sources} sources · {profileSummary.counts.chunks} chunks
+              </span>
+            )}
+          </div>
         </div>
-        {todayLoading && !today ? (
+        {briefingLoading ? (
           <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" /> Loading briefing…
           </div>
         ) : (
-          <div className="mt-3 space-y-2 text-sm">
+          <div className="mt-3 space-y-3 text-sm">
             {sessionBriefing ? (
               <p className="text-foreground">{sessionBriefing}</p>
             ) : (
               <p className="text-muted-foreground">
                 {displayName ? `Welcome back, ${displayName}.` : "Welcome back."}{" "}
-                {attentionLine ? `Recent focus: ${attentionLine}.` : "Your memory is ready to search."}
+                {focusLine ? `Recent focus: ${focusLine}.` : "Your memory is ready to search."}
               </p>
             )}
-            {feed?.now && (
-              <p className="text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">Now:</span> {feed.now.title}
-              </p>
-            )}
-            <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-              {issueCount > 0 && <span>{issueCount} issue{issueCount === 1 ? "" : "s"} need attention</span>}
-              {pendingWork > 0 && <span>{pendingWork} suggested task{pendingWork === 1 ? "" : "s"}</span>}
-              {today?.work_items?.open?.length ? (
-                <span>{today.work_items.open.length} open work item{today.work_items.open.length === 1 ? "" : "s"}</span>
-              ) : null}
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              {focusLine && (
+                <div className="rounded-lg bg-background/60 px-3 py-2 text-xs">
+                  <span className="font-medium text-foreground">Focus</span>
+                  <p className="mt-0.5 truncate text-muted-foreground">{focusLine}</p>
+                </div>
+              )}
+              {graphHighlight && (
+                <button
+                  type="button"
+                  onClick={onNavigateGraph}
+                  className="rounded-lg bg-background/60 px-3 py-2 text-left text-xs hover:bg-accent/40"
+                >
+                  <span className="font-medium text-foreground">Graph highlight</span>
+                  <p className="mt-0.5 truncate text-muted-foreground">{graphHighlight}</p>
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              {candidateCount > 0 && (
+                <button
+                  type="button"
+                  onClick={onNavigateGraph}
+                  className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2.5 py-1 text-xs text-violet-700 dark:text-violet-300 hover:bg-violet-500/20"
+                >
+                  {candidateCount} graph question{candidateCount === 1 ? "" : "s"}
+                </button>
+              )}
+              {(pendingWork > 0 || openWork > 0 || reviewWork > 0) && (
+                <button
+                  type="button"
+                  onClick={onNavigateWork ?? onNavigateGraph}
+                  className="rounded-full border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-700 dark:text-blue-300 hover:bg-blue-500/20"
+                >
+                  {openWork + reviewWork + pendingWork} work item
+                  {openWork + reviewWork + pendingWork === 1 ? "" : "s"}
+                </button>
+              )}
+              {issueCount > 0 && (
+                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-700 dark:text-amber-300">
+                  {issueCount} issue{issueCount === 1 ? "" : "s"} need attention
+                </span>
+              )}
+              {consentLevel != null && (
+                <span className="rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground">
+                  Consent level {consentLevel}/5
+                </span>
+              )}
             </div>
           </div>
         )}
@@ -231,7 +323,7 @@ export function ActivityHome({
         ) : feedError ? (
           <div className="py-8 text-center">
             <p className="text-sm text-muted-foreground">{feedError}</p>
-            <button type="button" onClick={() => void loadFeed()} className="mt-2 text-sm text-primary hover:underline">
+            <button type="button" onClick={() => void loadBriefing()} className="mt-2 text-sm text-primary hover:underline">
               Retry
             </button>
           </div>

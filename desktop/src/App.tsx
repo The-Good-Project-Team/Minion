@@ -1122,6 +1122,7 @@ export function App() {
               sources={sources}
               onReveal={handleReveal}
               onNavigateGraph={() => setCurrentTab("graph")}
+              onNavigateWork={() => setCurrentTab("work")}
             />
 
             <div className="mt-4">
@@ -1276,7 +1277,7 @@ export function App() {
         )}
 
         {/* identity mirror */}
-        <IdentityMirror sidecarReady={sidecar?.state === "ready"} />
+        <IdentityMirror sidecarReady={sidecar?.state === "ready"} onReveal={handleReveal} />
 
         {/* connector checklist */}
         <section className="mt-6 rounded-2xl border border-border bg-card p-4">

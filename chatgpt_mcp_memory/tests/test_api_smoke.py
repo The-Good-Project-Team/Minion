@@ -695,6 +695,39 @@ def test_identity_mirror(sidecar) -> None:
     assert "history" in body and isinstance(body["history"], list)
 
 
+def test_identity_history_and_revert(sidecar) -> None:
+    old = sidecar.post(
+        "/identity/claims/propose",
+        {"kind": "preference", "text": "Prefer morning deep work blocks."},
+    )
+    assert old.status_code == 200, old.text
+    old_id = old.json()["claim_id"]
+
+    new = sidecar.post(
+        "/identity/claims/propose",
+        {"kind": "preference", "text": "Prefer evening deep work blocks."},
+    )
+    assert new.status_code == 200, new.text
+    new_id = new.json()["claim_id"]
+
+    sidecar.patch(f"/identity/claims/{new_id}", {"status": "active"}).raise_for_status()
+    sidecar.patch(
+        f"/identity/claims/{old_id}",
+        {"status": "superseded", "superseded_by": new_id},
+    ).raise_for_status()
+
+    hist = sidecar.get("/identity/history", params={"claim_id": old_id}).json()
+    assert hist["count"] >= 1
+    assert any(c["claim_id"] == old_id for c in hist["history"])
+
+    reverted = sidecar.post("/identity/revert", {"claim_id": old_id})
+    assert reverted.status_code == 200, reverted.text
+    body = reverted.json()
+    assert body["ok"] is True
+    assert body["reverted_claim"]["status"] == "active"
+    assert body["superseded_claim"]["status"] == "superseded"
+
+
 # ---------------------------------------------------------------------------
 # 10. Bulk DELETE /sources by kind
 # ---------------------------------------------------------------------------
