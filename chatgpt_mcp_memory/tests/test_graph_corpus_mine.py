@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 import os
-import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from ingest import _embed, _get_model
+import graph_corpus_mine as graph_mine_mod
 from graph_corpus_mine import (
     graph_mine_status,
     maybe_run_query_graph_mine,
@@ -163,21 +164,29 @@ def test_query_graph_mine_has_smart_limits(conn, tmp_path: Path) -> None:
     assert third["status"] == "deferred"
 
 
-def test_schedule_background_graph_mine_nonblocking(tmp_path: Path) -> None:
+def test_schedule_background_graph_mine_nonblocking(tmp_path: Path, monkeypatch) -> None:
+    """Background worker must finish without blocking the caller (CI-safe: no concurrent DB init)."""
+    monkeypatch.setenv("MINION_SQLITE_JOURNAL", "delete")
+    db = tmp_path / "memory.db"
+    boot = connect(db)
+    seed_sync_sources(boot)
+    boot.commit()
+    boot.close()
+
     saved = _without_gemini_env()
     try:
         out = schedule_background_graph_mine(tmp_path)
         assert out["status"] == "scheduled"
-        deadline = threading.Event()
-        for _ in range(30):
-            c = connect(tmp_path / "memory.db")
-            try:
-                if meta_get(c, "graph_mine_last_periodic"):
-                    deadline.set()
-                    break
-            finally:
-                c.close()
-            deadline.wait(0.1)
-        assert deadline.is_set()
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and graph_mine_mod._bg_running:
+            time.sleep(0.05)
+        assert not graph_mine_mod._bg_running, "background graph mine thread did not finish"
+
+        verify = connect(db)
+        try:
+            assert meta_get(verify, "graph_mine_last_periodic")
+        finally:
+            verify.close()
     finally:
         _restore_env(saved)
