@@ -729,6 +729,7 @@ class SearchBody(BaseModel):
     since: Optional[float] = None
     max_chars: int = Field(default=600, ge=50, le=4000)
     profile_id: Optional[str] = None
+    all_profiles: bool = False
 
 
 class IngestBody(BaseModel):
@@ -1562,12 +1563,15 @@ def _embed_search_results(
     role: Optional[str],
     max_chars: int,
     profile_id: Optional[str] = None,
+    *,
+    all_profiles: bool = False,
 ) -> List[Dict[str, Any]]:
     conn = State.conn()
-    if profile_id is None:
-        from store import profile_get_active
+    if not all_profiles:
+        if profile_id is None:
+            from store import profile_get_active
 
-        profile_id = profile_get_active(conn)
+            profile_id = profile_get_active(conn)
     model = _get_query_model()
     from ingest import apply_query_prefix
 
@@ -1627,6 +1631,7 @@ def _embed_search_results(
                 "text": text,
                 "meta": h.meta,
                 "storage_tier": getattr(h, "storage_tier", None) or "hot",
+                "profile_id": getattr(h, "profile_id", None),
             }
         )
     try:
@@ -1665,7 +1670,14 @@ def _embed_search_results(
 
 
 @app.post("/search")
-def search_endpoint(body: SearchBody) -> Dict[str, Any]:
+def search_endpoint(body: SearchBody, request: Request) -> Dict[str, Any]:
+    all_profiles = bool(body.all_profiles or (body.profile_id or "").strip().lower() == "all")
+    if all_profiles and not _is_loopback_client(request):
+        raise HTTPException(
+            status_code=403,
+            detail="cross-profile search is allowed from loopback clients only",
+        )
+    scope_profile = None if all_profiles else body.profile_id
     return {
         "results": _embed_search_results(
             body.query,
@@ -1675,8 +1687,10 @@ def search_endpoint(body: SearchBody) -> Dict[str, Any]:
             body.since,
             body.role,
             body.max_chars,
-            profile_id=body.profile_id,
-        )
+            profile_id=scope_profile,
+            all_profiles=all_profiles,
+        ),
+        "all_profiles": all_profiles,
     }
 
 
@@ -3122,6 +3136,8 @@ def maintenance_lifecycle_status() -> Dict[str, Any]:
 
 @app.post("/maintenance/storage-report")
 def maintenance_storage_report() -> Dict[str, Any]:
+    from store import sync_job_runs_recent
+
     conn = State.conn()
     row = conn.execute("SELECT COUNT(*) AS n FROM ambient_events").fetchone()
     amb_count = int(row["n"]) if row else 0
@@ -3129,6 +3145,7 @@ def maintenance_storage_report() -> Dict[str, Any]:
         "chunk_storage_tiers": chunk_storage_tier_counts(conn),
         "ambient_event_count": amb_count,
         "sqlite": sqlite_storage_fingerprint(conn),
+        "sync_job_runs": sync_job_runs_recent(conn, limit=8),
         "note": "Compaction tiers are metadata-first; sqlite.freelist_bytes_approx is reclaimable "
         "only after an offline VACUUM. Cold offload hooks land behind policy.",
     }

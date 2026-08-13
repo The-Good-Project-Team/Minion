@@ -55,6 +55,7 @@ export type SearchHit = {
   meta?: Record<string, unknown>;
   /** Chunk storage tier (hot / warm / cold); retrieval ordering bias only today. */
   storage_tier?: string;
+  profile_id?: string | null;
 };
 
 export type Active = {
@@ -307,7 +308,8 @@ export async function search(body: {
   kind?: string;
   path_glob?: string;
   profile_id?: string;
-}): Promise<{ results: SearchHit[] }> {
+  all_profiles?: boolean;
+}): Promise<{ results: SearchHit[]; all_profiles?: boolean }> {
   return apiFetch("/search", {
     method: "POST",
     body: JSON.stringify(body),
@@ -502,6 +504,15 @@ export type StorageMaintenanceReport = {
   ambient_event_count: number;
   note: string;
   sqlite?: SqliteStorageFootprint;
+  sync_job_runs?: Array<{
+    run_id: string;
+    source_key: string;
+    status: string;
+    started_at: number;
+    finished_at: number | null;
+    items_count: number;
+    error: string | null;
+  }>;
 };
 
 /** Chunk tier counts + ambient row count (compaction is metadata-first today). */
@@ -539,6 +550,34 @@ export async function postMaintenanceStorageTierPromoteStale(body: {
       to_tier: body.to_tier ?? "warm",
     }),
   });
+}
+
+export type ChunkDeduplicateResult = {
+  dry_run: boolean;
+  duplicates_found: number;
+  duplicates_removed: number;
+  min_chunk_age_days: number;
+  chunk_storage_tiers?: Record<string, number>;
+};
+
+export async function postMaintenanceChunkDeduplicate(body: {
+  min_chunk_age_days?: number;
+  dry_run?: boolean;
+} = {}): Promise<ChunkDeduplicateResult> {
+  return apiFetch("/maintenance/chunk-deduplicate", {
+    method: "POST",
+    body: JSON.stringify({
+      min_chunk_age_days: body.min_chunk_age_days ?? 7,
+      dry_run: body.dry_run ?? true,
+    }),
+  });
+}
+
+export async function postMaintenanceRunCompaction(): Promise<{
+  results: Record<string, unknown>;
+  chunk_storage_tiers: Record<string, number>;
+}> {
+  return apiFetch("/maintenance/run-compaction", { method: "POST", body: "{}" });
 }
 
 /** Full inbox scan → DB. Use `force: true` to re-embed even when sha unchanged (slow). */
@@ -2083,7 +2122,13 @@ export async function testWorkflow(query = "test"): Promise<TestWorkflowResult> 
   });
 }
 
-export async function fetchHealth(): Promise<{ sync_sources: unknown[]; open_issues: SystemIssue[] }> {
+export async function fetchHealth(): Promise<{
+  status?: string;
+  sync_sources: unknown[];
+  open_issues: SystemIssue[];
+  database?: DatabaseStatus;
+  watcher?: { running: boolean; mode?: string };
+}> {
   return apiFetch("/health");
 }
 

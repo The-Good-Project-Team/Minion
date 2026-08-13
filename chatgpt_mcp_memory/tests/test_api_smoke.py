@@ -143,6 +143,26 @@ def test_maintenance_storage_report(sidecar) -> None:
     assert "page_count" in sq and int(sq["page_count"]) >= 1
     assert "freelist_ratio" in sq
     assert "Compaction" in body["note"] or "metadata" in body["note"].lower()
+    assert "sync_job_runs" in body and isinstance(body["sync_job_runs"], list)
+
+
+def test_search_all_profiles_loopback(sidecar, staged_note: Path) -> None:
+    sidecar.post("/ingest", {"path": str(staged_note)}).raise_for_status()
+    sidecar.wait_for_sources(1, timeout=45.0)
+    r = sidecar.post("/search", {"query": "Good Capital", "top_k": 5, "all_profiles": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("all_profiles") is True
+    assert isinstance(body.get("results"), list)
+
+
+def test_health_summary_shape(sidecar) -> None:
+    r = sidecar.get("/health")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "database" in body
+    assert "watcher" in body
+    assert "open_issues" in body
 
 
 @pytest.mark.skip(reason="Flaky HTTP timeout in CI environment")

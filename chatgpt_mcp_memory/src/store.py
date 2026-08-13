@@ -1620,7 +1620,8 @@ def search(
     sql = [
         f"SELECT c.rowid AS rid, c.chunk_id, c.source_id, c.role, c.text, c.meta_json, "
         f"s.path, s.kind, s.mtime, s.meta_json AS source_meta_json, "
-        f"COALESCE(c.storage_tier, 'hot') AS storage_tier "
+        f"COALESCE(c.storage_tier, 'hot') AS storage_tier, "
+        f"COALESCE(s.profile_id, 'default') AS profile_id "
         f"FROM chunks c JOIN sources s ON s.source_id = c.source_id "
         f"WHERE c.rowid IN ({placeholders})"
     ]
@@ -1678,6 +1679,7 @@ def search(
                 meta=json.loads(r["meta_json"] or "{}"),
                 source_meta=json.loads(r["source_meta_json"] or "{}"),
                 storage_tier=storage_tier,
+                profile_id=str(r["profile_id"] or "default"),
             )
         )
     return hits
@@ -1816,6 +1818,7 @@ def keyword_search(
         "SELECT c.chunk_id, c.source_id, c.role, c.text, c.meta_json, "
         "s.path, s.kind, s.mtime, s.meta_json AS source_meta_json, "
         "COALESCE(c.storage_tier, 'hot') AS storage_tier, "
+        "COALESCE(s.profile_id, 'default') AS profile_id, "
         "bm25(fts_chunks) AS rank "
         "FROM fts_chunks "
         "JOIN chunks c ON c.rowid = fts_chunks.rowid "
@@ -1874,6 +1877,7 @@ def keyword_search(
                 meta=json.loads(r["meta_json"] or "{}"),
                 source_meta=json.loads(r["source_meta_json"] or "{}"),
                 storage_tier=storage_tier,
+                profile_id=str(r["profile_id"] or "default"),
             )
         )
     return hits

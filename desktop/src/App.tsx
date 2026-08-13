@@ -24,6 +24,8 @@ import { IdentityMirror } from "./components/IdentityMirror";
 import { ProfileSwitcher } from "./components/ProfileSwitcher";
 import { ExportSchedulerConfig } from "./components/ExportSchedulerConfig";
 import { ActivityHome } from "./components/ActivityHome";
+import { NeedsAttentionStrip } from "./components/NeedsAttentionStrip";
+import { StorageLifecyclePanel } from "./components/StorageLifecyclePanel";
 import { GraphCandidateInbox } from "./components/GraphCandidateInbox";
 import { WorkQueue } from "./components/WorkQueue";
 import { formatFeedTime } from "./lib/feedUtils";
@@ -393,6 +395,8 @@ function SettingsView({
       <section className="rounded-2xl border border-border bg-card p-4">
         <ExportSchedulerConfig />
       </section>
+
+      <StorageLifecyclePanel />
 
       {/* Audit Log */}
       <section className="rounded-2xl border border-border bg-card p-4">
@@ -1072,6 +1076,13 @@ export function App() {
             </div>
           </div>
         </header>
+
+        <div className="mt-4">
+          <NeedsAttentionStrip
+            sidecarReady={sidecar?.state === "ready"}
+            onOpenSettings={() => setCurrentTab("settings")}
+          />
+        </div>
 
         {mcpReconnectApps.length > 0 && (
           <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-50/80 p-3 text-sm text-amber-950 dark:bg-amber-950/30 dark:text-amber-100">
